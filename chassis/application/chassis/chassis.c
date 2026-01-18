@@ -61,7 +61,7 @@ void ChassisInit()
 {
     // 四个轮子的参数一样,改tx_id和反转标志位即可
     Motor_Init_Config_s chassis_motor_config = {
-        .can_init_config.can_handle = &hcan1,
+        .can_init_config.can_handle = &hcan2,
         .controller_param_init_config = {
             .speed_PID = {
                 .Kp = 4.5, // 4.5
@@ -141,34 +141,36 @@ void ChassisInit()
  */
 static void MecanumCalculate()
 {
-    // 1. 还原物理速度 (m/s)
-    float real_vx = chassis_vx * MAX_CHASSIS_VX_SPEED;
-    float real_vy = chassis_vy * MAX_CHASSIS_VY_SPEED;
+    // 1. 获取输入 (已经是 m/s 了，因为遥控器那边乘过了)
+    float vx = chassis_vx;
+    float vy = chassis_vy;
 
-    // 2. 旋转速度处理 (deg/s)
-    // 假设 MAX_CHASSIS_WZ_SPEED 是 360.0f
-    float real_wz = chassis_cmd_recv.wz * MAX_CHASSIS_WZ_SPEED; // 如果 wz 也是比例，则需 * MAX_CHASSIS_WZ_SPEED
+    // 2. 旋转速度 (deg/s)
+    // 注意：robot_cmd 里发过来的 wz 建议是物理值 (deg/s)，比如直接发 200.0f
+    // 如果发过来的是比例 (1.0)，这里要乘 MAX_CHASSIS_WZ_SPEED
+    float wz = chassis_cmd_recv.wz;
 
-    // 3. 关键修正：直接相乘！``                
-    // deg/s * (m * rad/deg) = m/s
-    float v_rotation_lf = real_wz * LF_CENTER;
-    float v_rotation_rf = real_wz * RF_CENTER;
-    float v_rotation_lb = real_wz * LB_CENTER;
-    float v_rotation_rb = real_wz * RB_CENTER;
+    // 3. 计算旋转产生的线速度 (m/s)
+    // LF_CENTER 宏里已经包含了转换系数
+    float v_rot_lf = wz * LF_CENTER;
+    float v_rot_rf = wz * RF_CENTER;
+    float v_rot_lb = wz * LB_CENTER;
+    float v_rot_rb = wz * RB_CENTER;
 
-    // 4. 麦轮解算 (m/s)
-    float v_lf_m_s = -real_vx - real_vy - v_rotation_lf;
-    float v_rf_m_s = -real_vx + real_vy - v_rotation_rf;
-    float v_lb_m_s = real_vx - real_vy - v_rotation_lb;
-    float v_rb_m_s = real_vx + real_vy - v_rotation_rb;
+    //
+    // 假设电机安装方向逻辑是：前轮负为前，后轮正为前（根据您原代码推断）
+    // 必须有加有减才能旋转！
+    float v_lf_m_s = -vx - vy + v_rot_lf; // 左前: 旋转给正 (后退)
+    float v_rf_m_s = -vx + vy - v_rot_rf; // 右前: 旋转给负 (前进) -> 形成逆时针转
+    float v_lb_m_s = vx - vy - v_rot_lb; // 左后: 旋转给负 (后退)
+    float v_rb_m_s = vx + vy + v_rot_rb; // 右后: 旋转给正 (前进)
 
-    // 5. 单位转换 (m/s -> 电机需要的 deg/s)
+    // 5. ✅ 单位转换 (关键！把 3.0 m/s 变成 ~2000 deg/s)
     vt_lf = v_lf_m_s * CHASSIS_M_TO_DEG;
     vt_rf = v_rf_m_s * CHASSIS_M_TO_DEG;
     vt_lb = v_lb_m_s * CHASSIS_M_TO_DEG;
     vt_rb = v_rb_m_s * CHASSIS_M_TO_DEG;
 }
-
 /**
  * @brief 根据裁判系统和电容剩余容量对输出进行限制并设置电机参考值
  *

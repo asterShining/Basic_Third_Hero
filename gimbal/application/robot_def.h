@@ -183,9 +183,9 @@ typedef struct
     // attitude_t chassis_imu_data;
 #endif
     // 后续增加底盘的真实速度
-    // float real_vx;
-    // float real_vy;
-    // float real_wz;
+    float real_vx;
+    float real_vy;
+    float real_wz;
 
     uint8_t rest_heat; // 剩余枪口热量
     Bullet_Speed_e bullet_speed; // 弹速限制

@@ -22,8 +22,7 @@
  * @brief 闭环类型,如果需要多个闭环,则使用或运算
  *        例如需要速度环和电流环: CURRENT_LOOP|SPEED_LOOP
  */
-typedef enum
-{
+typedef enum {
     OPEN_LOOP = 0b0000,
     CURRENT_LOOP = 0b0001,
     SPEED_LOOP = 0b0010,
@@ -35,8 +34,7 @@ typedef enum
     ALL_THREE_LOOP = 0b0111,
 } Closeloop_Type_e;
 
-typedef enum
-{
+typedef enum {
     FEEDFORWARD_NONE = 0b00,
     CURRENT_FEEDFORWARD = 0b01,
     SPEED_FEEDFORWARD = 0b10,
@@ -44,27 +42,23 @@ typedef enum
 } Feedfoward_Type_e;
 
 /* 反馈来源设定,若设为OTHER_FEED则需要指定数据来源指针,详见Motor_Controller_s*/
-typedef enum
-{
+typedef enum {
     MOTOR_FEED = 0,
     OTHER_FEED,
 } Feedback_Source_e;
 
 /* 电机正反转标志 */
-typedef enum
-{
+typedef enum {
     MOTOR_DIRECTION_NORMAL = 0,
     MOTOR_DIRECTION_REVERSE = 1
 } Motor_Reverse_Flag_e;
 
 /* 反馈量正反标志 */
-typedef enum
-{
+typedef enum {
     FEEDBACK_DIRECTION_NORMAL = 0,
     FEEDBACK_DIRECTION_REVERSE = 1
 } Feedback_Reverse_Flag_e;
-typedef enum
-{
+typedef enum {
     MOTOR_STOP = 0,
     MOTOR_ENALBED = 1,
 } Motor_Working_Type_e;
@@ -72,13 +66,13 @@ typedef enum
 /* 电机控制设置,包括闭环类型,反转标志和反馈来源 */
 typedef struct
 {
-    Closeloop_Type_e outer_loop_type;              // 最外层的闭环,未设置时默认为最高级的闭环
-    Closeloop_Type_e close_loop_type;              // 使用几个闭环(串级)
-    Motor_Reverse_Flag_e motor_reverse_flag;       // 是否反转
+    Closeloop_Type_e outer_loop_type; // 最外层的闭环,未设置时默认为最高级的闭环
+    Closeloop_Type_e close_loop_type; // 使用几个闭环(串级)
+    Motor_Reverse_Flag_e motor_reverse_flag; // 是否反转
     Feedback_Reverse_Flag_e feedback_reverse_flag; // 反馈是否反向
-    Feedback_Source_e angle_feedback_source;       // 角度反馈类型
-    Feedback_Source_e speed_feedback_source;       // 速度反馈类型
-    Feedfoward_Type_e feedforward_flag;            // 前馈标志
+    Feedback_Source_e angle_feedback_source; // 角度反馈类型
+    Feedback_Source_e speed_feedback_source; // 速度反馈类型
+    Feedfoward_Type_e feedforward_flag; // 前馈标志
 
 } Motor_Control_Setting_s;
 
@@ -99,14 +93,15 @@ typedef struct
 } Motor_Controller_s;
 
 /* 电机类型枚举 */
-typedef enum
-{
+typedef enum {
     MOTOR_TYPE_NONE = 0,
     GM6020,
     M3508,
     M2006,
     LK9025,
     HT04,
+    J8006,
+    J4310
 } Motor_Type_e;
 
 /**
@@ -119,7 +114,7 @@ typedef struct
     float *other_angle_feedback_ptr; // 角度反馈数据指针,注意电机使用total_angle
     float *other_speed_feedback_ptr; // 速度反馈数据指针,单位为angle per sec
 
-    float *speed_feedforward_ptr;   // 速度前馈数据指针
+    float *speed_feedforward_ptr; // 速度前馈数据指针
     float *current_feedforward_ptr; // 电流前馈数据指针
 
     PID_Init_Config_s current_PID;

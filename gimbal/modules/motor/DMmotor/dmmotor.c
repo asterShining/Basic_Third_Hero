@@ -31,6 +31,14 @@ static void DMMotorSetMode(DMMotor_Mode_e cmd, DMMotorInstance *motor)
     motor->motor_can_instace->tx_buff[7] = (uint8_t)cmd; // 最后一位是命令id
     CANTransmit(motor->motor_can_instace, 1);
 }
+void DMMotorChangeFeed(DMMotorInstance *motor, Closeloop_Type_e loop, Feedback_Source_e type)
+{
+    if (loop == ANGLE_LOOP)
+        motor->motor_settings.angle_feedback_source = type;
+    else if (loop == SPEED_LOOP)
+        motor->motor_settings.speed_feedback_source = type;
+    // DM电机通常不需要像DJI那样检查指针越界，因为结构体是一样的
+}
 
 static void DMMotorDecode(CANInstance *motor_can)
 {

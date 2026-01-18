@@ -125,26 +125,51 @@ void RobotCMDInit()
  *        单圈绝对角度的范围是0~360,说明文档中有图示
  *
  */
+// static void CalcOffsetAngle()
+// {
+//     // 别名angle提高可读性,不然太长了不好看,虽然基本不会动这个函数
+//     static float angle;
+//     angle = gimbal_fetch_data.yaw_motor_single_round_angle; // 从云台获取的当前yaw电机单圈角度
+// #if YAW_ECD_GREATER_THAN_4096 // 如果大于180度
+//     if (angle > YAW_ALIGN_ANGLE && angle <= 180.0f + YAW_ALIGN_ANGLE)
+//         chassis_cmd_send.offset_angle = angle - YAW_ALIGN_ANGLE;
+//     else if (angle > 180.0f + YAW_ALIGN_ANGLE)
+//         chassis_cmd_send.offset_angle = angle - YAW_ALIGN_ANGLE - 360.0f;
+//     else
+//         chassis_cmd_send.offset_angle = angle - YAW_ALIGN_ANGLE;
+// #else // 小于180度
+//     if (angle > YAW_ALIGN_ANGLE)
+//         chassis_cmd_send.offset_angle = angle - YAW_ALIGN_ANGLE;
+//     else if (angle <= YAW_ALIGN_ANGLE && angle >= YAW_ALIGN_ANGLE - 180.0f)
+//         chassis_cmd_send.offset_angle = angle - YAW_ALIGN_ANGLE;
+//     else
+//         chassis_cmd_send.offset_angle = angle - YAW_ALIGN_ANGLE + 360.0f;
+// #endif
+// }
 static void CalcOffsetAngle()
 {
-    // 别名angle提高可读性,不然太长了不好看,虽然基本不会动这个函数
-    static float angle;
-    angle = gimbal_fetch_data.yaw_motor_single_round_angle; // 从云台获取的当前yaw电机单圈角度
-#if YAW_ECD_GREATER_THAN_4096 // 如果大于180度
-    if (angle > YAW_ALIGN_ANGLE && angle <= 180.0f + YAW_ALIGN_ANGLE)
-        chassis_cmd_send.offset_angle = angle - YAW_ALIGN_ANGLE;
-    else if (angle > 180.0f + YAW_ALIGN_ANGLE)
-        chassis_cmd_send.offset_angle = angle - YAW_ALIGN_ANGLE - 360.0f;
-    else
-        chassis_cmd_send.offset_angle = angle - YAW_ALIGN_ANGLE;
-#else // 小于180度
-    if (angle > YAW_ALIGN_ANGLE)
-        chassis_cmd_send.offset_angle = angle - YAW_ALIGN_ANGLE;
-    else if (angle <= YAW_ALIGN_ANGLE && angle >= YAW_ALIGN_ANGLE - 180.0f)
-        chassis_cmd_send.offset_angle = angle - YAW_ALIGN_ANGLE;
-    else
-        chassis_cmd_send.offset_angle = angle - YAW_ALIGN_ANGLE + 360.0f;
-#endif
+    // 获取你在 gimbal.c 中计算出的 0~360 度角度
+    float angle_deg = gimbal_fetch_data.yaw_motor_single_round_angle;
+
+    // DM电机通常上电归零，所以偏移量设为0；如果需要机械对齐，可修改 YAW_ALIGN_ANGLE
+    float align_offset = 0.0f;
+    // 或者保留宏定义： float align_offset = YAW_CHASSIS_ALIGN_ECD * ECD_ANGLE_COEF_DJI; (需确保宏转换正确)
+
+    // 1. 计算原始偏差
+    float error = angle_deg - align_offset;
+
+    // 2. 归一化到 0~360
+    while (error < 0.0f)
+        error += 360.0f;
+    while (error >= 360.0f)
+        error -= 360.0f;
+
+    // 3. 转换为 -180 ~ +180 范围 (最短路径逻辑)
+    if (error > 180.0f) {
+        chassis_cmd_send.offset_angle = error - 360.0f; // 例如 350 -> -10
+    } else {
+        chassis_cmd_send.offset_angle = error; // 例如 10 -> 10
+    }
 }
 
 /**
