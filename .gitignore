@@ -1,0 +1,40 @@
+# --- 编译输出目录 ---
+build/
+bin/
+obj/
+
+# --- Clangd 索引与缓存 (最上面的 .idx 文件) ---
+.cache/
+.clangd/
+
+# --- Ninja 编译日志与依赖 ---
+.ninja_deps
+.ninja_log
+
+# --- 常见的 C/C++ 编译中间产物 ---
+*.o
+*.obj
+*.d
+*.su
+*.idx
+
+# --- 目标文件 (可执行文件、镜像) ---
+*.elf
+*.map
+*.hex
+*.bin
+*.out
+
+# --- CMake 产生的缓存文件 ---
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+
+# --- 编译器产生的临时文件 ---
+*.tmp
+*.bak
+
+# --- 操作系统/IDE 相关 ---
+.DS_Store
+.vscode/

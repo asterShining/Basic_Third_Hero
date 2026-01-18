@@ -1,0 +1,101 @@
+ColumnLimit:        0  # 列宽限制，0 表示不限制
+AccessModifierOffset: -4  # 访问修饰符的偏移量，即子类的访问修饰符相对于父类的偏移量
+AlignAfterOpenBracket: Align # 在左括号后对齐，即若左括号后有多行参数，参数对齐在左括号后
+AlignConsecutiveAssignments: false  # 连续赋值对齐，当有多个连续赋值时，是否对齐
+AlignConsecutiveDeclarations: false # 连续声明对齐，当有多个连续声明时，是否对齐
+AlignEscapedNewlines: Left  # 转义换行符(\)对齐
+AlignOperands: true # 操作数对齐
+AlignTrailingComments: false  # 尾注释对齐
+AllowAllParametersOfDeclarationOnNextLine: false  # 允许在下一行声明所有参数
+AllowShortBlocksOnASingleLine: false  # 允许单行短块
+AllowShortCaseLabelsOnASingleLine: false  # 允许单行短 case 标签
+AllowShortFunctionsOnASingleLine: None # 允许单行短函数
+AllowShortIfStatementsOnASingleLine: false # 允许单行短 if 语句
+AllowShortLoopsOnASingleLine: false # 允许单行短循环
+AlwaysBreakAfterDefinitionReturnType: None # 总是在定义后换行返回类型
+AlwaysBreakAfterReturnType: None # 总是在返回类型后换行
+AlwaysBreakBeforeMultilineStrings: false # 总是在多行字符串前换行
+AlwaysBreakTemplateDeclarations: false # 总是在模板声明前换行
+BinPackArguments: true  # 参数打包
+BinPackParameters: true # 参数打包
+BraceWrapping:  # 大括号包装
+  AfterClass: false             # 类后
+  AfterControlStatement: false  # 控制语句后
+  AfterEnum: false              # 枚举后
+  AfterFunction: true           # 函数后
+  AfterNamespace: true          # 命名空间后
+  AfterObjCDeclaration: false   # ObjC 声明后
+  AfterStruct: false            # 结构体后
+  AfterUnion: false             # 联合体后  
+  AfterExternBlock: false       # 外部块后
+  BeforeCatch: false            # catch 前
+  BeforeElse: false             # else 前
+  IndentBraces: false           # 缩进大括号
+  SplitEmptyFunction: true      # 分割空函数
+  SplitEmptyRecord: true        # 分割空记录
+  SplitEmptyNamespace: true     # 分割空命名空间
+BreakBeforeBinaryOperators: None  # 二元操作符前换行
+BreakBeforeBraces: Custom # 大括号前换行
+BreakBeforeInheritanceComma: false  # 继承逗号前换行
+BreakBeforeTernaryOperators: false  # 三元操作符前换行
+BreakConstructorInitializersBeforeComma: false  # 构造函数初始化器逗号前换行
+BreakConstructorInitializers: BeforeComma # 构造函数初始化器前换行
+BreakAfterJavaFieldAnnotations: false # Java 字段注解后换行
+BreakStringLiterals: false  # 字符串字面量换行
+CompactNamespaces: false  # 紧凑命名空间
+ConstructorInitializerAllOnOneLineOrOnePerLine: false # 构造函数初始化器全部在一行或每行一个
+ConstructorInitializerIndentWidth: 4  # 构造函数初始化器缩进宽度
+ContinuationIndentWidth: 4  # 续行缩进宽度
+Cpp11BracedListStyle: false # C++11 大括号列表样式
+DerivePointerAlignment: false # 指针对齐
+ExperimentalAutoDetectBinPacking: false # 实验性自动检测打包
+FixNamespaceComments: false # 修复命名空间注释
+IncludeBlocks: Preserve # 包含块
+IncludeCategories:  # 包含类别
+  - Regex: '.*' # 正则表达式
+    Priority: 1 # 优先级
+IndentCaseLabels: false # 缩进 case 标签
+IndentGotoLabels: false # 缩进 goto 标签
+IndentPPDirectives: None  # 缩进预处理指令
+IndentWidth: 4  # 缩进宽度
+IndentWrappedFunctionNames: false # 缩进包装函数名
+JavaScriptQuotes: Leave # JavaScript 引号
+JavaScriptWrapImports: true # JavaScript 包装导入
+KeepEmptyLinesAtTheStartOfBlocks: false # 保留块开头的空行
+MacroBlockBegin: '' # 宏块开始
+MacroBlockEnd: '' # 宏块结束
+MaxEmptyLinesToKeep: 1  # 保留的最大空行数
+NamespaceIndentation: None  # 命名空间缩进
+ObjCBinPackProtocolList: Auto # ObjC 打包协议列表
+ObjCBlockIndentWidth: 4 # ObjC 块缩进宽度
+ObjCSpaceAfterProperty: true  # ObjC 属性后空格
+ObjCSpaceBeforeProtocolList: true # ObjC 协议列表前空格
+
+# Taken from git's rules
+PenaltyBreakAssignment: 10  # 换行赋值
+PenaltyBreakBeforeFirstCallParameter: 30  # 第一个调用参数前换行
+PenaltyBreakComment: 10 # 换行注释
+PenaltyBreakFirstLessLess: 0  # 第一个左移换行
+PenaltyBreakString: 10  # 换行字符串
+PenaltyExcessCharacter: 100 # 多余字符
+PenaltyReturnTypeOnItsOwnLine: 100 # 返回类型在自己的行上
+PointerAlignment: Right # 指针对齐
+ReflowComments: true # 重新流动注释
+SortIncludes: false # 排序 include 文件
+SortUsingDeclarations: false  # 排序使用声明
+SpaceAfterCStyleCast: false # C 风格转换后空格
+SpaceAfterTemplateKeyword: true # 模板关键字后空格
+SpaceBeforeAssignmentOperators: true  # 赋值操作符前空格
+SpaceBeforeCtorInitializerColon: true # 构造函数初始化器冒号前空格
+SpaceBeforeInheritanceColon: true  # 继承冒号前空格
+SpaceBeforeParens: ControlStatementsExceptForEachMacros   # 括号前空格
+SpaceBeforeRangeBasedForLoopColon: true # 基于范围的 for 循环冒号前空格
+SpaceInEmptyParentheses: false  # 空括号中空格
+SpacesBeforeTrailingComments: 1 # 尾注释前空格
+SpacesInAngles: false # 尖括号中空格
+SpacesInContainerLiterals: false  # 容器文字中空格
+SpacesInCStyleCastParentheses: false  # C 风格转换括号中空格
+SpacesInParentheses: false  # 括号中空格
+SpacesInSquareBrackets: false # 方括号中空格
+TabWidth: 4 # 制表符宽度
+UseTab: false # 使用制表符
