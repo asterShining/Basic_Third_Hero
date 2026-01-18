@@ -23,25 +23,25 @@
 static CANCommInstance *cmd_can_comm; // 双板通信
 #endif
 #ifdef ONE_BOARD
-static Publisher_t *chassis_cmd_pub;   // 底盘控制消息发布者
+static Publisher_t *chassis_cmd_pub; // 底盘控制消息发布者
 static Subscriber_t *chassis_feed_sub; // 底盘反馈信息订阅者
-#endif                                 // ONE_BOARD
+#endif // ONE_BOARD
 
-static Chassis_Ctrl_Cmd_s chassis_cmd_send;      // 发送给底盘应用的信息,包括控制信息和UI绘制相关
+static Chassis_Ctrl_Cmd_s chassis_cmd_send; // 发送给底盘应用的信息,包括控制信息和UI绘制相关
 static Chassis_Upload_Data_s chassis_fetch_data; // 从底盘应用接收的反馈信息信息,底盘功率枪口热量与底盘运动状态等
 
-static RC_ctrl_t *rc_data;              // 遥控器数据,初始化时返回
+static RC_ctrl_t *rc_data; // 遥控器数据,初始化时返回
 static Vision_Recv_s *vision_recv_data; // 视觉接收数据指针,初始化时返回
-static Vision_Send_s vision_send_data;  // 视觉发送数据
+static Vision_Send_s vision_send_data; // 视觉发送数据
 
-static Publisher_t *gimbal_cmd_pub;            // 云台控制消息发布者
-static Subscriber_t *gimbal_feed_sub;          // 云台反馈信息订阅者
-static Gimbal_Ctrl_Cmd_s gimbal_cmd_send;      // 传递给云台的控制信息
+static Publisher_t *gimbal_cmd_pub; // 云台控制消息发布者
+static Subscriber_t *gimbal_feed_sub; // 云台反馈信息订阅者
+static Gimbal_Ctrl_Cmd_s gimbal_cmd_send; // 传递给云台的控制信息
 static Gimbal_Upload_Data_s gimbal_fetch_data; // 从云台获取的反馈信息
 
-static Publisher_t *shoot_cmd_pub;           // 发射控制消息发布者
-static Subscriber_t *shoot_feed_sub;         // 发射反馈信息订阅者
-static Shoot_Ctrl_Cmd_s shoot_cmd_send;      // 传递给发射的控制信息
+static Publisher_t *shoot_cmd_pub; // 发射控制消息发布者
+static Subscriber_t *shoot_feed_sub; // 发射反馈信息订阅者
+static Shoot_Ctrl_Cmd_s shoot_cmd_send; // 传递给发射的控制信息
 static Shoot_Upload_Data_s shoot_fetch_data; // 从发射获取的反馈信息
 
 static Robot_Status_e robot_state; // 机器人整体工作状态
@@ -90,8 +90,8 @@ void RobotCMDInit()
     //         .MaxOut = 100,
     //     },
     // };
-    //bmi088_test = BMI088Register(&bmi088_config);
-   rc_data = RemoteControlInit(&huart3);   // 修改为对应串口,注意如果是自研板dbus协议串口需选用添加了反相器的那个
+    // bmi088_test = BMI088Register(&bmi088_config);
+    rc_data = RemoteControlInit(&huart3); // 修改为对应串口,注意如果是自研板dbus协议串口需选用添加了反相器的那个
     vision_recv_data = VisionInit(&huart1); // 视觉通信串口
 
     gimbal_cmd_pub = PubRegister("gimbal_cmd", sizeof(Gimbal_Ctrl_Cmd_s));
@@ -107,11 +107,11 @@ void RobotCMDInit()
     CANComm_Init_Config_s comm_conf = {
         .can_config = {
             .can_handle = &hcan1,
-            .tx_id = 0x312,
-            .rx_id = 0x311,
+            .tx_id = 0x011,
+            .rx_id = 0x012,
         },
-        .recv_data_len = sizeof(Chassis_Upload_Data_s),
-        .send_data_len = sizeof(Chassis_Ctrl_Cmd_s),
+        .recv_data_len = sizeof(Chassis_Ctrl_Cmd_s),
+        .send_data_len = sizeof(Chassis_Upload_Data_s),
     };
     cmd_can_comm = CANCommInit(&comm_conf);
 #endif // GIMBAL_BOARD
@@ -130,7 +130,7 @@ static void CalcOffsetAngle()
     // 别名angle提高可读性,不然太长了不好看,虽然基本不会动这个函数
     static float angle;
     angle = gimbal_fetch_data.yaw_motor_single_round_angle; // 从云台获取的当前yaw电机单圈角度
-#if YAW_ECD_GREATER_THAN_4096                               // 如果大于180度
+#if YAW_ECD_GREATER_THAN_4096 // 如果大于180度
     if (angle > YAW_ALIGN_ANGLE && angle <= 180.0f + YAW_ALIGN_ANGLE)
         chassis_cmd_send.offset_angle = angle - YAW_ALIGN_ANGLE;
     else if (angle > 180.0f + YAW_ALIGN_ANGLE)
@@ -158,8 +158,7 @@ static void RemoteControlSet()
     {
         chassis_cmd_send.chassis_mode = CHASSIS_ROTATE;
         gimbal_cmd_send.gimbal_mode = GIMBAL_GYRO_MODE;
-    }
-    else if (switch_is_mid(rc_data[TEMP].rc.switch_right)) // 右侧开关状态[中],底盘和云台分离,底盘保持不转动
+    } else if (switch_is_mid(rc_data[TEMP].rc.switch_right)) // 右侧开关状态[中],底盘和云台分离,底盘保持不转动
     {
         chassis_cmd_send.chassis_mode = CHASSIS_NO_FOLLOW;
         gimbal_cmd_send.gimbal_mode = GIMBAL_FREE_MODE;
@@ -172,20 +171,19 @@ static void RemoteControlSet()
         // ...
     }
     // 左侧开关状态为[下],或视觉未识别到目标,纯遥控器拨杆控制
-    if (switch_is_down(rc_data[TEMP].rc.switch_left) || vision_recv_data->target_state == NO_TARGET)
-    { // 按照摇杆的输出大小进行角度增量,增益系数需调整
+    if (switch_is_down(rc_data[TEMP].rc.switch_left) || vision_recv_data->target_state == NO_TARGET) { // 按照摇杆的输出大小进行角度增量,增益系数需调整
         gimbal_cmd_send.yaw += 0.005f * (float)rc_data[TEMP].rc.rocker_l_;
         gimbal_cmd_send.pitch += 0.001f * (float)rc_data[TEMP].rc.rocker_l1;
     }
     // 云台软件限位
 
-    // 底盘参数,目前没有加入小陀螺(调试似乎暂时没有必要),系数需要调整
-    chassis_cmd_send.vx = 10.0f * (float)rc_data[TEMP].rc.rocker_r_; // _水平方向
-    chassis_cmd_send.vy = 10.0f * (float)rc_data[TEMP].rc.rocker_r1; // 1数值方向
+    // 含义：我推到底了(100%)，我要满速！
+    chassis_cmd_send.vx = (float)rc_data[TEMP].rc.rocker_r_ / 660.0f;
+    chassis_cmd_send.vy = (float)rc_data[TEMP].rc.rocker_r1 / 660.0f;
 
     // 发射参数
     if (switch_is_up(rc_data[TEMP].rc.switch_right)) // 右侧开关状态[上],弹舱打开
-        ;                                            // 弹舱舵机控制,待添加servo_motor模块,开启
+        ; // 弹舱舵机控制,待添加servo_motor模块,开启
     else {
         {
             // 弹舱舵机控制,待添加servo_motor模块,关闭
@@ -212,8 +210,12 @@ static void RemoteControlSet()
  */
 static void MouseKeySet()
 {
-    chassis_cmd_send.vx = rc_data[TEMP].key[KEY_PRESS].w * 300 - rc_data[TEMP].key[KEY_PRESS].s * 300; // 系数待测
-    chassis_cmd_send.vy = rc_data[TEMP].key[KEY_PRESS].s * 300 - rc_data[TEMP].key[KEY_PRESS].d * 300;
+    // 如果觉得键盘太快，可以乘以 0.5f (半速)
+    float key_scale = 1.0f;
+
+    // W-S 控制前后，A-D 控制左右
+    chassis_cmd_send.vx = (rc_data[TEMP].key[KEY_PRESS].w - rc_data[TEMP].key[KEY_PRESS].s) * key_scale;
+    chassis_cmd_send.vy = (rc_data[TEMP].key[KEY_PRESS].a - rc_data[TEMP].key[KEY_PRESS].d) * key_scale;
 
     gimbal_cmd_send.yaw += (float)rc_data[TEMP].mouse.x / 660 * 10; // 系数待测
     gimbal_cmd_send.pitch += (float)rc_data[TEMP].mouse.y / 660 * 10;
@@ -311,8 +313,7 @@ static void EmergencyHandler()
         LOGERROR("[CMD] emergency stop!");
     }
     // 遥控器右侧开关为[上],恢复正常运行
-    if (switch_is_up(rc_data[TEMP].rc.switch_right))
-    {
+    if (switch_is_up(rc_data[TEMP].rc.switch_right)) {
         robot_state = ROBOT_READY;
         shoot_cmd_send.shoot_mode = SHOOT_ON;
         LOGINFO("[CMD] reinstate, robot ready");
@@ -322,7 +323,7 @@ static void EmergencyHandler()
 /* 机器人核心控制任务,200Hz频率运行(必须高于视觉发送频率) */
 void RobotCMDTask()
 {
-   // BMI088Acquire(bmi088_test,&bmi088_data) ;
+    // BMI088Acquire(bmi088_test,&bmi088_data) ;
     // 从其他应用获取回传数据
 #ifdef ONE_BOARD
     SubGetMessage(chassis_feed_sub, (void *)&chassis_fetch_data);

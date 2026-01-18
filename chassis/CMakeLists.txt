@@ -80,9 +80,8 @@ file(GLOB_RECURSE SOURCES
     "modules/motor/servo_motor/*.c"
     "modules/motor/step_motor/*.c"
     "modules/HTmotor/*.c"
-    "modules/oled/*.c"
     "modules/referee/*.c"
-    "modules/remote/*.c"
+    
     "modules/standard_cmd/*.c"
     "modules/super_cap/*.c"
     "modules/TFminiPlus/*.c"
