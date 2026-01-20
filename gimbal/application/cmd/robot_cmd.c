@@ -92,7 +92,7 @@ void RobotCMDInit()
     // };
     // bmi088_test = BMI088Register(&bmi088_config);
     rc_data = RemoteControlInit(&huart3); // 修改为对应串口,注意如果是自研板dbus协议串口需选用添加了反相器的那个
-    vision_recv_data = VisionInit(&huart1); // 视觉通信串口
+    // vision_recv_data = VisionInit(&huart1); // 视觉通信串口
 
     gimbal_cmd_pub = PubRegister("gimbal_cmd", sizeof(Gimbal_Ctrl_Cmd_s));
     gimbal_feed_sub = SubRegister("gimbal_feed", sizeof(Gimbal_Upload_Data_s));
@@ -107,13 +107,23 @@ void RobotCMDInit()
     CANComm_Init_Config_s comm_conf = {
         .can_config = {
             .can_handle = &hcan1,
-            .tx_id = 0x011,
-            .rx_id = 0x012,
+            .tx_id = 0x012,
+            .rx_id = 0x011,
         },
-        .recv_data_len = sizeof(Chassis_Ctrl_Cmd_s),
-        .send_data_len = sizeof(Chassis_Upload_Data_s),
+        .recv_data_len = sizeof(Chassis_Upload_Data_s),
+        .send_data_len = sizeof(Chassis_Ctrl_Cmd_s),
+        .daemon_count = 200,
     };
     cmd_can_comm = CANCommInit(&comm_conf);
+    LOGINFO("[can_comm] Chassis_Upload_Data_s size: %d", sizeof(Chassis_Upload_Data_s));
+    LOGINFO("[can_comm] Chassis_Ctrl_Cmd_s size: %d", sizeof(Chassis_Ctrl_Cmd_s));
+    LOGINFO("[can_comm] CAN_COMM_MAX_BUFFSIZE: %d", CAN_COMM_MAX_BUFFSIZE);
+    // 【新增调试日志】
+    if (cmd_can_comm != NULL) {
+        LOGINFO("[GIMBAL_DEBUG] CAN Comm Init Success! TxID: 0x012");
+    } else {
+        LOGERROR("[GIMBAL_DEBUG] CAN Comm Init Failed!");
+    }
 #endif // GIMBAL_BOARD
     gimbal_cmd_send.pitch = 0;
 

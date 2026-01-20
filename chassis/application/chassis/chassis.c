@@ -121,8 +121,15 @@ void ChassisInit()
         },
         .recv_data_len = sizeof(Chassis_Ctrl_Cmd_s),
         .send_data_len = sizeof(Chassis_Upload_Data_s),
+        .daemon_count = 200,
     };
     chasiss_can_comm = CANCommInit(&comm_conf); // can comm初始化
+    if (chasiss_can_comm != NULL) {
+        LOGINFO("[DEBUG] Chassis CAN Comm Init SUCCESS! Handle: %p, recv:%d, send:%d",
+                chasiss_can_comm, sizeof(Chassis_Ctrl_Cmd_s), sizeof(Chassis_Upload_Data_s));
+    } else {
+        LOGERROR("[DEBUG] Chassis CAN Comm Init FAILED! Returned NULL.");
+    }
 #endif // CHASSIS_BOARD
 
 #ifdef ONE_BOARD // 单板控制整车,则通过pubsub来传递消息

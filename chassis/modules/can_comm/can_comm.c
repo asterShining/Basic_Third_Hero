@@ -14,7 +14,7 @@ static void CANCommResetRx(CANCommInstance *ins)
 {
     // 当前已经收到的buffer清零
     memset(ins->raw_recvbuf, 0, ins->cur_recv_len);
-    ins->recv_state = 0;   // 接收状态重置
+    ins->recv_state = 0; // 接收状态重置
     ins->cur_recv_len = 0; // 当前已经收到的长度重置
 }
 
@@ -26,6 +26,11 @@ static void CANCommResetRx(CANCommInstance *ins)
 static void CANCommRxCallback(CANInstance *_instance)
 {
     CANCommInstance *comm = (CANCommInstance *)_instance->id; // 注意写法,将can instance的id强制转换为CANCommInstance*类型
+    static uint32_t rx_debug_cnt = 0;
+    rx_debug_cnt++;
+    if (rx_debug_cnt % 100 == 0) {
+        LOGINFO("[DEBUG] CAN Comm Rx ALIVE! Count: %d, DataLen: %d", rx_debug_cnt, _instance->rx_len);
+    }
 
     /* 当前接收状态判断 */
     if (_instance->rx_buff[0] == CAN_COMM_HEADER && comm->recv_state == 0) // 之前尚未开始接收且此次包里第一个位置是帧头
@@ -33,16 +38,14 @@ static void CANCommRxCallback(CANInstance *_instance)
         if (_instance->rx_buff[1] == comm->recv_data_len) // 如果这一包里的datalen也等于我们设定接收长度(这是因为暂时不支持动态包长)
         {
             comm->recv_state = 1; // 设置接收状态为1,说明已经开始接收
-        }
-        else
+        } else
             return; // 直接跳过即可
     }
 
     if (comm->recv_state) // 已经收到过帧头
     {
         // 如果已经接收到的长度加上当前一包的长度大于总buf len,说明接收错误
-        if (comm->cur_recv_len + _instance->rx_len > comm->recv_buf_len)
-        {
+        if (comm->cur_recv_len + _instance->rx_len > comm->recv_buf_len) {
             CANCommResetRx(comm);
             return; // 重置状态然后返回
         }
@@ -52,15 +55,12 @@ static void CANCommRxCallback(CANInstance *_instance)
         comm->cur_recv_len += _instance->rx_len;
 
         // 收完这一包以后刚好等于总buf len,说明已经收完了
-        if (comm->cur_recv_len == comm->recv_buf_len)
-        {
+        if (comm->cur_recv_len == comm->recv_buf_len) {
             // 如果buff里本tail的位置等于CAN_COMM_TAIL
-            if (comm->raw_recvbuf[comm->recv_buf_len - 1] == CAN_COMM_TAIL)
-            { // 通过校验,复制数据到unpack_data中
-                if (comm->raw_recvbuf[comm->recv_buf_len - 2] == crc_8(comm->raw_recvbuf + 2, comm->recv_data_len))
-                { // 数据量大的话考虑使用DMA
+            if (comm->raw_recvbuf[comm->recv_buf_len - 1] == CAN_COMM_TAIL) { // 通过校验,复制数据到unpack_data中
+                if (comm->raw_recvbuf[comm->recv_buf_len - 2] == crc_8(comm->raw_recvbuf + 2, comm->recv_data_len)) { // 数据量大的话考虑使用DMA
                     memcpy(comm->unpacked_recv_data, comm->raw_recvbuf + 2, comm->recv_data_len);
-                    comm->update_flag = 1;           // 数据更新flag置为1
+                    comm->update_flag = 1; // 数据更新flag置为1
                     DaemonReload(comm->comm_daemon); // 重载daemon,避免数据更新后一直不被读取而导致数据更新不及时
                 }
             }
@@ -70,12 +70,45 @@ static void CANCommRxCallback(CANInstance *_instance)
     }
 }
 
+/**
+ * @brief CAN COMM rx lost callback
+ *
+ * @param cancomm CAN COMM实例指针
+ *
+ * @details
+ *      CAN COMM rx lost callback,用于处理can comm rx lost事件
+ *      在这个回调函数中，会调用CANCommResetRx()函数重置CAN COMM的rx state
+ *      并打印一个警告日志，记录CAN COMM rx lost事件
+ */
 static void CANCommLostCallback(void *cancomm)
 {
     CANCommInstance *comm = (CANCommInstance *)cancomm;
     CANCommResetRx(comm);
-    LOGWARNING("[can_comm] can comm rx[%d] lost, reset rx state.", &comm->can_ins->rx_id);
+    LOGWARNING("[can_comm] can comm rx[0x%03X] lost, reset rx state.", comm->can_ins->rx_id);
 }
+
+/**
+ * @brief CAN COMM初始化
+ *
+ * @param comm_config CAN COMM初始化结构体
+ * @return CANCOMMInstance* CAN COMM实例指针
+ *
+ * @details
+ *      CAN COMM初始化结构体中:
+ *      - can_config: CAN初始化结构体
+ *      - send_data_len: 发送数据长度
+ *      - recv_data_len: 接收数据长度
+ *      - daemon_count: 守护进程计数,用于初始化守护进程
+ *      CAN COMM实例指针:
+ *      - recv_data_len: 接收数据长度
+ *      - recv_buf_len: 接收缓冲区长度,为接收数据长度+头+数据长度+crc8+尾
+ *      - send_data_len: 发送数据长度
+ *      - send_buf_len: 发送缓冲区长度,为发送数据长度+头+数据长度+crc8+尾
+ *      - raw_sendbuf: 发送缓冲区
+ *      - raw_recvbuf: 接收缓冲区
+ *      - can_ins: CAN实例指针
+ *      - comm_daemon: 守护进程实例指针
+ */
 
 CANCommInstance *CANCommInit(CANComm_Init_Config_s *comm_config)
 {
@@ -86,7 +119,7 @@ CANCommInstance *CANCommInit(CANComm_Init_Config_s *comm_config)
     ins->recv_buf_len = comm_config->recv_data_len + CAN_COMM_OFFSET_BYTES; // head + datalen + crc8 + tail
     ins->send_data_len = comm_config->send_data_len;
     ins->send_buf_len = comm_config->send_data_len + CAN_COMM_OFFSET_BYTES;
-    ins->raw_sendbuf[0] = CAN_COMM_HEADER;            // head,直接设置避免每次发送都要重新赋值,下面的tail同理
+    ins->raw_sendbuf[0] = CAN_COMM_HEADER; // head,直接设置避免每次发送都要重新赋值,下面的tail同理
     ins->raw_sendbuf[1] = comm_config->send_data_len; // datalen
     ins->raw_sendbuf[comm_config->send_data_len + CAN_COMM_OFFSET_BYTES - 1] = CAN_COMM_TAIL;
     // can instance的设置
@@ -98,6 +131,7 @@ CANCommInstance *CANCommInit(CANComm_Init_Config_s *comm_config)
         .callback = CANCommLostCallback,
         .owner_id = (void *)ins,
         .reload_count = comm_config->daemon_count,
+        .init_count = comm_config->daemon_count,
     };
     ins->comm_daemon = DaemonRegister(&daemon_config);
     return ins;
@@ -112,9 +146,15 @@ void CANCommSend(CANCommInstance *instance, uint8_t *data)
     crc8 = crc_8(data, instance->send_data_len);
     instance->raw_sendbuf[2 + instance->send_data_len] = crc8;
 
+    // 【新增调试代码：每发送100次打印一次】
+    static uint32_t tx_debug_cnt = 0;
+    tx_debug_cnt++;
+    if (tx_debug_cnt % 100 == 0) {
+        LOGINFO("[DEBUG] CAN Comm Tx Attempt... Cnt: %d, ID: 0x%X", tx_debug_cnt, instance->can_ins->tx_id);
+    }
+
     // CAN单次发送最大为8字节,如果超过8字节,需要分包发送
-    for (size_t i = 0; i < instance->send_buf_len; i += 8)
-    { // 如果是最后一包,send len将会小于8,要修改CAN的txconf中的DLC位,调用bsp_can提供的接口即可
+    for (size_t i = 0; i < instance->send_buf_len; i += 8) { // 如果是最后一包,send len将会小于8,要修改CAN的txconf中的DLC位,调用bsp_can提供的接口即可
         send_len = instance->send_buf_len - i >= 8 ? 8 : instance->send_buf_len - i;
         CANSetDLC(instance->can_ins, send_len);
         memcpy(instance->can_ins->tx_buff, instance->raw_sendbuf + i, send_len);
