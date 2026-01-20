@@ -180,7 +180,7 @@ typedef struct
 typedef struct
 {
 #if defined(CHASSIS_BOARD) || defined(GIMBAL_BOARD) // 非单板的时候底盘还将imu数据回传(若有必要)
-    attitude_t chassis_imu_data;
+    // attitude_t chassis_imu_data;
 #endif
     // 后续增加底盘的真实速度
     float real_vx;
