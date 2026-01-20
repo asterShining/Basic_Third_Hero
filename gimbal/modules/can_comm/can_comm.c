@@ -33,14 +33,17 @@ static void CANCommRxCallback(CANInstance *_instance)
         if (_instance->rx_buff[1] == comm->recv_data_len) // 如果这一包里的datalen也等于我们设定接收长度(这是因为暂时不支持动态包长)
         {
             comm->recv_state = 1; // 设置接收状态为1,说明已经开始接收
-        } else
+        } else {
+            LOGWARNING("[can_comm] header ok but len mismatch: first=%d expected=%d (rx_id=0x%03X)", _instance->rx_buff[1], comm->recv_data_len, comm->can_ins->rx_id);
             return; // 直接跳过即可
+        }
     }
 
     if (comm->recv_state) // 已经收到过帧头
     {
         // 如果已经接收到的长度加上当前一包的长度大于总buf len,说明接收错误
         if (comm->cur_recv_len + _instance->rx_len > comm->recv_buf_len) {
+            LOGWARNING("[can_comm] overflow: cur=%d rx_len=%d buf_len=%d (rx_id=0x%03X)", comm->cur_recv_len, _instance->rx_len, comm->recv_buf_len, comm->can_ins->rx_id);
             CANCommResetRx(comm);
             return; // 重置状态然后返回
         }
@@ -57,7 +60,12 @@ static void CANCommRxCallback(CANInstance *_instance)
                     memcpy(comm->unpacked_recv_data, comm->raw_recvbuf + 2, comm->recv_data_len);
                     comm->update_flag = 1; // 数据更新flag置为1
                     DaemonReload(comm->comm_daemon); // 重载daemon,避免数据更新后一直不被读取而导致数据更新不及时
+                    LOGINFO("[can_comm] frame complete (len=%d, rx_id=0x%03X)", comm->recv_data_len, comm->can_ins->rx_id);
+                } else {
+                    LOGWARNING("[can_comm] crc8 mismatch (rx_id=0x%03X)", comm->can_ins->rx_id);
                 }
+            } else {
+                LOGWARNING("[can_comm] tail missing (rx_id=0x%03X)", comm->can_ins->rx_id);
             }
             CANCommResetRx(comm);
             return; // 重置状态然后返回

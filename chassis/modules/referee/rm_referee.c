@@ -128,12 +128,13 @@ referee_info_t *RefereeInit(UART_HandleTypeDef *referee_usart_handle)
 	conf.recv_buff_size = RE_RX_BUFFER_SIZE; // mx 255(u8)
 	referee_usart_instance = USARTRegister(&conf);
 
-	Daemon_Init_Config_s daemon_conf = {
-		.callback = RefereeLostCallback,
-		.owner_id = referee_usart_instance,
-		.reload_count = 30, // 0.3s没有收到数据,则认为丢失,重启串口接收
-	};
-	referee_daemon = DaemonRegister(&daemon_conf);
+Daemon_Init_Config_s daemon_conf = {
+.callback = RefereeLostCallback,
+.owner_id = referee_usart_instance,
+.reload_count = 200, // ~200ms 超时，避免短暂无报文被误判离线
+.init_count = 200,
+};
+referee_daemon = DaemonRegister(&daemon_conf);
 
 	return &referee_info;
 }

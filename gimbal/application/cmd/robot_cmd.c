@@ -21,6 +21,9 @@
 #ifdef GIMBAL_BOARD // 对双板的兼容,条件编译
 #include "can_comm.h"
 static CANCommInstance *cmd_can_comm; // 双板通信
+/* 编译期断言，确保两端结构体尺寸不超过 CAN 缓冲上限，避免长度不一致导致 rx lost */
+_Static_assert(sizeof(Chassis_Ctrl_Cmd_s)   <= CAN_COMM_MAX_BUFFSIZE, "Chassis_Ctrl_Cmd_s exceeds CAN buffer");
+_Static_assert(sizeof(Chassis_Upload_Data_s) <= CAN_COMM_MAX_BUFFSIZE, "Chassis_Upload_Data_s exceeds CAN buffer");
 #endif
 #ifdef ONE_BOARD
 static Publisher_t *chassis_cmd_pub; // 底盘控制消息发布者
