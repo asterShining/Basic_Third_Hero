@@ -12,6 +12,8 @@
  */
 
 #include "chassis.h"
+#include "can.h"
+#include "motor_def.h"
 #include "robot_def.h"
 #include "power_control.h"
 #include "super_cap.h"
@@ -61,7 +63,6 @@ void ChassisInit()
 {
     // 四个轮子的参数一样,改tx_id和反转标志位即可
     Motor_Init_Config_s chassis_motor_config = {
-        .can_init_config.can_handle = &hcan2,
         .controller_param_init_config = {
             .speed_PID = {
                 .Kp = 4.5, // 4.5
@@ -83,20 +84,24 @@ void ChassisInit()
     };
     //  @todo: 当前还没有设置电机的正反转,仍然需要手动添加reference的正负号,需要电机module的支持,待修改.
     // 使用功率控制的电机需要使用PowerControlInit()函数初始化,因为电机的控制方式不同
+    chassis_motor_config.can_init_config.can_handle = &hcan1;
     chassis_motor_config.can_init_config.tx_id = 1;
-    chassis_motor_config.controller_setting_init_config.motor_reverse_flag = MOTOR_DIRECTION_NORMAL;
-    // motor_lf = PowerControlInit(&chassis_motor_config);
+    chassis_motor_config.controller_setting_init_config.motor_reverse_flag = MOTOR_DIRECTION_REVERSE;
+    motor_lf = PowerControlInit(&chassis_motor_config);
 
+    chassis_motor_config.can_init_config.can_handle = &hcan1;
     chassis_motor_config.can_init_config.tx_id = 2;
     chassis_motor_config.controller_setting_init_config.motor_reverse_flag = MOTOR_DIRECTION_NORMAL;
-    // motor_rf = PowerControlInit(&chassis_motor_config);
+    motor_rf = PowerControlInit(&chassis_motor_config);
 
+    chassis_motor_config.can_init_config.can_handle = &hcan2;
     chassis_motor_config.can_init_config.tx_id = 4;
-    chassis_motor_config.controller_setting_init_config.motor_reverse_flag = MOTOR_DIRECTION_NORMAL;
-    // motor_lb = PowerControlInit(&chassis_motor_config);
+    chassis_motor_config.controller_setting_init_config.motor_reverse_flag = MOTOR_DIRECTION_REVERSE;
+    motor_lb = PowerControlInit(&chassis_motor_config);
+    chassis_motor_config.can_init_config.can_handle = &hcan2;
     chassis_motor_config.can_init_config.tx_id = 3;
     chassis_motor_config.controller_setting_init_config.motor_reverse_flag = MOTOR_DIRECTION_NORMAL;
-    // motor_rb = PowerControlInit(&chassis_motor_config);
+    motor_rb = PowerControlInit(&chassis_motor_config);
 
     // referee_data = UITaskInit(&huart6, &ui_data); // 裁判系统初始化,会同时初始化UI
 
@@ -145,37 +150,27 @@ void ChassisInit()
  * @brief 计算每个轮毂电机的输出,正运动学解算
  *        用宏进行预替换减小开销,运动解算具体过程参考教程
  */
-static void MecanumCalculate()
+// static void MecanumCalculate()
+// {
+//     vt_lf = -chassis_vx - chassis_vy - chassis_cmd_recv.wz * LF_CENTER;
+//     vt_rf = -chassis_vx + chassis_vy - chassis_cmd_recv.wz * RF_CENTER;
+//     vt_lb = chassis_vx - chassis_vy - chassis_cmd_recv.wz * LB_CENTER;
+//     vt_rb = chassis_vx + chassis_vy - chassis_cmd_recv.wz * RB_CENTER;
+// }
+
+// 针对全麦和全向轮构型，方案一，前轮麦轮，后轮全向轮结算。方案二，利用陀螺仪强力纠正侧向漂移
+static void HybridCalculate()
 {
-    // 1. 获取输入 (已经是 m/s 了，因为遥控器那边乘过了)
-    float vx = chassis_vx;
-    float vy = chassis_vy;
+    // === 前轮 (麦克纳姆轮) ===
+    // 保持标准麦轮解算，它们需要负责产生横向分力
+    vt_lf = -chassis_vy - chassis_vx - chassis_cmd_recv.wz * LF_CENTER;
+    vt_rf = -chassis_vy + chassis_vx - chassis_cmd_recv.wz * RF_CENTER;
 
-    // 2. 旋转速度 (deg/s)
-    // 注意：robot_cmd 里发过来的 wz 建议是物理值 (deg/s)，比如直接发 200.0f
-    // 如果发过来的是比例 (1.0)，这里要乘 MAX_CHASSIS_WZ_SPEED
-    float wz = chassis_cmd_recv.wz;
-
-    // 3. 计算旋转产生的线速度 (m/s)
-    // LF_CENTER 宏里已经包含了转换系数
-    float v_rot_lf = wz * LF_CENTER;
-    float v_rot_rf = wz * RF_CENTER;
-    float v_rot_lb = wz * LB_CENTER;
-    float v_rot_rb = wz * RB_CENTER;
-
-    //
-    // 假设电机安装方向逻辑是：前轮负为前，后轮正为前（根据您原代码推断）
-    // 必须有加有减才能旋转！
-    float v_lf_m_s = -vx - vy + v_rot_lf; // 左前: 旋转给正 (后退)
-    float v_rf_m_s = -vx + vy - v_rot_rf; // 右前: 旋转给负 (前进) -> 形成逆时针转
-    float v_lb_m_s = vx - vy - v_rot_lb; // 左后: 旋转给负 (后退)
-    float v_rb_m_s = vx + vy + v_rot_rb; // 右后: 旋转给正 (前进)
-
-    // 5. ✅ 单位转换 (关键！把 3.0 m/s 变成 ~2000 deg/s)
-    vt_lf = v_lf_m_s * CHASSIS_M_TO_DEG;
-    vt_rf = v_rf_m_s * CHASSIS_M_TO_DEG;
-    vt_lb = v_lb_m_s * CHASSIS_M_TO_DEG;
-    vt_rb = v_rb_m_s * CHASSIS_M_TO_DEG;
+    // === 后轮 (全向轮) ===
+    // 全向轮侧向是自由滚动的，电机不需要也不应该为了横移而转动
+    // 它们只负责前后驱动 (vx) 和 辅助旋转 (wz)
+    vt_lb = chassis_vy - chassis_cmd_recv.wz * LB_CENTER;
+    vt_rb = chassis_vy - chassis_cmd_recv.wz * RB_CENTER;
 }
 /**
  * @brief 根据裁判系统和电容剩余容量对输出进行限制并设置电机参考值
@@ -249,43 +244,6 @@ static void LimitChassisOutput()
  */
 static void EstimateSpeed()
 {
-    // 1. 获取电机转速 (deg/s) 并转换为轮子线速度 (m/s)
-    // 公式: v = speed_aps * (PI/180) * R
-    // 注意：dji_motor的speed_aps是度/秒
-    float v_lf = motor_lf->measure.speed_aps * DEGREE_2_RAD * RADIUS_WHEEL;
-    float v_rf = motor_rf->measure.speed_aps * DEGREE_2_RAD * RADIUS_WHEEL;
-    float v_lb = motor_lb->measure.speed_aps * DEGREE_2_RAD * RADIUS_WHEEL;
-    float v_rb = motor_rb->measure.speed_aps * DEGREE_2_RAD * RADIUS_WHEEL;
-
-    // 2. 逆运动学解算 (Inverse Kinematics)
-    // 根据 MecanumCalculate 中的正向公式反推:
-    // vx = (v_rb - v_rf + v_lb - v_lf) / 4
-    // vy = (v_rb - v_lb + v_rf - v_lf) / 4
-    // wz = -(v_lf + v_rf + v_lb + v_rb) / (4 * (a+b))
-
-    // 计算底盘实际的前进速度 (m/s)
-    chassis_feedback_data.real_vx = (v_rb - v_rf + v_lb - v_lf) / 4.0f;
-
-    // 计算底盘实际的平移速度 (m/s)
-    chassis_feedback_data.real_vy = (v_rb - v_lb + v_rf - v_lf) / 4.0f;
-
-    // 3. 计算角速度 (deg/s)
-    // 优先使用 IMU 陀螺仪数据，因为轮子打滑会导致里程计计算的角速度很不准
-#ifdef CHASSIS_BOARD
-    if (Chassis_IMU_data != NULL) {
-        // 使用板载IMU的Z轴角速度 (注意单位，假设Gyro数据为 rad/s，需转为 deg/s，如果本身是 deg/s 则直接用)
-        // 通常 BMI088 驱动解算出的 Gyro 单位是 rad/s
-        chassis_feedback_data.real_wz = Chassis_IMU_data->Gyro[2] * RAD_2_DEGREE;
-    } else {
-        // IMU 离线时的兜底方案：使用轮子解算
-        // LF_CENTER 包含了 R * (PI/180)，所以这里除回去直接得到 deg/s
-        chassis_feedback_data.real_wz = -(v_lf + v_rf + v_lb + v_rb) / (4.0f * LF_CENTER);
-    }
-#else
-    // 单板模式或无IMU数据时，使用轮子解算
-    // 这里的 LF_CENTER 必须与 MecanumCalculate 中使用的宏一致
-    chassis_feedback_data.real_wz = -(v_lf + v_rf + v_lb + v_rb) / (4.0f * LF_CENTER);
-#endif
 }
 /* 机器人底盘控制核心任务 */
 void ChassisTask()
@@ -327,7 +285,6 @@ void ChassisTask()
     // 4. 设置给底盘功率控制算法 (这个函数控制电机的电流)
     SetPowerLimit(final_power_limit);
 
-    SetPowerLimit(referee_data->GameRobotState.chassis_power_limit); // 设置功率限制
     if (chassis_cmd_recv.chassis_mode == CHASSIS_ZERO_FORCE) { // 如果出现重要模块离线或遥控器设置为急停,让电机停止
         DJIMotorStop(motor_lf);
         DJIMotorStop(motor_rf);
@@ -364,13 +321,14 @@ void ChassisTask()
     chassis_vy = chassis_cmd_recv.vx * sin_theta + chassis_cmd_recv.vy * cos_theta;
 
     // 根据控制模式进行正运动学解算,计算底盘输出
-    MecanumCalculate();
+    // MecanumCalculate();
+    HybridCalculate();
 
     // 根据裁判系统的反馈数据和电容数据对输出限幅并设定闭环参考值
     LimitChassisOutput();
 
     // 根据电机的反馈速度和IMU(如果有)计算真实速度
-    EstimateSpeed();
+    // EstimateSpeed();
 
     // // 获取裁判系统数据   建议将裁判系统与底盘分离，所以此处数据应使用消息中心发送
     // // 我方颜色id小于7是红色,大于7是蓝色,注意这里发送的是对方的颜色, 0:blue , 1:red
