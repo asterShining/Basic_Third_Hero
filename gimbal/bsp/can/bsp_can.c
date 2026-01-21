@@ -98,81 +98,80 @@ CANInstance *CANRegister(CAN_Init_Config_s *config)
     return instance; // 返回can实例指针
 }
 
-// /* @todo 目前似乎封装过度,应该添加一个指向tx_buff的指针,tx_buff不应该由CAN instance保存 */
-// /* 如果让CANinstance保存txbuff,会增加一次复制的开销 */
-// uint8_t CANTransmit(CANInstance *_instance, float timeout)
-// {
-//     static uint32_t busy_count;
-//     static volatile float wait_time __attribute__((unused)); // for cancel warning
-//     float dwt_start = DWT_GetTimeline_ms();
-//     while (HAL_CAN_GetTxMailboxesFreeLevel(_instance->can_handle) == 0) // 等待邮箱空闲
-//     {
-//         if (DWT_GetTimeline_ms() - dwt_start > timeout) // 超时
-//         {
-//             LOGWARNING("[bsp_can] CAN MAILbox full! failed to add msg to mailbox. Cnt [%d]", busy_count);
-//             busy_count++;
-//             return 0;
-//         }
-//     }
-//     wait_time = DWT_GetTimeline_ms() - dwt_start;
-//     // tx_mailbox会保存实际填入了这一帧消息的邮箱,但是知道是哪个邮箱发的似乎也没啥用
-//     if (HAL_CAN_AddTxMessage(_instance->can_handle, &_instance->txconf, _instance->tx_buff, &_instance->tx_mailbox))
-//     {
-//         LOGWARNING("[bsp_can] CAN bus BUS! cnt:%d", busy_count);
-//         busy_count++;
-//         return 0;
-//     }
-//     return 1; // 发送成功
-// }
-
+/* @todo 目前似乎封装过度,应该添加一个指向tx_buff的指针,tx_buff不应该由CAN instance保存 */
+/* 如果让CANinstance保存txbuff,会增加一次复制的开销 */
 uint8_t CANTransmit(CANInstance *_instance, float timeout)
 {
-    static uint32_t busy_count = 0;
-    static uint32_t last_error_code = 0;
-
-    CAN_HandleTypeDef *hcan = _instance->can_handle; // 获取句柄
-
-    // 1. 检查邮箱空闲等级
-    if (HAL_CAN_GetTxMailboxesFreeLevel(hcan) == 0) {
-        busy_count++;
-        // 每 1000 次失败打印一次详细诊断信息
-        if (busy_count % 1000 == 0) {
-            // 获取 CAN 错误状态寄存器 (ESR) 和 错误码
-            uint32_t esr_reg = hcan->Instance->ESR;
-            uint32_t hal_error = HAL_CAN_GetError(hcan);
-
-            // 解析错误类型
-            uint8_t rec = (esr_reg >> 24) & 0xFF; // 接收错误计数 (Receive Error Counter)
-            uint8_t tec = (esr_reg >> 16) & 0xFF; // 发送错误计数 (Transmit Error Counter)
-            uint8_t bus_off = (esr_reg & CAN_ESR_BOFF) ? 1 : 0; // 是否进入 Bus-Off (总线关闭)
-            uint8_t err_passive = (esr_reg & CAN_ESR_EPVF) ? 1 : 0; // 是否进入被动错误状态
-
-            LOGWARNING("=== CAN HARDWARE DIAGNOSIS ===");
-            LOGWARNING("Bus: %s | Target ID: 0x%03X", (hcan->Instance == CAN1) ? "CAN1" : "CAN2", _instance->tx_id);
-            LOGWARNING("Mailbox FULL! Total Fail: %d", busy_count);
-            LOGWARNING("TEC (Tx Errors): %d | REC (Rx Errors): %d", tec, rec);
-            LOGWARNING("State: BusOff=%d, Passive=%d", bus_off, err_passive);
-            LOGWARNING("HAL Error Code: 0x%08X", hal_error);
-
-            if (hal_error & HAL_CAN_ERROR_ACK)
-                LOGWARNING("-> Detail: ACK Error (No device responded)");
-            if (hal_error & HAL_CAN_ERROR_BR)
-                LOGWARNING("-> Detail: Bit Recessive Error");
-            if (hal_error & HAL_CAN_ERROR_BD)
-                LOGWARNING("-> Detail: Bit Dominant Error");
+    static uint32_t busy_count;
+    static volatile float wait_time __attribute__((unused)); // for cancel warning
+    float dwt_start = DWT_GetTimeline_ms();
+    while (HAL_CAN_GetTxMailboxesFreeLevel(_instance->can_handle) == 0) // 等待邮箱空闲
+    {
+        if (DWT_GetTimeline_ms() - dwt_start > timeout) // 超时
+        {
+            LOGWARNING("[bsp_can] CAN MAILbox full! failed to add msg to mailbox. Cnt [%d]", busy_count);
+            busy_count++;
+            return 0;
         }
-        return 0; // 发送失败，直接返回
     }
-
-    // 2. 尝试填入邮箱
-    if (HAL_CAN_AddTxMessage(hcan, &_instance->txconf, _instance->tx_buff, &_instance->tx_mailbox) != HAL_OK) {
-        // 如果这里报错，说明参数有问题或者句柄状态不对
-        LOGWARNING("[bsp_can] HAL_CAN_AddTxMessage System Error! ID: 0x%X", _instance->tx_id);
+    wait_time = DWT_GetTimeline_ms() - dwt_start;
+    // tx_mailbox会保存实际填入了这一帧消息的邮箱,但是知道是哪个邮箱发的似乎也没啥用
+    if (HAL_CAN_AddTxMessage(_instance->can_handle, &_instance->txconf, _instance->tx_buff, &_instance->tx_mailbox)) {
+        LOGWARNING("[bsp_can] CAN bus BUS! cnt:%d", busy_count);
+        busy_count++;
         return 0;
     }
-
     return 1; // 发送成功
 }
+
+// uint8_t CANTransmit(CANInstance *_instance, float timeout)
+// {
+//     static uint32_t busy_count = 0;
+//     static uint32_t last_error_code = 0;
+
+//     CAN_HandleTypeDef *hcan = _instance->can_handle; // 获取句柄
+
+//     // 1. 检查邮箱空闲等级
+//     if (HAL_CAN_GetTxMailboxesFreeLevel(hcan) == 0) {
+//         busy_count++;
+//         // 每 1000 次失败打印一次详细诊断信息
+//         if (busy_count % 1000 == 0) {
+//             // 获取 CAN 错误状态寄存器 (ESR) 和 错误码
+//             uint32_t esr_reg = hcan->Instance->ESR;
+//             uint32_t hal_error = HAL_CAN_GetError(hcan);
+
+//             // 解析错误类型
+//             uint8_t rec = (esr_reg >> 24) & 0xFF; // 接收错误计数 (Receive Error Counter)
+//             uint8_t tec = (esr_reg >> 16) & 0xFF; // 发送错误计数 (Transmit Error Counter)
+//             uint8_t bus_off = (esr_reg & CAN_ESR_BOFF) ? 1 : 0; // 是否进入 Bus-Off (总线关闭)
+//             uint8_t err_passive = (esr_reg & CAN_ESR_EPVF) ? 1 : 0; // 是否进入被动错误状态
+
+//             LOGWARNING("=== CAN HARDWARE DIAGNOSIS ===");
+//             LOGWARNING("Bus: %s | Target ID: 0x%03X", (hcan->Instance == CAN1) ? "CAN1" : "CAN2", _instance->tx_id);
+//             LOGWARNING("Mailbox FULL! Total Fail: %d", busy_count);
+//             LOGWARNING("TEC (Tx Errors): %d | REC (Rx Errors): %d", tec, rec);
+//             LOGWARNING("State: BusOff=%d, Passive=%d", bus_off, err_passive);
+//             LOGWARNING("HAL Error Code: 0x%08X", hal_error);
+
+//             if (hal_error & HAL_CAN_ERROR_ACK)
+//                 LOGWARNING("-> Detail: ACK Error (No device responded)");
+//             if (hal_error & HAL_CAN_ERROR_BR)
+//                 LOGWARNING("-> Detail: Bit Recessive Error");
+//             if (hal_error & HAL_CAN_ERROR_BD)
+//                 LOGWARNING("-> Detail: Bit Dominant Error");
+//         }
+//         return 0; // 发送失败，直接返回
+//     }
+
+//     // 2. 尝试填入邮箱
+//     if (HAL_CAN_AddTxMessage(hcan, &_instance->txconf, _instance->tx_buff, &_instance->tx_mailbox) != HAL_OK) {
+//         // 如果这里报错，说明参数有问题或者句柄状态不对
+//         LOGWARNING("[bsp_can] HAL_CAN_AddTxMessage System Error! ID: 0x%X", _instance->tx_id);
+//         return 0;
+//     }
+
+//     return 1; // 发送成功
+// }
 void CANSetDLC(CANInstance *_instance, uint8_t length)
 {
     // 发送长度错误!检查调用参数是否出错,或出现野指针/越界访问
