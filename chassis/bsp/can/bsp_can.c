@@ -116,10 +116,30 @@ uint8_t CANTransmit(CANInstance *_instance, float timeout)
     }
     wait_time = DWT_GetTimeline_ms() - dwt_start;
     // tx_mailbox会保存实际填入了这一帧消息的邮箱,但是知道是哪个邮箱发的似乎也没啥用
-    if (HAL_CAN_AddTxMessage(_instance->can_handle, &_instance->txconf, _instance->tx_buff, &_instance->tx_mailbox))
-    {
+    if (HAL_CAN_AddTxMessage(_instance->can_handle, &_instance->txconf, _instance->tx_buff, &_instance->tx_mailbox)) {
         LOGWARNING("[bsp_can] CAN bus BUS! cnt:%d", busy_count);
         busy_count++;
+        if (busy_count % 200 == 0) {
+            // 获取 CAN 发送状态寄存器 (TSR) 和 错误状态寄存器 (ESR)
+            uint32_t tsr = _instance->can_handle->Instance->TSR;
+            uint32_t esr = _instance->can_handle->Instance->ESR;
+
+            LOGWARNING("[bsp_can] MB FULL! TotalFail:%d | ID:0x%03X", busy_count, _instance->tx_id);
+
+            // 打印邮箱占用情况 (TME: Transmit Mailbox Empty, 0表示非空/占用)
+            LOGWARNING("Blocking: MB0[%d] MB1[%d] MB2[%d]",
+                       (tsr & CAN_TSR_TME0) ? 0 : 1,
+                       (tsr & CAN_TSR_TME1) ? 0 : 1,
+                       (tsr & CAN_TSR_TME2) ? 0 : 1);
+
+            // 打印错误原因 (LEC: Last Error Code)
+            // 0x3: ACK Error (最常见，接收端没上电), 0x4: Bit Recessive Error, 0x5: Bit Dominant Error
+            uint8_t lec = (esr & CAN_ESR_LEC) >> 4;
+            if (lec == 0x3)
+                LOGWARNING("Reason: ACK Error (Check cable/power!)");
+            else if (lec != 0)
+                LOGWARNING("Reason: HW Error Code 0x%X", lec);
+        }
         return 0;
     }
     return 1; // 发送成功

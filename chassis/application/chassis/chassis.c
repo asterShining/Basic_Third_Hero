@@ -46,10 +46,10 @@ static Chassis_Ctrl_Cmd_s chassis_cmd_recv; // 底盘接收到的控制命令
 static Chassis_Upload_Data_s chassis_feedback_data; // 底盘回传的反馈数据
 
 static PIDInstance buffer_PID; // 用于底盘的缓冲能量PID
-static referee_info_t *referee_data; // 用于获取裁判系统的数据
+static referee_info_t *referee_data = { NULL }; // 用于获取裁判系统的数据
 static Referee_Interactive_info_t ui_data; // UI数据，将底盘中的数据传入此结构体的对应变量中，UI会自动检测是否变化，对应显示UI
 
-static SuperCapInstance *cap; // 超级电容
+static SuperCapInstance *cap = { NULL }; // 超级电容
 static DJIMotorInstance *motor_lf, *motor_rf, *motor_lb, *motor_rb; // left right forward back
 
 /* 用于自旋变速策略的时间变量 */
@@ -150,28 +150,28 @@ void ChassisInit()
  * @brief 计算每个轮毂电机的输出,正运动学解算
  *        用宏进行预替换减小开销,运动解算具体过程参考教程
  */
-// static void MecanumCalculate()
-// {
-//     vt_lf = -chassis_vx - chassis_vy - chassis_cmd_recv.wz * LF_CENTER;
-//     vt_rf = -chassis_vx + chassis_vy - chassis_cmd_recv.wz * RF_CENTER;
-//     vt_lb = chassis_vx - chassis_vy - chassis_cmd_recv.wz * LB_CENTER;
-//     vt_rb = chassis_vx + chassis_vy - chassis_cmd_recv.wz * RB_CENTER;
-// }
+static void MecanumCalculate()
+{
+    vt_lf = -chassis_vx - chassis_vy - chassis_cmd_recv.wz * LF_CENTER;
+    vt_rf = -chassis_vx + chassis_vy - chassis_cmd_recv.wz * RF_CENTER;
+    vt_lb = chassis_vx - chassis_vy - chassis_cmd_recv.wz * LB_CENTER;
+    vt_rb = chassis_vx + chassis_vy - chassis_cmd_recv.wz * RB_CENTER;
+}
 
 // 针对全麦和全向轮构型，方案一，前轮麦轮，后轮全向轮结算。方案二，利用陀螺仪强力纠正侧向漂移
-static void HybridCalculate()
-{
-    // === 前轮 (麦克纳姆轮) ===
-    // 保持标准麦轮解算，它们需要负责产生横向分力
-    vt_lf = -chassis_vy - chassis_vx - chassis_cmd_recv.wz * LF_CENTER;
-    vt_rf = -chassis_vy + chassis_vx - chassis_cmd_recv.wz * RF_CENTER;
+// static void HybridCalculate()
+// {
+//     // === 前轮 (麦克纳姆轮) ===
+//     // 保持标准麦轮解算，它们需要负责产生横向分力
+//     vt_lf = -chassis_vy - chassis_vx - chassis_cmd_recv.wz * LF_CENTER;
+//     vt_rf = -chassis_vy + chassis_vx - chassis_cmd_recv.wz * RF_CENTER;
 
-    // === 后轮 (全向轮) ===
-    // 全向轮侧向是自由滚动的，电机不需要也不应该为了横移而转动
-    // 它们只负责前后驱动 (vx) 和 辅助旋转 (wz)
-    vt_lb = chassis_vy - chassis_cmd_recv.wz * LB_CENTER;
-    vt_rb = chassis_vy - chassis_cmd_recv.wz * RB_CENTER;
-}
+//     // === 后轮 (全向轮) ===
+//     // 全向轮侧向是自由滚动的，电机不需要也不应该为了横移而转动
+//     // 它们只负责前后驱动 (vx) 和 辅助旋转 (wz)
+//     vt_lb = chassis_vy - chassis_cmd_recv.wz * LB_CENTER;
+//     vt_rb = chassis_vy - chassis_cmd_recv.wz * RB_CENTER;
+// }
 /**
  * @brief 根据裁判系统和电容剩余容量对输出进行限制并设置电机参考值
  *
@@ -184,7 +184,7 @@ static void LimitChassisOutput()
         // 保持原样，发送实时buffer是正确的，超电板会根据这个决定是否全力充电
         cap->tx_msg.refereeEnergyBuffer = referee_data->PowerHeatData.buffer_energy;
 
-        // 2. 发送功率限制 (关键修改！！！)
+        // 2. 发送功率限制
         float referee_limit = referee_data->GameRobotState.chassis_power_limit;
 
         float safe_limit = referee_limit;
@@ -281,9 +281,12 @@ void ChassisTask()
     // 3. 最终限幅保护
     if (final_power_limit > 150.0f)
         final_power_limit = 150.0f; // 物理极限
-
     // 4. 设置给底盘功率控制算法 (这个函数控制电机的电流)
-    SetPowerLimit(final_power_limit);
+    if (referee_data) {
+        SetPowerLimit(final_power_limit);
+    } else {
+        SetPowerLimit(DEFAULT_TEST_POWER);
+    }
 
     if (chassis_cmd_recv.chassis_mode == CHASSIS_ZERO_FORCE) { // 如果出现重要模块离线或遥控器设置为急停,让电机停止
         DJIMotorStop(motor_lf);
@@ -321,8 +324,8 @@ void ChassisTask()
     chassis_vy = chassis_cmd_recv.vx * sin_theta + chassis_cmd_recv.vy * cos_theta;
 
     // 根据控制模式进行正运动学解算,计算底盘输出
-    // MecanumCalculate();
-    HybridCalculate();
+    MecanumCalculate();
+    // HybridCalculate();
 
     // 根据裁判系统的反馈数据和电容数据对输出限幅并设定闭环参考值
     LimitChassisOutput();

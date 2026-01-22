@@ -19,19 +19,18 @@
 #include "robot_cmd.h"
 #endif
 
-
 void RobotInit()
-{  
+{
     // 关闭中断,防止在初始化过程中发生中断
     // 请不要在初始化过程中使用中断和延时函数！
     // 若必须,则只允许使用DWT_Delay()
     __disable_irq();
-    
+
     BSPInit();
 
 #if defined(ONE_BOARD) || defined(GIMBAL_BOARD)
     RobotCMDInit();
-    // GimbalInit();
+    GimbalInit();
     // ShootInit();
 #endif
 
@@ -49,12 +48,11 @@ void RobotTask()
 {
 #if defined(ONE_BOARD) || defined(GIMBAL_BOARD)
     RobotCMDTask();
-    // GimbalTask();
+    GimbalTask();
     // ShootTask();
 #endif
 
 #if defined(ONE_BOARD) || defined(CHASSIS_BOARD)
     ChassisTask();
 #endif
-
 }

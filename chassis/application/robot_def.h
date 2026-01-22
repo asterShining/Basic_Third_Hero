@@ -9,6 +9,7 @@
  *
  */
 #pragma once // 可以用#pragma once代替#ifndef ROBOT_DEF_H(header guard)
+#include <math.h>
 #ifndef ROBOT_DEF_H
 #define ROBOT_DEF_H
 
@@ -214,7 +215,7 @@ typedef struct
 typedef struct
 {
     attitude_t gimbal_imu_data;
-    uint16_t yaw_motor_single_round_angle;
+    float yaw_motor_single_round_angle;
 } Gimbal_Upload_Data_s;
 
 typedef struct

@@ -24,11 +24,12 @@ void GimbalInit()
     Motor_Init_Config_s yaw_config = {
         .can_init_config = {
             .can_handle = &hcan1,
-            .tx_id = 1,
+            .tx_id = 0x01,
+            .rx_id = 0x03,
         },
         .controller_param_init_config = {
             .angle_PID = {
-                .Kp = 8, // 8
+                .Kp = 0.5, // 8
                 .Ki = 0,
                 .Kd = 0,
                 .DeadBand = 0.1,
@@ -38,12 +39,12 @@ void GimbalInit()
                 .MaxOut = 500,
             },
             .speed_PID = {
-                .Kp = 50, // 50
-                .Ki = 200, // 200
+                .Kp = 2.0, // 50
+                .Ki = 0, // 200
                 .Kd = 0,
                 .Improve = PID_Trapezoid_Intergral | PID_Integral_Limit | PID_Derivative_On_Measurement,
-                .IntegralLimit = 3000,
-                .MaxOut = 20000,
+                .IntegralLimit = 1000,
+                .MaxOut = 2500,
             },
             .other_angle_feedback_ptr = &gimba_IMU_data->YawTotalAngle,
             // 还需要增加角速度额外反馈指针,注意方向,ins_task.md中有c板的bodyframe坐标系说明
@@ -56,7 +57,7 @@ void GimbalInit()
             .close_loop_type = ANGLE_LOOP | SPEED_LOOP,
             .motor_reverse_flag = MOTOR_DIRECTION_NORMAL,
         },
-        .motor_type = J4310
+        .motor_type = J8006
     };
     // PITCH
     Motor_Init_Config_s pitch_config = {
@@ -66,7 +67,7 @@ void GimbalInit()
         },
         .controller_param_init_config = {
             .angle_PID = {
-                .Kp = 10, // 10
+                .Kp = 0, // 10
                 .Ki = 0,
                 .Kd = 0,
                 .Improve = PID_Trapezoid_Intergral | PID_Integral_Limit | PID_Derivative_On_Measurement,
@@ -74,8 +75,8 @@ void GimbalInit()
                 .MaxOut = 500,
             },
             .speed_PID = {
-                .Kp = 50, // 50
-                .Ki = 350, // 350
+                .Kp = 0, // 50
+                .Ki = 0, // 350
                 .Kd = 0, // 0
                 .Improve = PID_Trapezoid_Intergral | PID_Integral_Limit | PID_Derivative_On_Measurement,
                 .IntegralLimit = 2500,
@@ -96,7 +97,7 @@ void GimbalInit()
     };
     // 电机对total_angle闭环,上电时为零,会保持静止,收到遥控器数据再动
     yaw_motor = DMMotorInit(&yaw_config);
-    pitch_motor = DMMotorInit(&pitch_config);
+    // pitch_motor = DMMotorInit(&pitch_config);
 
     gimbal_pub = PubRegister("gimbal_feed", sizeof(Gimbal_Upload_Data_s));
     gimbal_sub = SubRegister("gimbal_cmd", sizeof(Gimbal_Ctrl_Cmd_s));
@@ -146,7 +147,7 @@ void GimbalTask()
     float yaw_rad = yaw_motor->measure.position;
 
     // 2. 将弧度转换为角度 ( 1 rad ≈ 57.3 deg )
-    float yaw_deg = yaw_rad * (180.0f / 3.14159265f);
+    float yaw_deg = yaw_rad * RAD_2_DEGREE;
 
     // 3. 将角度归一化到 0 ~ 360 度 (对应单圈角度)
     // DM电机的 position 可能是多圈的 (例如 720度, -50度等)，我们需要把它变成 0-360
@@ -156,10 +157,8 @@ void GimbalTask()
         yaw_deg -= 360.0f;
 
     // 4. 赋值给反馈数据
-    // 注意: robot_def.h 中 yaw_motor_single_round_angle 是 uint16_t 类型
-    gimbal_feedback_data.yaw_motor_single_round_angle = (uint16_t)yaw_deg;
+    gimbal_feedback_data.yaw_motor_single_round_angle = yaw_deg;
     gimbal_feedback_data.gimbal_imu_data = *gimba_IMU_data;
-    
 
     // 推送消息
     PubPushMessage(gimbal_pub, (void *)&gimbal_feedback_data);

@@ -17,9 +17,9 @@
 #define MX_CAN_COMM_COUNT 4 // 注意均衡负载,一条总线上不要挂载过多的外设
 
 #define CAN_COMM_MAX_BUFFSIZE 70 // 最大发送/接收字节数,如果不够可以增加此数值
-#define CAN_COMM_HEADER 's'      // 帧头
-#define CAN_COMM_TAIL 'e'        // 帧尾
-#define CAN_COMM_OFFSET_BYTES 4  // 's'+ datalen + 'e' + crc8
+#define CAN_COMM_HEADER 's' // 帧头
+#define CAN_COMM_TAIL 'e' // 帧尾
+#define CAN_COMM_OFFSET_BYTES 4 // 's'+ datalen + 'e' + crc8
 
 #pragma pack(1)
 /* CAN comm 结构体, 拥有CAN comm的app应该包含一个CAN comm指针 */
@@ -28,19 +28,19 @@ typedef struct
     CANInstance *can_ins;
     /* 发送部分 */
     uint8_t send_data_len; // 发送数据长度
-    uint8_t send_buf_len;  // 发送缓冲区长度,为发送数据长度+帧头单包数据长度帧尾以及校验和(4)
+    uint8_t send_buf_len; // 发送缓冲区长度,为发送数据长度+帧头单包数据长度帧尾以及校验和(4)
     uint8_t raw_sendbuf[CAN_COMM_MAX_BUFFSIZE + CAN_COMM_OFFSET_BYTES]; // 额外4个bytes保存帧头帧尾和校验和
     /* 接收部分 */
     uint8_t recv_data_len; // 接收数据长度
-    uint8_t recv_buf_len;  // 接收缓冲区长度,为接收数据长度+帧头单包数据长度帧尾以及校验和(4)
+    uint8_t recv_buf_len; // 接收缓冲区长度,为接收数据长度+帧头单包数据长度帧尾以及校验和(4)
     uint8_t raw_recvbuf[CAN_COMM_MAX_BUFFSIZE + CAN_COMM_OFFSET_BYTES]; // 额外4个bytes保存帧头帧尾和校验和
-    uint8_t unpacked_recv_data[CAN_COMM_MAX_BUFFSIZE];                  // 解包后的数据,调用CANCommGet()后cast成对应的类型通过指针读取即可
+    uint8_t unpacked_recv_data[CAN_COMM_MAX_BUFFSIZE]; // 解包后的数据,调用CANCommGet()后cast成对应的类型通过指针读取即可
     /* 接收和更新标志位*/
-    uint8_t recv_state;   // 接收状态,
+    uint8_t recv_state; // 接收状态,
     uint8_t cur_recv_len; // 当前已经接收到的数据长度(包括帧头帧尾datalen和校验和)
-    uint8_t update_flag;  // 数据更新标志位,当接收到新数据时,会将此标志位置1,调用CANCommGet()后会将此标志位置0
+    uint8_t update_flag; // 数据更新标志位,当接收到新数据时,会将此标志位置1,调用CANCommGet()后会将此标志位置0
 
-    DaemonInstance* comm_daemon;
+    DaemonInstance *comm_daemon;
 } CANCommInstance;
 #pragma pack()
 
@@ -48,8 +48,8 @@ typedef struct
 typedef struct
 {
     CAN_Init_Config_s can_config; // CAN初始化结构体
-    uint8_t send_data_len;        // 发送数据长度
-    uint8_t recv_data_len;        // 接收数据长度
+    uint8_t send_data_len; // 发送数据长度
+    uint8_t recv_data_len; // 接收数据长度
 
     uint16_t daemon_count; // 守护进程计数,用于初始化守护进程
 } CANComm_Init_Config_s;
@@ -83,9 +83,9 @@ void *CANCommGet(CANCommInstance *instance);
 
 /**
  * @brief 检查CANComm是否在线
- * 
- * @param instance 
- * @return uint8_t 
+ *
+ * @param instance
+ * @return uint8_t
  */
 uint8_t CANCommIsOnline(CANCommInstance *instance);
 

@@ -53,6 +53,8 @@ static Robot_Status_e robot_state; // 机器人整体工作状态
 
 BMI088Instance *bmi088_test; // 云台IMU
 BMI088_Data_t bmi088_data;
+// 定义一个静态变量来保存上一次的开关状态，初始化为下（急停/停止状态）
+static uint16_t last_switch_right = RC_SW_DOWN;
 void RobotCMDInit()
 {
     // BMI088_Init_Config_s bmi088_config = {
@@ -130,7 +132,7 @@ void RobotCMDInit()
         LOGERROR("[GIMBAL_DEBUG] CAN Comm Init Failed!");
     }
 #endif // GIMBAL_BOARD
-    gimbal_cmd_send.pitch = 0;
+    // gimbal_cmd_send.pitch = 0;
 
     robot_state = ROBOT_READY; // 启动时机器人进入工作模式,后续加入所有应用初始化完成之后再进入
 }
@@ -140,52 +142,52 @@ void RobotCMDInit()
  *        单圈绝对角度的范围是0~360,说明文档中有图示
  *
  */
-// static void CalcOffsetAngle()
-// {
-//     // 别名angle提高可读性,不然太长了不好看,虽然基本不会动这个函数
-//     static float angle;
-//     angle = gimbal_fetch_data.yaw_motor_single_round_angle; // 从云台获取的当前yaw电机单圈角度
-// #if YAW_ECD_GREATER_THAN_4096 // 如果大于180度
-//     if (angle > YAW_ALIGN_ANGLE && angle <= 180.0f + YAW_ALIGN_ANGLE)
-//         chassis_cmd_send.offset_angle = angle - YAW_ALIGN_ANGLE;
-//     else if (angle > 180.0f + YAW_ALIGN_ANGLE)
-//         chassis_cmd_send.offset_angle = angle - YAW_ALIGN_ANGLE - 360.0f;
-//     else
-//         chassis_cmd_send.offset_angle = angle - YAW_ALIGN_ANGLE;
-// #else // 小于180度
-//     if (angle > YAW_ALIGN_ANGLE)
-//         chassis_cmd_send.offset_angle = angle - YAW_ALIGN_ANGLE;
-//     else if (angle <= YAW_ALIGN_ANGLE && angle >= YAW_ALIGN_ANGLE - 180.0f)
-//         chassis_cmd_send.offset_angle = angle - YAW_ALIGN_ANGLE;
-//     else
-//         chassis_cmd_send.offset_angle = angle - YAW_ALIGN_ANGLE + 360.0f;
-// #endif
-// }
 static void CalcOffsetAngle()
 {
-    // 获取你在 gimbal.c 中计算出的 0~360 度角度
-    float angle_deg = gimbal_fetch_data.yaw_motor_single_round_angle;
-
-    // DM电机通常上电归零，所以偏移量设为0；如果需要机械对齐，可修改 YAW_ALIGN_ANGLE
-    float align_offset = 0.0f;
-    // 或者保留宏定义： float align_offset = YAW_CHASSIS_ALIGN_ECD * ECD_ANGLE_COEF_DJI; (需确保宏转换正确)
-
-    // 1. 计算原始偏差
-    float error = angle_deg - align_offset;
-
-    // 2. 归一化到 0~360
-    while (error < 0.0f)
-        error += 360.0f;
-    while (error >= 360.0f)
-        error -= 360.0f;
-
-    // 3. 转换为 -180 ~ +180 范围 (最短路径逻辑)
-    if (error > 180.0f) {
-        chassis_cmd_send.offset_angle = error - 360.0f; // 例如 350 -> -10
-    } else {
-        chassis_cmd_send.offset_angle = error; // 例如 10 -> 10
-    }
+    // 别名angle提高可读性,不然太长了不好看,虽然基本不会动这个函数
+    static float angle;
+    angle = gimbal_fetch_data.yaw_motor_single_round_angle; // 从云台获取的当前yaw电机单圈角度
+#if YAW_ECD_GREATER_THAN_4096 // 如果大于180度
+    if (angle > YAW_ALIGN_ANGLE && angle <= 180.0f + YAW_ALIGN_ANGLE)
+        chassis_cmd_send.offset_angle = angle - YAW_ALIGN_ANGLE;
+    else if (angle > 180.0f + YAW_ALIGN_ANGLE)
+        chassis_cmd_send.offset_angle = angle - YAW_ALIGN_ANGLE - 360.0f;
+    else
+        chassis_cmd_send.offset_angle = angle - YAW_ALIGN_ANGLE;
+#else // 小于180度
+    if (angle > YAW_ALIGN_ANGLE)
+        chassis_cmd_send.offset_angle = angle - YAW_ALIGN_ANGLE;
+    else if (angle <= YAW_ALIGN_ANGLE && angle >= YAW_ALIGN_ANGLE - 180.0f)
+        chassis_cmd_send.offset_angle = angle - YAW_ALIGN_ANGLE;
+    else
+        chassis_cmd_send.offset_angle = angle - YAW_ALIGN_ANGLE + 360.0f;
+#endif
 }
+// static void CalcOffsetAngle()
+// {
+//     // 获取你在 gimbal.c 中计算出的 0~360 度角度
+//     float gimbal_angle = gimbal_fetch_data.yaw_motor_single_round_angle;
+
+//     // DM电机通常上电归零，所以偏移量设为0；如果需要机械对齐，可修改 YAW_ALIGN_ANGLE
+//     float align_offset = 0.0f;
+//     // 或者保留宏定义： float align_offset = YAW_CHASSIS_ALIGN_ECD * ECD_ANGLE_COEF_DJI; (需确保宏转换正确)
+
+//     // 1. 计算原始偏差
+//     float error = gimbal_angle - align_offset;
+
+//     // 2. 归一化到 0~360
+//     while (error < 0.0f)
+//         error += 360.0f;
+//     while (error >= 360.0f)
+//         error -= 360.0f;
+
+//     // 3. 转换为 -180 ~ +180 范围 (最短路径逻辑)
+//     if (error > 180.0f) {
+//         chassis_cmd_send.offset_angle = error - 360.0f; // 例如 350 -> -10
+//     } else {
+//         chassis_cmd_send.offset_angle = error; // 例如 10 -> 10
+//     }
+// }
 /**
  * @brief  紧急停止,包括遥控器左上侧拨轮打满/重要模块离线/双板通信失效等
  *         停止的阈值'300'待修改成合适的值,或改为开关控制.
@@ -219,35 +221,51 @@ static void EmergencyHandler()
  */
 static void RemoteControlSet()
 {
-    // 控制底盘和云台运行模式,云台待添加,云台是否始终使用IMU数据?
-    if (switch_is_down(rc_data[TEMP].rc.switch_right)) {
-        // 右侧拨杆最下面：急停模式
+    // 1. 获取当前开关状态
+    uint16_t current_switch_right = rc_data[TEMP].rc.switch_right;
+
+    // --- 状态机逻辑 ---
+
+    // [下] 急停模式
+    if (switch_is_down(current_switch_right)) {
         EmergencyHandler();
-    } else if (switch_is_mid(rc_data[TEMP].rc.switch_right)) {
-        // 右侧拨杆最中：底盘无力，云台能够转动
+    }
+    // [中] 底盘无力，云台能够转动
+    else if (switch_is_mid(current_switch_right)) {
+        // 如果是从[下]或其他模式刚刚切换到[中]
+        if (!switch_is_mid(last_switch_right)) {
+            // 无扰切换：将目标角度重置为当前实际角度
+            gimbal_cmd_send.yaw = gimbal_fetch_data.gimbal_imu_data.YawTotalAngle;
+            gimbal_cmd_send.pitch = gimbal_fetch_data.gimbal_imu_data.Pitch;
+        }
+
         robot_state = ROBOT_READY;
         chassis_cmd_send.chassis_mode = CHASSIS_NO_FOLLOW;
         gimbal_cmd_send.gimbal_mode = GIMBAL_FREE_MODE;
         shoot_cmd_send.shoot_mode = SHOOT_ON;
+    }
+    // [上] 底盘跟随云台模式 (你特别要求的模式)
+    else if (switch_is_up(current_switch_right)) {
+        // 核心修改：检测是否刚刚切入[上]档位
+        if (!switch_is_up(last_switch_right)) {
+            // 【无扰切换执行】
+            // 将云台控制的"目标值"强行设定为当前的"反馈值"
+            // 这样PID的误差(Error)在这一瞬间为0，避免云台疯转
+            gimbal_cmd_send.yaw = gimbal_fetch_data.gimbal_imu_data.YawTotalAngle;
+            gimbal_cmd_send.pitch = gimbal_fetch_data.gimbal_imu_data.Pitch;
+        }
 
-    } else if (switch_is_up(rc_data[TEMP].rc.switch_right)) {
-        // 右侧拨杆上面：底盘跟随云台模式
         robot_state = ROBOT_READY;
         chassis_cmd_send.chassis_mode = CHASSIS_FOLLOW_GIMBAL_YAW;
         gimbal_cmd_send.gimbal_mode = GIMBAL_GYRO_MODE;
         shoot_cmd_send.shoot_mode = SHOOT_ON;
     }
 
-    // 云台参数,确定云台控制数据
-    if (switch_is_mid(rc_data[TEMP].rc.switch_left)) // 左侧开关状态为[中],视觉模式
-    {
-        // 待添加,视觉会发来和目标的误差,同样将其转化为total angle的增量进行控制
-        // ...
-    }
-    // 左侧开关状态为[下],或视觉未识别到目标,纯遥控器拨杆控制
-    if (switch_is_down(rc_data[TEMP].rc.switch_left) || vision_recv_data->target_state == NO_TARGET) { // 按照摇杆的输出大小进行角度增量,增益系数需调整
-        gimbal_cmd_send.yaw += 0.005f * (float)rc_data[TEMP].rc.rocker_l_;
-        gimbal_cmd_send.pitch += 0.001f * (float)rc_data[TEMP].rc.rocker_l1;
+    // --- 摇杆控制量计算 (仅在非急停状态下累加) ---
+    // 防止在急停时摇杆误触导致后台目标值累积
+    if (!switch_is_down(current_switch_right)) {
+        gimbal_cmd_send.yaw += 0.01f * (float)rc_data[TEMP].rc.rocker_l_;
+        gimbal_cmd_send.pitch += 0.0001f * (float)rc_data[TEMP].rc.rocker_l1;
     }
     // 云台软件限位
 
