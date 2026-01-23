@@ -119,7 +119,7 @@ DMMotorInstance *DMMotorInit(Motor_Init_Config_s *config)
     DMMotorEnable(motor);
     DMMotorSetMode(DM_CMD_MOTOR_MODE, motor);
     DWT_Delay(0.1);
-    DMMotorCaliEncoder(motor);
+    // DMMotorCaliEncoder(motor);
     DWT_Delay(0.1);
     dm_motor_instance[idx++] = motor;
     return motor;
