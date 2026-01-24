@@ -142,6 +142,7 @@ typedef struct
     float wz; // 旋转速度
     float offset_angle; // 底盘和归中位置的夹角
     float gimbal_gyro_z; // 来自云台的陀螺仪z轴角速度前馈
+    float gimbal_cmd_wz;
     chassis_mode_e chassis_mode;
     int chassis_speed_buff;
     super_cap_mode_e cap_mode;

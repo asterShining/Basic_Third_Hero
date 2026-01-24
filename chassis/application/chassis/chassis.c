@@ -30,7 +30,7 @@
 #define HALF_WHEEL_BASE (WHEEL_BASE / 2.0f) // 半轴距
 #define HALF_TRACK_WIDTH (TRACK_WIDTH / 2.0f) // 半轮距
 #define PERIMETER_WHEEL (RADIUS_WHEEL * 2 * PI) // 轮子周长
-#define DEFAULT_TEST_POWER 40.0f // 调试用的基础功率
+#define DEFAULT_TEST_POWER 85.0f // 调试用的基础功率
 
 /* 底盘应用包含的模块和信息存储,底盘是单例模式,因此不需要为底盘建立单独的结构体 */
 #ifdef CHASSIS_BOARD // 如果是底盘板,使用板载IMU获取底盘转动角速度
@@ -103,7 +103,7 @@ void ChassisInit()
 
     chassis_motor_config.can_init_config.can_handle = &hcan2;
     chassis_motor_config.can_init_config.tx_id = 4;
-    chassis_motor_config.controller_setting_init_config.motor_reverse_flag = MOTOR_DIRECTION_REVERSE;
+    chassis_motor_config.controller_setting_init_config.motor_reverse_flag = MOTOR_DIRECTION_NORMAL;
     motor_lb = PowerControlInit(&chassis_motor_config);
     chassis_motor_config.can_init_config.can_handle = &hcan2;
     chassis_motor_config.can_init_config.tx_id = 3;
@@ -123,23 +123,23 @@ void ChassisInit()
     // cap = SuperCapInit(&cap_conf); // 超级电容初始化
 
     PID_Init_Config_s yaw_lock_conf = {
-        .Kp = -19.0f, // 强力纠正
-        .Ki = 13.0f, // 消除静差
-        .Kd = 0.0f, // 抑制震荡
+        .Kp = -29.0f, // 强力纠正
+        .Ki = 12.0f, // 消除静差
+        .Kd = 5.0f, // 抑制震荡
         .IntegralLimit = 500.0f, // 积分限幅
         .Improve = PID_Trapezoid_Intergral | PID_Integral_Limit | PID_Derivative_On_Measurement,
-        .MaxOut = 5000.0f, // 输出限幅 (对应 chassis_cmd_recv.wz 的量级)
+        .MaxOut = 7000.0f, // 输出限幅 (对应 chassis_cmd_recv.wz 的量级)
         .Output_LPF_RC = 0.0f,
         .DeadBand = 0.5f,
     };
     PIDInit(&yaw_lock_pid, &yaw_lock_conf);
     // 底盘跟随云台
     ChassisFollow_Config_s follow_config = {
-        .deadzone_angle = 4.0f, // 0.5度死区
+        .deadzone_angle = 3.0f, // 3度死区
 
         // 位置环参数 (外环)
         .angle_pid = {
-            .kp = 8.0f, // 需调试: 响应速度
+            .kp = 7.2f, // 需调试: 响应速度
             .ki = 0.0f,
             .kd = 0.0f,
             .IntegralLimit = 100.0f,
@@ -148,10 +148,10 @@ void ChassisInit()
 
         // 速度环参数 (内环)
         .speed_pid = {
-            .kp = 5.0f, // 需调试: 刚性
+            .kp = 4.2f, // 需调试: 刚性
             .ki = 0.0f,
-            .kd = 0.05f,
-            .IntegralLimit = 1000.0f,
+            .kd = 0.0f,
+            .IntegralLimit = 500.0f,
             .max_out = 5000.0f // 电机最大输出
         }
     };
@@ -209,8 +209,8 @@ static void MecanumCalculate()
 static void HybridCalculate()
 {
     // 前轮 (麦轮)：系数 = 轮距 + 轴距
-    vt_lf = -chassis_vy - chassis_vx - chassis_cmd_recv.wz * LF_CENTER;
-    vt_rf = -chassis_vy + chassis_vx - chassis_cmd_recv.wz * RF_CENTER;
+    vt_lf = -chassis_vx - chassis_vy - chassis_cmd_recv.wz * LF_CENTER;
+    vt_rf = -chassis_vx + chassis_vy - chassis_cmd_recv.wz * RF_CENTER;
 
     // 后轮 (全向轮)：修正系数，只保留 半轮距 (HALF_TRACK_WIDTH)
     // 假设 w > 0 是逆时针，后轮应该产生差速让屁股往右甩 (即左后轮减速，右后轮加速? 具体看电机安装方向)
@@ -219,9 +219,9 @@ static void HybridCalculate()
     // 计算后轮所需的旋转线速度分量
     float rear_rot_spd = chassis_cmd_recv.wz * HALF_TRACK_WIDTH * DEGREE_2_RAD;
 
-    // 只有纵向速度 vx 参与，vy 对全向轮无效
-    vt_lb = chassis_vx - rear_rot_spd;
-    vt_rb = chassis_vx + rear_rot_spd; // 左右轮旋转项符号相反，形成力偶
+    // 只有纵向速度 vy 参与，vy 对全向轮无效
+    vt_lb = chassis_vy - rear_rot_spd;
+    vt_rb = chassis_vy + rear_rot_spd; // 左右轮旋转项符号相反，形成力偶
 }
 /**
  * @brief 根据裁判系统和电容剩余容量对输出进行限制并设置电机参考值
@@ -302,39 +302,58 @@ static void ChassisHeadLock()
     if (Chassis_IMU_data == NULL)
         return;
 
-    if (fabsf(chassis_cmd_recv.wz) > 100.0f) { // 阈值可以稍微加大一点，例如 100
-        is_manual_rotating = 1;
-        // 手动模式：重置 PID 积分，更新目标角度跟随当前角度（防止切回时突变）
-        yaw_lock_pid.Iout = 0;
-        lock_target_yaw = Chassis_IMU_data->Yaw;
-
-        // 手动模式下，直接使用遥控器的 wz，不做任何处理（或者可以在这里做一些平滑）
-        // chassis_cmd_recv.wz = chassis_cmd_recv.wz;
-
-    } else {
-        if (is_manual_rotating) {
-            // 刚松手的瞬间
-            is_manual_rotating = 0;
-            lock_target_yaw = Chassis_IMU_data->Yaw; // 锁定当前朝向
-        }
-
-        // 3. 计算误差 (处理过零点)
-        float current_yaw = Chassis_IMU_data->Yaw;
-        float err_angle = lock_target_yaw - current_yaw;
-
-        if (err_angle > 180.0f)
-            err_angle -= 360.0f;
-        else if (err_angle < -180.0f)
-            err_angle += 360.0f;
-
-        // 4. 计算并叠加 PID
-        // 只有在非手动模式下才计算
-        if (is_manual_rotating == 0) {
-            // 使用前面提到的正确调用方式
-            float pid_out = PIDCalculate(&yaw_lock_pid, 0.0f, err_angle);
-            chassis_cmd_recv.wz = pid_out;
-        }
+    // --- 1. 初始化逻辑 (防止上电瞬间乱转) ---
+    static uint8_t is_initialized = 0;
+    if (!is_initialized) {
+        lock_target_yaw = Chassis_IMU_data->Yaw; // 上电第一刻，锁定当前角度
+        is_initialized = 1;
     }
+
+    // --- 2. 获取输入并积分 (核心步骤) ---
+    // 假设摇杆 wz 范围是 -660 ~ +660
+    float input_wz = chassis_cmd_recv.gimbal_cmd_wz;
+
+    // 死区处理：防止摇杆回中时的微小漂移导致目标角度缓慢移动
+    if (fabsf(input_wz) < 100.0f) {
+        input_wz = 0.0f;
+    }
+
+    // 灵敏度系数：决定了你推满摇杆时，底盘旋转得有多快
+    // 计算公式：最大转速(度/秒) = 660 * 系数 * 控制频率(Hz)
+    // 例如：0.002 * 660 * 500Hz(假设) = 660度/秒 (约2圈/秒)
+    // 建议从 0.001f 开始调，觉得慢了就加大
+    const float SENSITIVITY = 0.00015f;
+
+    // 积分：输入改变的是“目标”，而不是直接改变“速度”
+    lock_target_yaw += input_wz * SENSITIVITY;
+
+    // --- 3. 目标角度过零处理 (归一化到 -180 ~ 180) ---
+    // 这一步至关重要！否则转几圈后 target 变成 720度，PID 就失效了
+    if (lock_target_yaw > 180.0f) {
+        lock_target_yaw -= 360.0f;
+    } else if (lock_target_yaw < -180.0f) {
+        lock_target_yaw += 360.0f;
+    }
+
+    // --- 4. 计算最短路径误差 ---
+    float current_yaw = Chassis_IMU_data->Yaw;
+    float err_angle = lock_target_yaw - current_yaw;
+
+    // 处理跨越 ±180 度的情况 (例如 目标179，当前-179，实际只差2度)
+    if (err_angle > 180.0f) {
+        err_angle -= 360.0f;
+    } else if (err_angle < -180.0f) {
+        err_angle += 360.0f;
+    }
+
+    // --- 5. PID 计算与输出 ---
+    // 此时 PID 全时在线，负责把底盘拉向 target
+    // 你的 PID 配置中启用了 PID_Derivative_On_Measurement，这非常棒！
+    // 它可以防止当你快速推摇杆改变 target 时，D项产生冲击。
+    float pid_out = PIDCalculate(&yaw_lock_pid, 0.0f, err_angle);
+
+    // 最终将 PID 计算出的力矩/速度赋值给 wz
+    chassis_cmd_recv.wz = pid_out;
 }
 /* 机器人底盘控制核心任务 */
 void ChassisTask()
@@ -344,7 +363,7 @@ void ChassisTask()
 
     float chassis_wz = 0.0f;
     if (Chassis_IMU_data != NULL) {
-        chassis_wz = Chassis_IMU_data->Gyro[2] * 57.29578f;
+        chassis_wz = Chassis_IMU_data->Gyro[2] * RAD_2_DEGREE; // 底盘IMU的z轴角速度
     }
 
     // 后续增加没收到消息的处理(双板的情况)
@@ -403,10 +422,16 @@ void ChassisTask()
     case CHASSIS_FOLLOW_GIMBAL_YAW: // 跟随云台,不单独设置pid,以误差角度平方为速度输出
         // chassis_cmd_recv.wz = -1.5f * chassis_cmd_recv.offset_angle * abs(chassis_cmd_recv.offset_angle);
         if (chassis_follow_ptr != NULL) {
+            float err = chassis_cmd_recv.offset_angle;
+
+            // 2. 死区处理
+            if (fabsf(err) < 0.5) {
+                err = 0.0f; // 如果误差很小，就当做没误差，让电机休息
+            }
             chassis_cmd_recv.wz = ChassisFollowCalc(
                 chassis_follow_ptr, // 实例指针
-                chassis_cmd_recv.offset_angle, // 角度误差
-                -gimbal_wz, // 前馈速度
+                -err, // 角度误差
+                gimbal_wz, // 前馈速度
                 chassis_wz // 反馈速度
             );
             break;
@@ -429,11 +454,11 @@ void ChassisTask()
     chassis_vy = chassis_cmd_recv.vx * sin_theta + chassis_cmd_recv.vy * cos_theta;
 
     if (chassis_cmd_recv.chassis_mode == CHASSIS_NO_FOLLOW) {
-        ChassisHeadLock();
+        // ChassisHeadLock();
     }
     // 根据控制模式进行正运动学解算,计算底盘输出
-    // MecanumCalculate();
-    HybridCalculate();
+    MecanumCalculate();
+    // HybridCalculate();
 
     // 根据裁判系统的反馈数据和电容数据对输出限幅并设定闭环参考值
     LimitChassisOutput();

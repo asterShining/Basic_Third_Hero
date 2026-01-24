@@ -24,7 +24,7 @@ ChassisFollowInstance *ChassisFollowInit(ChassisFollow_Config_s *config)
 
     // 5. 保存配置参数
     instance->config = *config;
-    instance->feed_forward_gain = 1.0f; // 默认开启全额前馈
+    instance->feed_forward_gain = 0.0f; // 默认开启全额前馈
     instance->enable = 1;
 
     // 6. 初始化内部 位置环 PID
@@ -49,7 +49,7 @@ ChassisFollowInstance *ChassisFollowInit(ChassisFollow_Config_s *config)
         .MaxOut = config->speed_pid.max_out,
         .IntegralLimit = config->speed_pid.IntegralLimit, // 经验值：速度环积分可以适当大一些 //3000
         .Improve = PID_Trapezoid_Intergral | PID_Integral_Limit | PID_Derivative_On_Measurement,
-        .Output_LPF_RC = 0.02f, // 速度环增加少量滤波防抖
+        .Output_LPF_RC = 0.3f, // 速度环增加少量滤波防抖
     };
     PIDInit(&instance->speed_pid_inst, &speed_conf);
 
@@ -77,6 +77,13 @@ float ChassisFollowCalc(ChassisFollowInstance *instance, float angle_error, floa
     // 1. 安全检查
     if (instance == NULL || instance->enable == 0) {
         return 0.0f;
+    }
+
+    // 将误差限制在 -180 到 180 度之间
+    if (angle_error > 180.0f) {
+        angle_error -= 360.0f;
+    } else if (angle_error < -180.0f) {
+        angle_error += 360.0f;
     }
 
     // 2. 位置环计算 (Step 1: Position Loop)

@@ -319,7 +319,7 @@ static void RemoteControlSet()
 
     // 底盘参数,目前没有加入小陀螺(调试似乎暂时没有必要),系数需要调整
     chassis_cmd_send.vx = 10.0f * (float)rc_data[TEMP].rc.rocker_r_; // _水平方向
-    chassis_cmd_send.vy = -10.0f * (float)rc_data[TEMP].rc.rocker_r1; // 1数值方向
+    chassis_cmd_send.vy = 10.0f * (float)rc_data[TEMP].rc.rocker_r1; // 1数值方向
 
     // 发射参数
     if (switch_is_up(rc_data[TEMP].rc.switch_right)) // 右侧开关状态[上],弹舱打开
@@ -329,19 +329,25 @@ static void RemoteControlSet()
             // 弹舱舵机控制,待添加servo_motor模块,关闭
         };
     }
+    if (rc_data[TEMP].rc.dial < -200) // 向上超过100,打开摩擦轮
+        chassis_cmd_send.gimbal_cmd_wz = 4000;
+    else if (rc_data[TEMP].rc.dial > 200)
+        chassis_cmd_send.gimbal_cmd_wz = -4000;
+    else
+        chassis_cmd_send.gimbal_cmd_wz = 0;
 
-    // 摩擦轮控制,拨轮向上打为负,向下为正
-    if (rc_data[TEMP].rc.dial < -100) // 向上超过100,打开摩擦轮
-        shoot_cmd_send.friction_mode = FRICTION_ON;
-    else
-        shoot_cmd_send.friction_mode = FRICTION_OFF;
-    // 拨弹控制,遥控器固定为一种拨弹模式,可自行选择
-    if (rc_data[TEMP].rc.dial < -500)
-        shoot_cmd_send.load_mode = LOAD_BURSTFIRE;
-    else
-        shoot_cmd_send.load_mode = LOAD_STOP;
-    // 射频控制,固定每秒1发,后续可以根据左侧拨轮的值大小切换射频,
-    shoot_cmd_send.shoot_rate = 8;
+    // // 摩擦轮控制,拨轮向上打为负,向下为正
+    // if (rc_data[TEMP].rc.dial < -100) // 向上超过100,打开摩擦轮
+    //     shoot_cmd_send.friction_mode = FRICTION_ON;
+    // else
+    //     shoot_cmd_send.friction_mode = FRICTION_OFF;
+    // // 拨弹控制,遥控器固定为一种拨弹模式,可自行选择
+    // if (rc_data[TEMP].rc.dial < -500)
+    //     shoot_cmd_send.load_mode = LOAD_BURSTFIRE;
+    // else
+    //     shoot_cmd_send.load_mode = LOAD_STOP;
+    // // 射频控制,固定每秒1发,后续可以根据左侧拨轮的值大小切换射频,
+    // shoot_cmd_send.shoot_rate = 8;
 }
 
 /**
