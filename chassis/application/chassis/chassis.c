@@ -98,7 +98,7 @@ void ChassisInit()
 
     chassis_motor_config.can_init_config.can_handle = &hcan1;
     chassis_motor_config.can_init_config.tx_id = 2;
-    chassis_motor_config.controller_setting_init_config.motor_reverse_flag = MOTOR_DIRECTION_NORMAL;
+    chassis_motor_config.controller_setting_init_config.motor_reverse_flag = MOTOR_DIRECTION_REVERSE;
     motor_rf = PowerControlInit(&chassis_motor_config);
 
     chassis_motor_config.can_init_config.can_handle = &hcan2;
@@ -123,13 +123,14 @@ void ChassisInit()
     // cap = SuperCapInit(&cap_conf); // 超级电容初始化
 
     PID_Init_Config_s yaw_lock_conf = {
-        .Kp = 2.0f, // 强力纠正
-        .Ki = 0.0f, // 消除静差
+        .Kp = -19.0f, // 强力纠正
+        .Ki = 13.0f, // 消除静差
         .Kd = 0.0f, // 抑制震荡
         .IntegralLimit = 500.0f, // 积分限幅
         .Improve = PID_Trapezoid_Intergral | PID_Integral_Limit | PID_Derivative_On_Measurement,
-        .MaxOut = 7000.0f, // 输出限幅 (对应 chassis_cmd_recv.wz 的量级)
+        .MaxOut = 5000.0f, // 输出限幅 (对应 chassis_cmd_recv.wz 的量级)
         .Output_LPF_RC = 0.0f,
+        .DeadBand = 0.5f,
     };
     PIDInit(&yaw_lock_pid, &yaw_lock_conf);
     // 底盘跟随云台
@@ -207,16 +208,20 @@ static void MecanumCalculate()
 // 针对全麦和全向轮构型，方案一，前轮麦轮，后轮全向轮结算。方案二，利用陀螺仪强力纠正侧向漂移
 static void HybridCalculate()
 {
-    // === 前轮 (麦克纳姆轮) ===
-    // 保持标准麦轮解算，它们需要负责产生横向分力
+    // 前轮 (麦轮)：系数 = 轮距 + 轴距
     vt_lf = -chassis_vy - chassis_vx - chassis_cmd_recv.wz * LF_CENTER;
     vt_rf = -chassis_vy + chassis_vx - chassis_cmd_recv.wz * RF_CENTER;
 
-    // === 后轮 (全向轮) ===
-    // 全向轮侧向是自由滚动的，电机不需要也不应该为了横移而转动
+    // 后轮 (全向轮)：修正系数，只保留 半轮距 (HALF_TRACK_WIDTH)
+    // 假设 w > 0 是逆时针，后轮应该产生差速让屁股往右甩 (即左后轮减速，右后轮加速? 具体看电机安装方向)
+    // 根据你代码中 LF_CENTER (W+L) 前面是减号，推测减号是产生正旋转
 
-    vt_lb = chassis_vy - chassis_cmd_recv.wz * LB_CENTER;
-    vt_rb = chassis_vy - chassis_cmd_recv.wz * RB_CENTER;
+    // 计算后轮所需的旋转线速度分量
+    float rear_rot_spd = chassis_cmd_recv.wz * HALF_TRACK_WIDTH * DEGREE_2_RAD;
+
+    // 只有纵向速度 vx 参与，vy 对全向轮无效
+    vt_lb = chassis_vx - rear_rot_spd;
+    vt_rb = chassis_vx + rear_rot_spd; // 左右轮旋转项符号相反，形成力偶
 }
 /**
  * @brief 根据裁判系统和电容剩余容量对输出进行限制并设置电机参考值
@@ -297,33 +302,20 @@ static void ChassisHeadLock()
     if (Chassis_IMU_data == NULL)
         return;
 
-    // 定义消抖计数器
-    static uint16_t manual_detect_count = 0;
-    // 定义消抖阈值（例如 50ms @ 500Hz task = 25次）
-    // 你觉得太快，就把这个数字改大，越大概率越“迟钝”但越稳
-    const uint16_t DETECTION_THRESHOLD_COUNT = 30;
+    if (fabsf(chassis_cmd_recv.wz) > 100.0f) { // 阈值可以稍微加大一点，例如 100
+        is_manual_rotating = 1;
+        // 手动模式：重置 PID 积分，更新目标角度跟随当前角度（防止切回时突变）
+        yaw_lock_pid.Iout = 0;
+        lock_target_yaw = Chassis_IMU_data->Yaw;
 
-    // 1. 判断是否有人为旋转指令（增加死区到 50 防止漂移）
-    if (fabsf(chassis_cmd_recv.wz) > 50.0f) {
-        // 只有当计数器累加超过设定值时，才真正认为是手动模式
-        if (manual_detect_count < DETECTION_THRESHOLD_COUNT) {
-            manual_detect_count++;
-        } else {
-            // 恭喜，坚持了这么久，确认是真手动
-            is_manual_rotating = 1;
-            lock_target_yaw = Chassis_IMU_data->Yaw;
+        // 手动模式下，直接使用遥控器的 wz，不做任何处理（或者可以在这里做一些平滑）
+        // chassis_cmd_recv.wz = chassis_cmd_recv.wz;
 
-            // 清除积分
-            yaw_lock_pid.Iout = 0;
-        }
     } else {
-        // 只要有一次不满足旋转条件，计数器直接清零（严格判定）
-        manual_detect_count = 0;
-
-        // 2. 刚松手逻辑
         if (is_manual_rotating) {
-            lock_target_yaw = Chassis_IMU_data->Yaw;
+            // 刚松手的瞬间
             is_manual_rotating = 0;
+            lock_target_yaw = Chassis_IMU_data->Yaw; // 锁定当前朝向
         }
 
         // 3. 计算误差 (处理过零点)
@@ -340,7 +332,7 @@ static void ChassisHeadLock()
         if (is_manual_rotating == 0) {
             // 使用前面提到的正确调用方式
             float pid_out = PIDCalculate(&yaw_lock_pid, 0.0f, err_angle);
-            chassis_cmd_recv.wz += pid_out;
+            chassis_cmd_recv.wz = pid_out;
         }
     }
 }
@@ -406,7 +398,7 @@ void ChassisTask()
     // 根据控制模式设定旋转速度
     switch (chassis_cmd_recv.chassis_mode) {
     case CHASSIS_NO_FOLLOW: // 底盘不旋转,但维持全向机动,一般用于调整云台姿态
-        chassis_cmd_recv.wz = 0;
+
         break;
     case CHASSIS_FOLLOW_GIMBAL_YAW: // 跟随云台,不单独设置pid,以误差角度平方为速度输出
         // chassis_cmd_recv.wz = -1.5f * chassis_cmd_recv.offset_angle * abs(chassis_cmd_recv.offset_angle);
