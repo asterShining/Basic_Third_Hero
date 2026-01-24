@@ -19,6 +19,7 @@
 #include "super_cap.h"
 #include "message_center.h"
 #include "referee_task.h"
+#include "chassis_follow.h"
 
 #include "general_def.h"
 #include "bsp_dwt.h"
@@ -29,7 +30,7 @@
 #define HALF_WHEEL_BASE (WHEEL_BASE / 2.0f) // 半轴距
 #define HALF_TRACK_WIDTH (TRACK_WIDTH / 2.0f) // 半轮距
 #define PERIMETER_WHEEL (RADIUS_WHEEL * 2 * PI) // 轮子周长
-#define DEFAULT_TEST_POWER 55.0f // 调试用的基础功率
+#define DEFAULT_TEST_POWER 40.0f // 调试用的基础功率
 
 /* 底盘应用包含的模块和信息存储,底盘是单例模式,因此不需要为底盘建立单独的结构体 */
 #ifdef CHASSIS_BOARD // 如果是底盘板,使用板载IMU获取底盘转动角速度
@@ -45,12 +46,18 @@ static Subscriber_t *chassis_sub; // 用于订阅底盘的控制命令
 static Chassis_Ctrl_Cmd_s chassis_cmd_recv; // 底盘接收到的控制命令
 static Chassis_Upload_Data_s chassis_feedback_data; // 底盘回传的反馈数据
 
-static PIDInstance buffer_PID; // 用于底盘的缓冲能量PID
 static referee_info_t *referee_data = { NULL }; // 用于获取裁判系统的数据
 static Referee_Interactive_info_t ui_data; // UI数据，将底盘中的数据传入此结构体的对应变量中，UI会自动检测是否变化，对应显示UI
 
 static SuperCapInstance *cap = { NULL }; // 超级电容
 static DJIMotorInstance *motor_lf, *motor_rf, *motor_lb, *motor_rb; // left right forward back
+
+static ChassisFollowInstance *chassis_follow_ptr = NULL;
+
+// 方案二，陀螺仪针对全麦纠偏PID
+static PIDInstance yaw_lock_pid; // 航向锁定专用PID
+static float lock_target_yaw = 0.0f; // 锁定的目标角度
+static uint8_t is_manual_rotating = 0; // 标记是否正在手动旋转
 
 /* 用于自旋变速策略的时间变量 */
 // static float t;
@@ -91,12 +98,12 @@ void ChassisInit()
 
     chassis_motor_config.can_init_config.can_handle = &hcan1;
     chassis_motor_config.can_init_config.tx_id = 2;
-    chassis_motor_config.controller_setting_init_config.motor_reverse_flag = MOTOR_DIRECTION_REVERSE;
+    chassis_motor_config.controller_setting_init_config.motor_reverse_flag = MOTOR_DIRECTION_NORMAL;
     motor_rf = PowerControlInit(&chassis_motor_config);
 
     chassis_motor_config.can_init_config.can_handle = &hcan2;
     chassis_motor_config.can_init_config.tx_id = 4;
-    chassis_motor_config.controller_setting_init_config.motor_reverse_flag = MOTOR_DIRECTION_NORMAL;
+    chassis_motor_config.controller_setting_init_config.motor_reverse_flag = MOTOR_DIRECTION_REVERSE;
     motor_lb = PowerControlInit(&chassis_motor_config);
     chassis_motor_config.can_init_config.can_handle = &hcan2;
     chassis_motor_config.can_init_config.tx_id = 3;
@@ -114,6 +121,45 @@ void ChassisInit()
     };
 
     // cap = SuperCapInit(&cap_conf); // 超级电容初始化
+
+    PID_Init_Config_s yaw_lock_conf = {
+        .Kp = 2.0f, // 强力纠正
+        .Ki = 0.0f, // 消除静差
+        .Kd = 0.0f, // 抑制震荡
+        .IntegralLimit = 500.0f, // 积分限幅
+        .Improve = PID_Trapezoid_Intergral | PID_Integral_Limit | PID_Derivative_On_Measurement,
+        .MaxOut = 7000.0f, // 输出限幅 (对应 chassis_cmd_recv.wz 的量级)
+        .Output_LPF_RC = 0.0f,
+    };
+    PIDInit(&yaw_lock_pid, &yaw_lock_conf);
+    // 底盘跟随云台
+    ChassisFollow_Config_s follow_config = {
+        .deadzone_angle = 4.0f, // 0.5度死区
+
+        // 位置环参数 (外环)
+        .angle_pid = {
+            .kp = 8.0f, // 需调试: 响应速度
+            .ki = 0.0f,
+            .kd = 0.0f,
+            .IntegralLimit = 100.0f,
+            .max_out = 300.0f, // 最大跟随速度 (度/秒)
+        },
+
+        // 速度环参数 (内环)
+        .speed_pid = {
+            .kp = 5.0f, // 需调试: 刚性
+            .ki = 0.0f,
+            .kd = 0.05f,
+            .IntegralLimit = 1000.0f,
+            .max_out = 5000.0f // 电机最大输出
+        }
+    };
+    chassis_follow_ptr = ChassisFollowInit(&follow_config);
+    if (chassis_follow_ptr == NULL) {
+        // 错误处理，例如亮红灯或记录日志
+        LOGERROR("Chassis Follow Init Failed!");
+    }
+    Chassis_IMU_data = INS_Init();
 
     // 发布订阅初始化,如果为双板,则需要can comm来传递消息
 #ifdef CHASSIS_BOARD
@@ -159,19 +205,19 @@ static void MecanumCalculate()
 }
 
 // 针对全麦和全向轮构型，方案一，前轮麦轮，后轮全向轮结算。方案二，利用陀螺仪强力纠正侧向漂移
-// static void HybridCalculate()
-// {
-//     // === 前轮 (麦克纳姆轮) ===
-//     // 保持标准麦轮解算，它们需要负责产生横向分力
-//     vt_lf = -chassis_vy - chassis_vx - chassis_cmd_recv.wz * LF_CENTER;
-//     vt_rf = -chassis_vy + chassis_vx - chassis_cmd_recv.wz * RF_CENTER;
+static void HybridCalculate()
+{
+    // === 前轮 (麦克纳姆轮) ===
+    // 保持标准麦轮解算，它们需要负责产生横向分力
+    vt_lf = -chassis_vy - chassis_vx - chassis_cmd_recv.wz * LF_CENTER;
+    vt_rf = -chassis_vy + chassis_vx - chassis_cmd_recv.wz * RF_CENTER;
 
-//     // === 后轮 (全向轮) ===
-//     // 全向轮侧向是自由滚动的，电机不需要也不应该为了横移而转动
-//     // 它们只负责前后驱动 (vx) 和 辅助旋转 (wz)
-//     vt_lb = chassis_vy - chassis_cmd_recv.wz * LB_CENTER;
-//     vt_rb = chassis_vy - chassis_cmd_recv.wz * RB_CENTER;
-// }
+    // === 后轮 (全向轮) ===
+    // 全向轮侧向是自由滚动的，电机不需要也不应该为了横移而转动
+
+    vt_lb = chassis_vy - chassis_cmd_recv.wz * LB_CENTER;
+    vt_rb = chassis_vy - chassis_cmd_recv.wz * RB_CENTER;
+}
 /**
  * @brief 根据裁判系统和电容剩余容量对输出进行限制并设置电机参考值
  *
@@ -245,9 +291,70 @@ static void LimitChassisOutput()
 static void EstimateSpeed()
 {
 }
+
+static void ChassisHeadLock()
+{
+    if (Chassis_IMU_data == NULL)
+        return;
+
+    // 定义消抖计数器
+    static uint16_t manual_detect_count = 0;
+    // 定义消抖阈值（例如 50ms @ 500Hz task = 25次）
+    // 你觉得太快，就把这个数字改大，越大概率越“迟钝”但越稳
+    const uint16_t DETECTION_THRESHOLD_COUNT = 30;
+
+    // 1. 判断是否有人为旋转指令（增加死区到 50 防止漂移）
+    if (fabsf(chassis_cmd_recv.wz) > 50.0f) {
+        // 只有当计数器累加超过设定值时，才真正认为是手动模式
+        if (manual_detect_count < DETECTION_THRESHOLD_COUNT) {
+            manual_detect_count++;
+        } else {
+            // 恭喜，坚持了这么久，确认是真手动
+            is_manual_rotating = 1;
+            lock_target_yaw = Chassis_IMU_data->Yaw;
+
+            // 清除积分
+            yaw_lock_pid.Iout = 0;
+        }
+    } else {
+        // 只要有一次不满足旋转条件，计数器直接清零（严格判定）
+        manual_detect_count = 0;
+
+        // 2. 刚松手逻辑
+        if (is_manual_rotating) {
+            lock_target_yaw = Chassis_IMU_data->Yaw;
+            is_manual_rotating = 0;
+        }
+
+        // 3. 计算误差 (处理过零点)
+        float current_yaw = Chassis_IMU_data->Yaw;
+        float err_angle = lock_target_yaw - current_yaw;
+
+        if (err_angle > 180.0f)
+            err_angle -= 360.0f;
+        else if (err_angle < -180.0f)
+            err_angle += 360.0f;
+
+        // 4. 计算并叠加 PID
+        // 只有在非手动模式下才计算
+        if (is_manual_rotating == 0) {
+            // 使用前面提到的正确调用方式
+            float pid_out = PIDCalculate(&yaw_lock_pid, 0.0f, err_angle);
+            chassis_cmd_recv.wz += pid_out;
+        }
+    }
+}
 /* 机器人底盘控制核心任务 */
 void ChassisTask()
 {
+    float gimbal_wz = 0.0f;
+    gimbal_wz = chassis_cmd_recv.gimbal_gyro_z;
+
+    float chassis_wz = 0.0f;
+    if (Chassis_IMU_data != NULL) {
+        chassis_wz = Chassis_IMU_data->Gyro[2] * 57.29578f;
+    }
+
     // 后续增加没收到消息的处理(双板的情况)
     // 获取新的控制信息
 #ifdef ONE_BOARD
@@ -302,13 +409,23 @@ void ChassisTask()
         chassis_cmd_recv.wz = 0;
         break;
     case CHASSIS_FOLLOW_GIMBAL_YAW: // 跟随云台,不单独设置pid,以误差角度平方为速度输出
-        chassis_cmd_recv.wz = -1.5f * chassis_cmd_recv.offset_angle * abs(chassis_cmd_recv.offset_angle);
-        break;
-    case CHASSIS_ROTATE: // 自旋,同时保持全向机动;当前wz维持定值,后续增加不规则的变速策略
-        chassis_cmd_recv.wz = 4000;
-        break;
-    default:
-        break;
+        // chassis_cmd_recv.wz = -1.5f * chassis_cmd_recv.offset_angle * abs(chassis_cmd_recv.offset_angle);
+        if (chassis_follow_ptr != NULL) {
+            chassis_cmd_recv.wz = ChassisFollowCalc(
+                chassis_follow_ptr, // 实例指针
+                chassis_cmd_recv.offset_angle, // 角度误差
+                -gimbal_wz, // 前馈速度
+                chassis_wz // 反馈速度
+            );
+            break;
+        case CHASSIS_ROTATE: // 自旋,同时保持全向机动;当前wz维持定值,后续增加不规则的变速策略
+            chassis_cmd_recv.wz = 4000;
+            break;
+        default:
+            ChassisFollowReset(chassis_follow_ptr);
+
+            break;
+        }
     }
 
     // 根据云台和底盘的角度offset将控制量映射到底盘坐标系上
@@ -319,9 +436,12 @@ void ChassisTask()
     chassis_vx = chassis_cmd_recv.vx * cos_theta - chassis_cmd_recv.vy * sin_theta;
     chassis_vy = chassis_cmd_recv.vx * sin_theta + chassis_cmd_recv.vy * cos_theta;
 
+    if (chassis_cmd_recv.chassis_mode == CHASSIS_NO_FOLLOW) {
+        ChassisHeadLock();
+    }
     // 根据控制模式进行正运动学解算,计算底盘输出
-    MecanumCalculate();
-    // HybridCalculate();
+    // MecanumCalculate();
+    HybridCalculate();
 
     // 根据裁判系统的反馈数据和电容数据对输出限幅并设定闭环参考值
     LimitChassisOutput();

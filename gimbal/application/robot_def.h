@@ -19,7 +19,7 @@
 /* 开发板类型定义,烧录时注意不要弄错对应功能;修改定义后需要重新编译,只能存在一个定义! */
 // #define ONE_BOARD // 单板控制整车
 // #define CHASSIS_BOARD //底盘板
-#define GIMBAL_BOARD  //云台板
+#define GIMBAL_BOARD // 云台板
 
 #define VISION_USE_VCP // 使用虚拟串口发送视觉数据
 // #define VISION_USE_UART // 使用串口发送视觉数据
@@ -141,6 +141,7 @@ typedef struct
     float vy; // 横移方向速度
     float wz; // 旋转速度
     float offset_angle; // 底盘和归中位置的夹角
+    float gimbal_gyro_z; // 来自云台的陀螺仪z轴角速度前馈
     chassis_mode_e chassis_mode;
     int chassis_speed_buff;
     super_cap_mode_e cap_mode;

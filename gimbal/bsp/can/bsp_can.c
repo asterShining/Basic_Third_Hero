@@ -105,12 +105,24 @@ uint8_t CANTransmit(CANInstance *_instance, float timeout)
     static uint32_t busy_count;
     static volatile float wait_time __attribute__((unused)); // for cancel warning
     float dwt_start = DWT_GetTimeline_ms();
+    static uint32_t mb_owners[3] = { 0, 0, 0 }; // 记录当前三个邮箱的拥有者ID
     while (HAL_CAN_GetTxMailboxesFreeLevel(_instance->can_handle) == 0) // 等待邮箱空闲
     {
         if (DWT_GetTimeline_ms() - dwt_start > timeout) // 超时
         {
             LOGWARNING("[bsp_can] CAN MAILbox full! failed to add msg to mailbox. Cnt [%d]", busy_count);
             busy_count++;
+            if (busy_count % 10 == 0) {
+                LOGWARNING("[bsp_can] TIMEOUT! Victim ID: 0x%03X (This msg failed)", _instance->tx_id);
+                // 【核心诊断】：打印当前是谁占着茅坑不拉屎（或者拉得太慢）
+                LOGWARNING("  -> Suspects in Mailboxes: MB0[0x%03X] MB1[0x%03X] MB2[0x%03X]",
+                           mb_owners[0], mb_owners[1], mb_owners[2]);
+
+                // 顺便看下是不是硬件掉线了
+                uint8_t lec = (_instance->can_handle->Instance->ESR & CAN_ESR_LEC) >> 4;
+                if (lec == 0x3)
+                    LOGWARNING("  -> HW Error: ACK Error (Check Cable!)");
+            }
             return 0;
         }
     }
@@ -119,27 +131,7 @@ uint8_t CANTransmit(CANInstance *_instance, float timeout)
     if (HAL_CAN_AddTxMessage(_instance->can_handle, &_instance->txconf, _instance->tx_buff, &_instance->tx_mailbox)) {
         LOGWARNING("[bsp_can] CAN bus BUS! cnt:%d", busy_count);
         busy_count++;
-        if (busy_count % 50 == 0) {
-            // 获取 CAN 发送状态寄存器 (TSR) 和 错误状态寄存器 (ESR)
-            uint32_t tsr = _instance->can_handle->Instance->TSR;
-            uint32_t esr = _instance->can_handle->Instance->ESR;
 
-            LOGWARNING("[bsp_can] MB FULL! TotalFail:%d | ID:0x%03X", busy_count, _instance->tx_id);
-
-            // 打印邮箱占用情况 (TME: Transmit Mailbox Empty, 0表示非空/占用)
-            LOGWARNING("Blocking: MB0[%d] MB1[%d] MB2[%d]",
-                       (tsr & CAN_TSR_TME0) ? 0 : 1,
-                       (tsr & CAN_TSR_TME1) ? 0 : 1,
-                       (tsr & CAN_TSR_TME2) ? 0 : 1);
-
-            // 打印错误原因 (LEC: Last Error Code)
-            // 0x3: ACK Error (最常见，接收端没上电), 0x4: Bit Recessive Error, 0x5: Bit Dominant Error
-            uint8_t lec = (esr & CAN_ESR_LEC) >> 4;
-            if (lec == 0x3)
-                LOGWARNING("Reason: ACK Error (Check cable/power!)");
-            else if (lec != 0)
-                LOGWARNING("Reason: HW Error Code 0x%X", lec);
-        }
         return 0;
     }
     return 1; // 发送成功

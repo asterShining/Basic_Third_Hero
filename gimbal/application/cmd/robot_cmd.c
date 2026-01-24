@@ -308,7 +308,7 @@ static void RemoteControlSet()
     // --- 摇杆控制量计算 (仅在非急停状态下累加) ---
     // 防止在急停时摇杆误触导致后台目标值累积
     if (!switch_is_down(current_switch_right)) {
-        gimbal_cmd_send.yaw += 0.01f * (float)rc_data[TEMP].rc.rocker_l_;
+        gimbal_cmd_send.yaw -= 0.01f * (float)rc_data[TEMP].rc.rocker_l_;
         gimbal_cmd_send.pitch += 0.0001f * (float)rc_data[TEMP].rc.rocker_l1;
     }
     // 云台软件限位
@@ -461,6 +461,7 @@ void RobotCMDTask()
 
     // 推送消息,双板通信,视觉通信等
     // 其他应用所需的控制数据在remotecontrolsetmode和mousekeysetmode中完成设置
+    chassis_cmd_send.gimbal_gyro_z = gimbal_fetch_data.gimbal_imu_data.Gyro[2] * RAD_2_DEGREE; // 假设原始是弧度，转成度
 #ifdef ONE_BOARD
     PubPushMessage(chassis_cmd_pub, (void *)&chassis_cmd_send);
 #endif // ONE_BOARD
