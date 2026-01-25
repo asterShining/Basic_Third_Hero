@@ -24,7 +24,7 @@ ChassisFollowInstance *ChassisFollowInit(ChassisFollow_Config_s *config)
 
     // 5. 保存配置参数
     instance->config = *config;
-    instance->feed_forward_gain = 0.0f; // 默认开启全额前馈
+    instance->feed_forward_gain = 0.9f; // 默认开启全额前馈
     instance->enable = 1;
 
     // 6. 初始化内部 位置环 PID
@@ -37,7 +37,7 @@ ChassisFollowInstance *ChassisFollowInit(ChassisFollow_Config_s *config)
         .IntegralLimit = config->angle_pid.IntegralLimit, // 经验值：位置环积分不需要太大 //100
         // 使用梯形积分、积分限幅、微分先行等优化
         .Improve = PID_Trapezoid_Intergral | PID_Integral_Limit | PID_Derivative_On_Measurement,
-        .Output_LPF_RC = 0.0f, // 位置环一般不需要滤波
+        .Output_LPF_RC = 0.0f,
     };
     PIDInit(&instance->angle_pid_inst, &angle_conf);
 
@@ -49,7 +49,7 @@ ChassisFollowInstance *ChassisFollowInit(ChassisFollow_Config_s *config)
         .MaxOut = config->speed_pid.max_out,
         .IntegralLimit = config->speed_pid.IntegralLimit, // 经验值：速度环积分可以适当大一些 //3000
         .Improve = PID_Trapezoid_Intergral | PID_Integral_Limit | PID_Derivative_On_Measurement,
-        .Output_LPF_RC = 0.3f, // 速度环增加少量滤波防抖
+        .Output_LPF_RC = 0.02f, // 速度环增加少量滤波防抖
     };
     PIDInit(&instance->speed_pid_inst, &speed_conf);
 
@@ -86,18 +86,15 @@ float ChassisFollowCalc(ChassisFollowInstance *instance, float angle_error, floa
         angle_error += 360.0f;
     }
 
-    // 2. 位置环计算 (Step 1: Position Loop)
+    // 2. 位置环计算 
     // 目标是消除角度误差 (Set Point = 0, Feedback = Error)
-    // 注意：如果 angle_error > 0 表示底盘滞后，需要正向转动去追，则传入 (0, -error) 或调整 PID 符号
-    // 这里假设：error = Target - Current，PID(Target, Current) -> PID(0, -error)
     float follow_speed_ref = PIDCalculate(&instance->angle_pid_inst, 0.0f, -angle_error);
 
-    // 3. 前馈融合 (Step 2: Feed Forward)
+    // 3. 前馈融合
     // 底盘总目标速度 = 追赶速度(PID计算值) + 云台当前转速(前馈值)
     float total_speed_ref = follow_speed_ref + (gimbal_wz * instance->feed_forward_gain);
 
-    // 4. 速度环计算 (Step 3: Speed Loop)
-    // 目标速度 vs 实际底盘速度
+    // 4. 速度环计算
     float output = PIDCalculate(&instance->speed_pid_inst, total_speed_ref, chassis_wz);
 
     return output;

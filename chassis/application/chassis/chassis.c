@@ -93,7 +93,7 @@ void ChassisInit()
     // 使用功率控制的电机需要使用PowerControlInit()函数初始化,因为电机的控制方式不同
     chassis_motor_config.can_init_config.can_handle = &hcan1;
     chassis_motor_config.can_init_config.tx_id = 1;
-    chassis_motor_config.controller_setting_init_config.motor_reverse_flag = MOTOR_DIRECTION_REVERSE;
+    chassis_motor_config.controller_setting_init_config.motor_reverse_flag = MOTOR_DIRECTION_NORMAL;
     motor_lf = PowerControlInit(&chassis_motor_config);
 
     chassis_motor_config.can_init_config.can_handle = &hcan1;
@@ -101,14 +101,16 @@ void ChassisInit()
     chassis_motor_config.controller_setting_init_config.motor_reverse_flag = MOTOR_DIRECTION_REVERSE;
     motor_rf = PowerControlInit(&chassis_motor_config);
 
-    chassis_motor_config.can_init_config.can_handle = &hcan2;
-    chassis_motor_config.can_init_config.tx_id = 4;
-    chassis_motor_config.controller_setting_init_config.motor_reverse_flag = MOTOR_DIRECTION_NORMAL;
-    motor_lb = PowerControlInit(&chassis_motor_config);
+    
     chassis_motor_config.can_init_config.can_handle = &hcan2;
     chassis_motor_config.can_init_config.tx_id = 3;
     chassis_motor_config.controller_setting_init_config.motor_reverse_flag = MOTOR_DIRECTION_NORMAL;
     motor_rb = PowerControlInit(&chassis_motor_config);
+
+    chassis_motor_config.can_init_config.can_handle = &hcan2;
+    chassis_motor_config.can_init_config.tx_id = 4;
+    chassis_motor_config.controller_setting_init_config.motor_reverse_flag = MOTOR_DIRECTION_REVERSE;
+    motor_lb = PowerControlInit(&chassis_motor_config);
 
     // referee_data = UITaskInit(&huart6, &ui_data); // 裁判系统初始化,会同时初始化UI
 
@@ -135,20 +137,20 @@ void ChassisInit()
     PIDInit(&yaw_lock_pid, &yaw_lock_conf);
     // 底盘跟随云台
     ChassisFollow_Config_s follow_config = {
-        .deadzone_angle = 3.0f, // 3度死区
+        .deadzone_angle = 1.5f, // 1.5度死区
 
         // 位置环参数 (外环)
         .angle_pid = {
             .kp = 7.2f, // 需调试: 响应速度
             .ki = 0.0f,
-            .kd = 0.0f,
+            .kd = 1.0f,
             .IntegralLimit = 100.0f,
             .max_out = 300.0f, // 最大跟随速度 (度/秒)
         },
 
         // 速度环参数 (内环)
         .speed_pid = {
-            .kp = 4.2f, // 需调试: 刚性
+            .kp = 5.2f, // 需调试: 刚性
             .ki = 0.0f,
             .kd = 0.0f,
             .IntegralLimit = 500.0f,
@@ -212,13 +214,8 @@ static void HybridCalculate()
     vt_lf = -chassis_vx - chassis_vy - chassis_cmd_recv.wz * LF_CENTER;
     vt_rf = -chassis_vx + chassis_vy - chassis_cmd_recv.wz * RF_CENTER;
 
-    // 后轮 (全向轮)：修正系数，只保留 半轮距 (HALF_TRACK_WIDTH)
-    // 假设 w > 0 是逆时针，后轮应该产生差速让屁股往右甩 (即左后轮减速，右后轮加速? 具体看电机安装方向)
-    // 根据你代码中 LF_CENTER (W+L) 前面是减号，推测减号是产生正旋转
-
     // 计算后轮所需的旋转线速度分量
     float rear_rot_spd = chassis_cmd_recv.wz * HALF_TRACK_WIDTH * DEGREE_2_RAD;
-
     // 只有纵向速度 vy 参与，vy 对全向轮无效
     vt_lb = chassis_vy - rear_rot_spd;
     vt_rb = chassis_vy + rear_rot_spd; // 左右轮旋转项符号相反，形成力偶
@@ -424,13 +421,9 @@ void ChassisTask()
         if (chassis_follow_ptr != NULL) {
             float err = chassis_cmd_recv.offset_angle;
 
-            // 2. 死区处理
-            if (fabsf(err) < 0.5) {
-                err = 0.0f; // 如果误差很小，就当做没误差，让电机休息
-            }
             chassis_cmd_recv.wz = ChassisFollowCalc(
                 chassis_follow_ptr, // 实例指针
-                -err, // 角度误差
+                err, // 角度误差
                 gimbal_wz, // 前馈速度
                 chassis_wz // 反馈速度
             );
