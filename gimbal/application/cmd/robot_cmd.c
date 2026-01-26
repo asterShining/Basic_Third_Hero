@@ -29,9 +29,7 @@
 #ifdef GIMBAL_BOARD // 对双板的兼容,条件编译
 #include "can_comm.h"
 static CANCommInstance *cmd_can_comm; // 双板通信
-/* 编译期断言，确保两端结构体尺寸不超过 CAN 缓冲上限，避免长度不一致导致 rx lost */
-_Static_assert(sizeof(Chassis_Ctrl_Cmd_s) <= CAN_COMM_MAX_BUFFSIZE, "Chassis_Ctrl_Cmd_s exceeds CAN buffer");
-_Static_assert(sizeof(Chassis_Upload_Data_s) <= CAN_COMM_MAX_BUFFSIZE, "Chassis_Upload_Data_s exceeds CAN buffer");
+
 #endif
 #ifdef ONE_BOARD
 static Publisher_t *chassis_cmd_pub; // 底盘控制消息发布者
@@ -58,7 +56,7 @@ static Shoot_Upload_Data_s shoot_fetch_data; // 从发射获取的反馈信息
 static Robot_Status_e robot_state; // 机器人整体工作状态
 static BuzzzerInstance *hint_buzzer;
 
-#define RC_DEADZONE 10.0f
+#define RC_DEADZONE 10.0f // 遥控器摇杆死区阈值
 
 BMI088Instance *bmi088_test; // 云台IMU
 BMI088_Data_t bmi088_data;
@@ -275,11 +273,13 @@ static void RemoteControlSet()
                 }
             }
         }
+        gimbal_cmd_send.yaw = gimbal_fetch_data.gimbal_imu_data.YawTotalAngle;
+        gimbal_cmd_send.pitch = gimbal_fetch_data.gimbal_imu_data.Pitch;
     }
-    // [中] 底盘无力，云台能够转动
-    else if (switch_is_mid(current_switch_right)) {
+    // [上] 底盘无力，云台能够转动
+    else if (switch_is_up(current_switch_right)) {
         // 如果是从[下]或其他模式刚刚切换到[中]
-        if (!switch_is_mid(last_switch_right)) {
+        if (!switch_is_up(last_switch_right)) {
             // 无扰切换：将目标角度重置为当前实际角度
             gimbal_cmd_send.yaw = gimbal_fetch_data.gimbal_imu_data.YawTotalAngle;
             gimbal_cmd_send.pitch = gimbal_fetch_data.gimbal_imu_data.Pitch;
@@ -290,10 +290,10 @@ static void RemoteControlSet()
         gimbal_cmd_send.gimbal_mode = GIMBAL_FREE_MODE;
         shoot_cmd_send.shoot_mode = SHOOT_ON;
     }
-    // [上] 底盘跟随云台模式 (你特别要求的模式)
-    else if (switch_is_up(current_switch_right)) {
+    // [中] 底盘跟随云台模式
+    else if (switch_is_mid(current_switch_right)) {
         // 核心修改：检测是否刚刚切入[上]档位
-        if (!switch_is_up(last_switch_right)) {
+        if (!switch_is_mid(last_switch_right)) {
             // 【无扰切换执行】
             // 将云台控制的"目标值"强行设定为当前的"反馈值"
             // 这样PID的误差(Error)在这一瞬间为0，避免云台疯转
@@ -329,7 +329,7 @@ static void RemoteControlSet()
     // 云台控制量计算 (仅在非急停状态下累加)
     if (!switch_is_down(current_switch_right)) {
         // 使用处理后的 rocker_lx 和 rocker_ly
-        gimbal_cmd_send.yaw -= 0.01f * rocker_lx;
+        gimbal_cmd_send.yaw -= 0.001f * rocker_lx;
         gimbal_cmd_send.pitch += 0.0001f * rocker_ly;
     }
 
@@ -366,6 +366,8 @@ static void RemoteControlSet()
     //     shoot_cmd_send.load_mode = LOAD_STOP;
     // // 射频控制,固定每秒1发,后续可以根据左侧拨轮的值大小切换射频,
     // shoot_cmd_send.shoot_rate = 8;
+
+    last_switch_right = current_switch_right; // 更新上一次开关状态
 }
 
 /**

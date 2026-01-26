@@ -66,6 +66,10 @@ static uint8_t is_manual_rotating = 0; // 标记是否正在手动旋转
 static float chassis_vx, chassis_vy; // 将云台系的速度投影到底盘
 static float vt_lf, vt_rf, vt_lb, vt_rb; // 底盘速度解算后的临时输出,待进行限幅
 
+static float real_vx = 0.0f; // 真实前进速度 m/s
+static float real_vy = 0.0f; // 真实横移速度 m/s
+static float real_wz = 0.0f; // 真实旋转速度 deg/s
+
 void ChassisInit()
 {
     // 四个轮子的参数一样,改tx_id和反转标志位即可
@@ -136,25 +140,27 @@ void ChassisInit()
     PIDInit(&yaw_lock_pid, &yaw_lock_conf);
     // 底盘跟随云台
     ChassisFollow_Config_s follow_config = {
-        .deadzone_angle = 3.0f, // 1.5度死区
+        .deadzone_angle = 0.4f, // 1.5度死区
 
         // 位置环参数 (外环)
         .angle_pid = {
-            .kp = 4.2f, // 需调试: 响应速度
+            .kp = 1.0f, // 需调试: 响应速度
             .ki = 0.0f,
-            .kd = 0.55f,
+            .kd = 0.0f,
             .IntegralLimit = 100.0f,
             .max_out = 300.0f, // 最大跟随速度 (度/秒)
         },
 
         // 速度环参数 (内环)
         .speed_pid = {
-            .kp = 4.2f, // 需调试: 刚性
-            .ki = 0.4f,
-            .kd = 0.02f,
+            .kp = 0.8f, // 需调试: 刚性
+            .ki = 1.0f,
+            .kd = 0.0f,
             .IntegralLimit = 700.0f,
             .max_out = 7000.0f // 电机最大输出
-        }
+        },
+        .feed_forward_gain = 1.0f, // 前馈增益
+        .enable = 1, // 默认使能
     };
     chassis_follow_ptr = ChassisFollowInit(&follow_config);
     if (chassis_follow_ptr == NULL) {
@@ -176,6 +182,7 @@ void ChassisInit()
         .daemon_count = 200,
     };
     chasiss_can_comm = CANCommInit(&comm_conf); // can comm初始化
+
     if (chasiss_can_comm != NULL) {
         LOGINFO("[DEBUG] Chassis CAN Comm Init SUCCESS! Handle: %p, recv:%d, send:%d",
                 chasiss_can_comm, sizeof(Chassis_Ctrl_Cmd_s), sizeof(Chassis_Upload_Data_s));
@@ -291,6 +298,35 @@ static void LimitChassisOutput()
  */
 static void EstimateSpeed()
 {
+    // 获取电机转速(度 / 秒)
+    float raw_lf = motor_lf->measure.speed_aps;
+    float raw_rf = motor_rf->measure.speed_aps;
+    float raw_lb = motor_lb->measure.speed_aps;
+    float raw_rb = motor_rb->measure.speed_aps;
+
+    float v_lf = raw_lf; // LF 是 REVERSE，所以取反
+    float v_rf = -raw_rf; // RF 是 NORMAL，保持原样
+    float v_lb = -raw_lb; // LB 是 REVERSE，所以取反
+    float v_rb = raw_rb; // RB 是 NORMAL，保持原样
+    // 逆解算计算底盘真实的旋转角速度 (real_wz)(度 / 秒)
+    float avg_wz = (-v_lf + v_rf - v_lb + v_rb) / 4.0f;
+
+    // 单位转换(电机转速->底盘旋转角速度)
+    // 假设 speed_aps 是度/秒，这里算出来的就是度/秒
+    // 比例系数 = 轮子半径 / (半轮距 + 半轴距)
+    // 请确保 RADIUS_WHEEL 和 HALF_... 的单位统一 (例如都是 m 或 mm)
+    float geometry_sum = HALF_TRACK_WIDTH + HALF_WHEEL_BASE;
+    float wheel_chassis_ratio = RADIUS_WHEEL / geometry_sum;
+
+    // 得到底盘真实的旋转速度 (度/秒)
+    // 这里的 1.0f 是因为上面用的都是度/秒，不需要额外的弧度转换，除非你的 RADIUS 单位特殊
+    float raw_chassis_wz = avg_wz * wheel_chassis_ratio;
+
+    // 5. 简单低通滤波 (防止编码器微分噪声过大)
+    static float last_wz = 0;
+    const float alpha = 0.2f; // 滤波系数 0~1，越小越平滑但滞后
+    real_wz = (1.0f - alpha) * last_wz + alpha * raw_chassis_wz;
+    last_wz = real_wz;
 }
 
 static void ChassisHeadLock()
@@ -357,10 +393,8 @@ void ChassisTask()
     float gimbal_wz = 0.0f;
     gimbal_wz = chassis_cmd_recv.gimbal_gyro_z;
 
-    float chassis_wz = 0.0f;
-    if (Chassis_IMU_data != NULL) {
-        chassis_wz = Chassis_IMU_data->Gyro[2] * RAD_2_DEGREE; // 底盘IMU的z轴角速度
-    }
+    EstimateSpeed();
+    float chassis_wz = real_wz; // 直接使用上面解算出的真实角速度
 
     // 后续增加没收到消息的处理(双板的情况)
     // 获取新的控制信息
@@ -415,19 +449,15 @@ void ChassisTask()
     case CHASSIS_NO_FOLLOW: // 底盘不旋转,但维持全向机动,一般用于调整云台姿态
 
         break;
-    case CHASSIS_FOLLOW_GIMBAL_YAW: // 跟随云台,不单独设置pid,以误差角度平方为速度输出
+    case CHASSIS_FOLLOW_GIMBAL_YAW: 
         // chassis_cmd_recv.wz = -1.5f * chassis_cmd_recv.offset_angle * abs(chassis_cmd_recv.offset_angle);
         if (chassis_follow_ptr != NULL) {
             float err = chassis_cmd_recv.offset_angle;
-            if (fabs(err) < 10) {
-                err = 0;
-            }
-
             chassis_cmd_recv.wz = ChassisFollowCalc(
-                chassis_follow_ptr, // 实例指针
-                -err, // 角度误差
-                gimbal_wz, // 前馈速度
-                chassis_wz // 反馈速度
+                chassis_follow_ptr,
+                err,
+                gimbal_wz,
+                chassis_wz // 传入这个编码器解算值
             );
             break;
         case CHASSIS_ROTATE: // 自旋,同时保持全向机动;当前wz维持定值,后续增加不规则的变速策略

@@ -25,6 +25,9 @@ typedef struct {
         float max_out; // 速度环最大输出 (电流/电压)
         float IntegralLimit; // 速度环积分限幅
     } speed_pid;
+    float feed_forward_gain; // 前馈增益
+
+    uint8_t enable;
 
 } ChassisFollow_Config_s;
 

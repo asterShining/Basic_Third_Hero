@@ -24,8 +24,8 @@ ChassisFollowInstance *ChassisFollowInit(ChassisFollow_Config_s *config)
 
     // 5. 保存配置参数
     instance->config = *config;
-    instance->feed_forward_gain = 1.0f; // 默认前馈
-    instance->enable = 1;
+    instance->feed_forward_gain = config->feed_forward_gain; // 默认前馈
+    instance->enable = config->enable;
 
     // 6. 初始化内部 位置环 PID
     PID_Init_Config_s angle_conf = {
