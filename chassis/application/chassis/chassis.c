@@ -93,15 +93,14 @@ void ChassisInit()
     // 使用功率控制的电机需要使用PowerControlInit()函数初始化,因为电机的控制方式不同
     chassis_motor_config.can_init_config.can_handle = &hcan1;
     chassis_motor_config.can_init_config.tx_id = 1;
-    chassis_motor_config.controller_setting_init_config.motor_reverse_flag = MOTOR_DIRECTION_NORMAL;
+    chassis_motor_config.controller_setting_init_config.motor_reverse_flag = MOTOR_DIRECTION_REVERSE;
     motor_lf = PowerControlInit(&chassis_motor_config);
 
     chassis_motor_config.can_init_config.can_handle = &hcan1;
     chassis_motor_config.can_init_config.tx_id = 2;
-    chassis_motor_config.controller_setting_init_config.motor_reverse_flag = MOTOR_DIRECTION_REVERSE;
+    chassis_motor_config.controller_setting_init_config.motor_reverse_flag = MOTOR_DIRECTION_NORMAL;
     motor_rf = PowerControlInit(&chassis_motor_config);
 
-    
     chassis_motor_config.can_init_config.can_handle = &hcan2;
     chassis_motor_config.can_init_config.tx_id = 3;
     chassis_motor_config.controller_setting_init_config.motor_reverse_flag = MOTOR_DIRECTION_NORMAL;
@@ -137,24 +136,24 @@ void ChassisInit()
     PIDInit(&yaw_lock_pid, &yaw_lock_conf);
     // 底盘跟随云台
     ChassisFollow_Config_s follow_config = {
-        .deadzone_angle = 1.5f, // 1.5度死区
+        .deadzone_angle = 3.0f, // 1.5度死区
 
         // 位置环参数 (外环)
         .angle_pid = {
-            .kp = 7.2f, // 需调试: 响应速度
+            .kp = 4.2f, // 需调试: 响应速度
             .ki = 0.0f,
-            .kd = 1.0f,
+            .kd = 0.55f,
             .IntegralLimit = 100.0f,
             .max_out = 300.0f, // 最大跟随速度 (度/秒)
         },
 
         // 速度环参数 (内环)
         .speed_pid = {
-            .kp = 5.2f, // 需调试: 刚性
-            .ki = 0.0f,
-            .kd = 0.0f,
-            .IntegralLimit = 500.0f,
-            .max_out = 5000.0f // 电机最大输出
+            .kp = 4.2f, // 需调试: 刚性
+            .ki = 0.4f,
+            .kd = 0.02f,
+            .IntegralLimit = 700.0f,
+            .max_out = 7000.0f // 电机最大输出
         }
     };
     chassis_follow_ptr = ChassisFollowInit(&follow_config);
@@ -202,9 +201,9 @@ void ChassisInit()
 static void MecanumCalculate()
 {
     vt_lf = -chassis_vx - chassis_vy - chassis_cmd_recv.wz * LF_CENTER;
-    vt_rf = -chassis_vx + chassis_vy - chassis_cmd_recv.wz * RF_CENTER;
-    vt_lb = chassis_vx - chassis_vy - chassis_cmd_recv.wz * LB_CENTER;
-    vt_rb = chassis_vx + chassis_vy - chassis_cmd_recv.wz * RB_CENTER;
+    vt_rf = -chassis_vx + chassis_vy + chassis_cmd_recv.wz * RF_CENTER;
+    vt_lb = chassis_vx + chassis_vy - chassis_cmd_recv.wz * LB_CENTER;
+    vt_rb = chassis_vx - chassis_vy + chassis_cmd_recv.wz * RB_CENTER;
 }
 
 // 针对全麦和全向轮构型，方案一，前轮麦轮，后轮全向轮结算。方案二，利用陀螺仪强力纠正侧向漂移
@@ -420,10 +419,13 @@ void ChassisTask()
         // chassis_cmd_recv.wz = -1.5f * chassis_cmd_recv.offset_angle * abs(chassis_cmd_recv.offset_angle);
         if (chassis_follow_ptr != NULL) {
             float err = chassis_cmd_recv.offset_angle;
+            if (fabs(err) < 10) {
+                err = 0;
+            }
 
             chassis_cmd_recv.wz = ChassisFollowCalc(
                 chassis_follow_ptr, // 实例指针
-                err, // 角度误差
+                -err, // 角度误差
                 gimbal_wz, // 前馈速度
                 chassis_wz // 反馈速度
             );

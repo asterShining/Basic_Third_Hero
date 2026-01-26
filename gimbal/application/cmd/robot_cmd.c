@@ -58,6 +58,8 @@ static Shoot_Upload_Data_s shoot_fetch_data; // 从发射获取的反馈信息
 static Robot_Status_e robot_state; // 机器人整体工作状态
 static BuzzzerInstance *hint_buzzer;
 
+#define RC_DEADZONE 10.0f
+
 BMI088Instance *bmi088_test; // 云台IMU
 BMI088_Data_t bmi088_data;
 // 定义一个静态变量来保存上一次的开关状态，初始化为下（急停/停止状态）
@@ -305,22 +307,37 @@ static void RemoteControlSet()
         shoot_cmd_send.shoot_mode = SHOOT_ON;
     }
 
-    // --- 摇杆控制量计算 (仅在非急停状态下累加) ---
-    // 防止在急停时摇杆误触导致后台目标值累积
+    // --- 1. 提取原始数据并转为浮点数 ---
+    float rocker_lx = (float)rc_data[TEMP].rc.rocker_l_; // 左摇杆 X (云台Yaw)
+    float rocker_ly = (float)rc_data[TEMP].rc.rocker_l1; // 左摇杆 Y (云台Pitch)
+    float rocker_rx = (float)rc_data[TEMP].rc.rocker_r_; // 右摇杆 X (底盘左右)
+    float rocker_ry = (float)rc_data[TEMP].rc.rocker_r1; // 右摇杆 Y (底盘前后)
+
+    // --- 2. 死区处理逻辑 ---
+    // 如果数值在 -RC_DEADZONE 到 +RC_DEADZONE 之间，则强制归零
+    if (rocker_lx > -RC_DEADZONE && rocker_lx < RC_DEADZONE)
+        rocker_lx = 0;
+    if (rocker_ly > -RC_DEADZONE && rocker_ly < RC_DEADZONE)
+        rocker_ly = 0;
+    if (rocker_rx > -RC_DEADZONE && rocker_rx < RC_DEADZONE)
+        rocker_rx = 0;
+    if (rocker_ry > -RC_DEADZONE && rocker_ry < RC_DEADZONE)
+        rocker_ry = 0;
+
+    // --- 3. 使用过滤后的数据进行控制 ---
+
+    // 云台控制量计算 (仅在非急停状态下累加)
     if (!switch_is_down(current_switch_right)) {
-        gimbal_cmd_send.yaw -= 0.01f * (float)rc_data[TEMP].rc.rocker_l_;
-        gimbal_cmd_send.pitch += 0.0001f * (float)rc_data[TEMP].rc.rocker_l1;
+        // 使用处理后的 rocker_lx 和 rocker_ly
+        gimbal_cmd_send.yaw -= 0.01f * rocker_lx;
+        gimbal_cmd_send.pitch += 0.0001f * rocker_ly;
     }
-    // 云台软件限位
 
-    // // 含义：我推到底了(100%)，我要满速！
-    // chassis_cmd_send.vx = (float)rc_data[TEMP].rc.rocker_r_ / 660.0f;
-    // chassis_cmd_send.vy = (float)rc_data[TEMP].rc.rocker_r1 / 660.0f;
-
-    // 底盘参数,目前没有加入小陀螺(调试似乎暂时没有必要),系数需要调整
-    //右手系 x正向前进 y正向右移
-    chassis_cmd_send.vy = 10.0f * (float)rc_data[TEMP].rc.rocker_r_; // _水平方向
-    chassis_cmd_send.vx = 10.0f * (float)rc_data[TEMP].rc.rocker_r1; // 1数值方向
+    // 底盘参数
+    // 右手系 x正向前进 y正向右移
+    // 使用处理后的 rocker_rx 和 rocker_ry
+    chassis_cmd_send.vy = 10.0f * rocker_rx; // _水平方向
+    chassis_cmd_send.vx = 10.0f * rocker_ry; // 1数值方向
 
     // 发射参数
     if (switch_is_up(rc_data[TEMP].rc.switch_right)) // 右侧开关状态[上],弹舱打开

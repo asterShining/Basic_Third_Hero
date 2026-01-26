@@ -35,7 +35,7 @@ void GimbalInit()
         },
         .controller_param_init_config = {
             .angle_PID = {
-                .Kp = 0.5, // 8
+                .Kp = 0.59, //
                 .Ki = 0,
                 .Kd = 0,
                 .DeadBand = 0.1,
@@ -45,8 +45,8 @@ void GimbalInit()
                 .MaxOut = 500,
             },
             .speed_PID = {
-                .Kp = 2.0, // 50
-                .Ki = 0, // 200
+                .Kp = 1.32, //
+                .Ki = 0.05, //
                 .Kd = 0,
                 .Improve = PID_Trapezoid_Intergral | PID_Integral_Limit | PID_Derivative_On_Measurement,
                 .IntegralLimit = 1000,
@@ -73,23 +73,23 @@ void GimbalInit()
         },
         .controller_param_init_config = {
             .angle_PID = {
-                .Kp = 0, // 10
+                .Kp = 10,
                 .Ki = 0,
-                .Kd = 0,
+                .Kd = 0.3,
                 .Improve = PID_Trapezoid_Intergral | PID_Integral_Limit | PID_Derivative_On_Measurement,
                 .IntegralLimit = 100,
                 .MaxOut = 500,
             },
             .speed_PID = {
-                .Kp = 0, // 50
-                .Ki = 0, // 350
+                .Kp = 7.2,
+                .Ki = 0.8,
                 .Kd = 0, // 0
                 .Improve = PID_Trapezoid_Intergral | PID_Integral_Limit | PID_Derivative_On_Measurement,
                 .IntegralLimit = 2500,
                 .MaxOut = 20000,
             },
             .other_angle_feedback_ptr = &gimba_IMU_data->Pitch,
-            // 还需要增加角速度额外反馈指针,注意方向,ins_task.md中有c板的bodyframe坐标系说明
+
             .other_speed_feedback_ptr = (&gimba_IMU_data->Gyro[0]),
         },
         .controller_setting_init_config = {

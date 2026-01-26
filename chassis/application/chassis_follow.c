@@ -24,7 +24,7 @@ ChassisFollowInstance *ChassisFollowInit(ChassisFollow_Config_s *config)
 
     // 5. 保存配置参数
     instance->config = *config;
-    instance->feed_forward_gain = 0.9f; // 默认开启全额前馈
+    instance->feed_forward_gain = 1.0f; // 默认前馈
     instance->enable = 1;
 
     // 6. 初始化内部 位置环 PID
@@ -86,7 +86,7 @@ float ChassisFollowCalc(ChassisFollowInstance *instance, float angle_error, floa
         angle_error += 360.0f;
     }
 
-    // 2. 位置环计算 
+    // 2. 位置环计算
     // 目标是消除角度误差 (Set Point = 0, Feedback = Error)
     float follow_speed_ref = PIDCalculate(&instance->angle_pid_inst, 0.0f, -angle_error);
 
