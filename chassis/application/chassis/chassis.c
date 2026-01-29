@@ -19,7 +19,7 @@
 #include "super_cap.h"
 #include "message_center.h"
 #include "referee_task.h"
-#include "chassis_follow.h"
+#include <arm_math.h> // for fabsf
 
 #include "general_def.h"
 #include "bsp_dwt.h"
@@ -52,8 +52,6 @@ static Referee_Interactive_info_t ui_data; // UI数据，将底盘中的数据�
 static SuperCapInstance *cap = { NULL }; // 超级电容
 static DJIMotorInstance *motor_lf, *motor_rf, *motor_lb, *motor_rb; // left right forward back
 
-static ChassisFollowInstance *chassis_follow_ptr = NULL;
-
 // 方案二，陀螺仪针对全麦纠偏PID
 static PIDInstance yaw_lock_pid; // 航向锁定专用PID
 static float lock_target_yaw = 0.0f; // 锁定的目标角度
@@ -72,6 +70,7 @@ static float real_wz = 0.0f; // 真实旋转速度 deg/s
 
 void ChassisInit()
 {
+    Chassis_IMU_data = INS_Init();
     // 四个轮子的参数一样,改tx_id和反转标志位即可
     Motor_Init_Config_s chassis_motor_config = {
         .controller_param_init_config = {
@@ -97,12 +96,12 @@ void ChassisInit()
     // 使用功率控制的电机需要使用PowerControlInit()函数初始化,因为电机的控制方式不同
     chassis_motor_config.can_init_config.can_handle = &hcan1;
     chassis_motor_config.can_init_config.tx_id = 1;
-    chassis_motor_config.controller_setting_init_config.motor_reverse_flag = MOTOR_DIRECTION_REVERSE;
+    chassis_motor_config.controller_setting_init_config.motor_reverse_flag = MOTOR_DIRECTION_NORMAL; //
     motor_lf = PowerControlInit(&chassis_motor_config);
 
     chassis_motor_config.can_init_config.can_handle = &hcan1;
     chassis_motor_config.can_init_config.tx_id = 2;
-    chassis_motor_config.controller_setting_init_config.motor_reverse_flag = MOTOR_DIRECTION_NORMAL;
+    chassis_motor_config.controller_setting_init_config.motor_reverse_flag = MOTOR_DIRECTION_REVERSE;
     motor_rf = PowerControlInit(&chassis_motor_config);
 
     chassis_motor_config.can_init_config.can_handle = &hcan2;
@@ -139,35 +138,6 @@ void ChassisInit()
     };
     PIDInit(&yaw_lock_pid, &yaw_lock_conf);
     // 底盘跟随云台
-    ChassisFollow_Config_s follow_config = {
-        .deadzone_angle = 0.4f, // 1.5度死区
-
-        // 位置环参数 (外环)
-        .angle_pid = {
-            .kp = 1.0f, // 需调试: 响应速度
-            .ki = 0.0f,
-            .kd = 0.0f,
-            .IntegralLimit = 100.0f,
-            .max_out = 300.0f, // 最大跟随速度 (度/秒)
-        },
-
-        // 速度环参数 (内环)
-        .speed_pid = {
-            .kp = 0.8f, // 需调试: 刚性
-            .ki = 1.0f,
-            .kd = 0.0f,
-            .IntegralLimit = 700.0f,
-            .max_out = 7000.0f // 电机最大输出
-        },
-        .feed_forward_gain = 1.0f, // 前馈增益
-        .enable = 1, // 默认使能
-    };
-    chassis_follow_ptr = ChassisFollowInit(&follow_config);
-    if (chassis_follow_ptr == NULL) {
-        // 错误处理，例如亮红灯或记录日志
-        LOGERROR("Chassis Follow Init Failed!");
-    }
-    Chassis_IMU_data = INS_Init();
 
     // 发布订阅初始化,如果为双板,则需要can comm来传递消息
 #ifdef CHASSIS_BOARD
@@ -207,8 +177,24 @@ void ChassisInit()
  */
 static void MecanumCalculate()
 {
-    vt_lf = -chassis_vx - chassis_vy - chassis_cmd_recv.wz * LF_CENTER;
-    vt_rf = -chassis_vx + chassis_vy + chassis_cmd_recv.wz * RF_CENTER;
+    // 标准 X 型麦轮解算公式 (所有轮子 Forward 均为 +vx)
+    // 假设右手系：x前, y左, z逆时针
+
+    // LF: 前进(+vx), 左移需后转(+vy), 左转需后转(+wz)
+    vt_lf = chassis_vx + chassis_vy + chassis_cmd_recv.wz * LF_CENTER;
+
+    // RF: 前进(+vx), 左移需前转(-vy), 左转需前转(-wz)
+    vt_rf = chassis_vx - chassis_vy - chassis_cmd_recv.wz * RF_CENTER;
+
+    // LB: 前进(+vx), 左移需前转(+vy), 左转需后转(-wz) (注意：左后为了向左平移，实际上是要向前转的，但在标准受力分析中，这里的符号取决于你的y定义。通常为 + -)
+    // 修正：X型布局向左平移：左前向后(+)，左后向前(+)。
+    // 等等，如果归一化了，我们再推导一次：
+    // 向左平移(vy>0):
+    //   LF(A轮): 需向后转 -> +vy
+    //   RF(B轮): 需向前转 -> -vy
+    //   LB(B轮): 需向前转 -> +vy (注意：X型左后轮向前转产生向左的分力)
+    //   RB(A轮): 需向后转 -> -vy
+
     vt_lb = chassis_vx + chassis_vy - chassis_cmd_recv.wz * LB_CENTER;
     vt_rb = chassis_vx - chassis_vy + chassis_cmd_recv.wz * RB_CENTER;
 }
@@ -371,7 +357,6 @@ static void ChassisHeadLock()
     float current_yaw = Chassis_IMU_data->Yaw;
     float err_angle = lock_target_yaw - current_yaw;
 
-    // 处理跨越 ±180 度的情况 (例如 目标179，当前-179，实际只差2度)
     if (err_angle > 180.0f) {
         err_angle -= 360.0f;
     } else if (err_angle < -180.0f) {
@@ -390,12 +375,6 @@ static void ChassisHeadLock()
 /* 机器人底盘控制核心任务 */
 void ChassisTask()
 {
-    float gimbal_wz = 0.0f;
-    gimbal_wz = chassis_cmd_recv.gimbal_gyro_z;
-
-    EstimateSpeed();
-    float chassis_wz = real_wz; // 直接使用上面解算出的真实角速度
-
     // 后续增加没收到消息的处理(双板的情况)
     // 获取新的控制信息
 #ifdef ONE_BOARD
@@ -447,27 +426,15 @@ void ChassisTask()
     // 根据控制模式设定旋转速度
     switch (chassis_cmd_recv.chassis_mode) {
     case CHASSIS_NO_FOLLOW: // 底盘不旋转,但维持全向机动,一般用于调整云台姿态
-
         break;
-    case CHASSIS_FOLLOW_GIMBAL_YAW: 
-        // chassis_cmd_recv.wz = -1.5f * chassis_cmd_recv.offset_angle * abs(chassis_cmd_recv.offset_angle);
-        if (chassis_follow_ptr != NULL) {
-            float err = chassis_cmd_recv.offset_angle;
-            chassis_cmd_recv.wz = ChassisFollowCalc(
-                chassis_follow_ptr,
-                err,
-                gimbal_wz,
-                chassis_wz // 传入这个编码器解算值
-            );
-            break;
-        case CHASSIS_ROTATE: // 自旋,同时保持全向机动;当前wz维持定值,后续增加不规则的变速策略
-            chassis_cmd_recv.wz = 4000;
-            break;
-        default:
-            ChassisFollowReset(chassis_follow_ptr);
-
-            break;
-        }
+    case CHASSIS_FOLLOW_GIMBAL_YAW:
+        chassis_cmd_recv.wz = -1.5f * chassis_cmd_recv.offset_angle * abs(chassis_cmd_recv.offset_angle);
+        break;
+    case CHASSIS_ROTATE: // 自旋,同时保持全向机动;当前wz维持定值,后续增加不规则的变速策略
+        chassis_cmd_recv.wz = 4000;
+        break;
+    default:
+        break;
     }
 
     // 根据云台和底盘的角度offset将控制量映射到底盘坐标系上

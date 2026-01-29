@@ -92,6 +92,9 @@ file(GLOB_RECURSE SOURCES
     
 )
 
+# Ensure gimbal_calibration.c is included (explicit append to avoid glob issues)
+list(APPEND SOURCES "application/gimbal_calibration.c")
+
 # Add sources to executable
 target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     ${SOURCES}

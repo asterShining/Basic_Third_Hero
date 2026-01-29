@@ -13,6 +13,7 @@
 #include "bmi088.h"
 #include "buzzer.h"
 #include "remote_control.h"
+#include "gimbal_calibration.h"
 // bsp
 #include "bsp_dwt.h"
 #include "bsp_log.h"
@@ -56,7 +57,7 @@ static Shoot_Upload_Data_s shoot_fetch_data; // 从发射获取的反馈信息
 static Robot_Status_e robot_state; // 机器人整体工作状态
 static BuzzzerInstance *hint_buzzer;
 
-#define RC_DEADZONE 10.0f // 遥控器摇杆死区阈值
+#define RC_DEADZONE 5.0f // 遥控器摇杆死区阈值
 
 BMI088Instance *bmi088_test; // 云台IMU
 BMI088_Data_t bmi088_data;
@@ -278,17 +279,45 @@ static void RemoteControlSet()
     }
     // [上] 底盘无力，云台能够转动
     else if (switch_is_up(current_switch_right)) {
-        // 如果是从[下]或其他模式刚刚切换到[中]
-        if (!switch_is_up(last_switch_right)) {
-            // 无扰切换：将目标角度重置为当前实际角度
-            gimbal_cmd_send.yaw = gimbal_fetch_data.gimbal_imu_data.YawTotalAngle;
-            gimbal_cmd_send.pitch = gimbal_fetch_data.gimbal_imu_data.Pitch;
-        }
+        // --- 子模式：自动标定 (左拨杆为上) ---
+        if (switch_is_up(current_switch_left)) {
+            robot_state = ROBOT_READY;
+            chassis_cmd_send.chassis_mode = CHASSIS_NO_FOLLOW;
+            gimbal_cmd_send.gimbal_mode = GIMBAL_CALI_MODE; // 设定为标定模式
+            shoot_cmd_send.shoot_mode = SHOOT_OFF;
 
-        robot_state = ROBOT_READY;
-        chassis_cmd_send.chassis_mode = CHASSIS_NO_FOLLOW;
-        gimbal_cmd_send.gimbal_mode = GIMBAL_FREE_MODE;
-        shoot_cmd_send.shoot_mode = SHOOT_ON;
+            // ==================== [新增] 蜂鸣器提示逻辑 ====================
+            // 逻辑：只要标定没完成且没出错，就一直响；一旦完成(COMPLETE)或出错(ERROR)，就停。
+            if (g_cali.state != CALI_STATE_COMPLETE && g_cali.state != CALI_STATE_ERROR) {
+                if (hint_buzzer != NULL) {
+                    AlarmSetStatus(hint_buzzer, ALARM_ON);
+                }
+            } else {
+                // 标定结束（成功或失败），自动关闭蜂鸣器
+                if (hint_buzzer != NULL) {
+                    AlarmSetStatus(hint_buzzer, ALARM_OFF);
+                }
+            }
+            // ============================================================
+        }
+        // --- 子模式：自由模式 (左拨杆为中或下) ---
+        else {
+            // [重要] 如果用户中途手动切出标定模式，必须强制关闭蜂鸣器
+            if (hint_buzzer != NULL) {
+                AlarmSetStatus(hint_buzzer, ALARM_OFF);
+            }
+
+            // 无扰切换判断
+            if (!switch_is_up(last_switch_right)) {
+                gimbal_cmd_send.yaw = gimbal_fetch_data.gimbal_imu_data.YawTotalAngle;
+                gimbal_cmd_send.pitch = gimbal_fetch_data.gimbal_imu_data.Pitch;
+            }
+
+            robot_state = ROBOT_READY;
+            chassis_cmd_send.chassis_mode = CHASSIS_NO_FOLLOW;
+            gimbal_cmd_send.gimbal_mode = GIMBAL_FREE_MODE;
+            shoot_cmd_send.shoot_mode = SHOOT_ON;
+        }
     }
     // [中] 底盘跟随云台模式
     else if (switch_is_mid(current_switch_right)) {
@@ -330,14 +359,23 @@ static void RemoteControlSet()
     if (!switch_is_down(current_switch_right)) {
         // 使用处理后的 rocker_lx 和 rocker_ly
         gimbal_cmd_send.yaw -= 0.001f * rocker_lx;
-        gimbal_cmd_send.pitch += 0.0001f * rocker_ly;
+        gimbal_cmd_send.pitch += 0.00003f * rocker_ly;
+
+        // ==================== [新增] 软件限幅逻辑 ====================
+
+        // 1. Pitch 轴限幅 (最重要，防止撞击)
+        if (gimbal_cmd_send.pitch > PITCH_MAX_ANGLE) {
+            gimbal_cmd_send.pitch = PITCH_MAX_ANGLE;
+        } else if (gimbal_cmd_send.pitch < PITCH_MIN_ANGLE) {
+            gimbal_cmd_send.pitch = PITCH_MIN_ANGLE;
+        }
     }
 
     // 底盘参数
     // 右手系 x正向前进 y正向右移
     // 使用处理后的 rocker_rx 和 rocker_ry
-    chassis_cmd_send.vy = 10.0f * rocker_rx; // _水平方向
-    chassis_cmd_send.vx = 10.0f * rocker_ry; // 1数值方向
+    chassis_cmd_send.vx = 10.0f * rocker_ry; // 竖直方向,发送给vx
+    chassis_cmd_send.vy = 10.0f * rocker_rx; // 水平方向
 
     // 发射参数
     if (switch_is_up(rc_data[TEMP].rc.switch_right)) // 右侧开关状态[上],弹舱打开

@@ -15,10 +15,18 @@
 #define DM_T_MIN (-18.0f)
 #define DM_T_MAX 18.0f
 
+typedef enum {
+    DM_ERR_NONE = 0x0,
+    DM_ERR_OVER_VOLTAGE = 0x8, // 超压
+    DM_ERR_UNDER_VOLTAGE = 0x9, // 欠压
+    DM_ERR_OVER_CURRENT = 0xA, // 过流
+    DM_ERR_MOS_OVERHEAT = 0xB // MOS过温
+} DM_Motor_Error_e;
 typedef struct
 {
     uint8_t id;
     uint8_t state;
+    DM_Motor_Error_e err_code; // [新增] 存储解析出的错误码
     float velocity;
     float last_position;
     float position;
@@ -28,6 +36,7 @@ typedef struct
     int32_t total_round;
     float total_angle;
 } DM_Motor_Measure_s;
+
 
 typedef struct
 {

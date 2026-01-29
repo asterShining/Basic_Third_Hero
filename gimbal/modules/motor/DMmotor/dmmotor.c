@@ -7,6 +7,7 @@
 #include "daemon.h"
 #include "stdlib.h"
 #include "bsp_log.h"
+#include <math.h>
 
 static uint8_t idx;
 static DMMotorInstance *dm_motor_instance[DM_MOTOR_CNT];
@@ -42,20 +43,40 @@ void DMMotorChangeFeed(DMMotorInstance *motor, Closeloop_Type_e loop, Feedback_S
 
 static void DMMotorDecode(CANInstance *motor_can)
 {
-    uint16_t tmp; // 用于暂存解析值,稍后转换成float数据,避免多次创建临时变量
+    uint16_t tmp;
     uint8_t *rxbuff = motor_can->rx_buff;
     DMMotorInstance *motor = (DMMotorInstance *)motor_can->id;
-    DM_Motor_Measure_s *measure = &(motor->measure); // 将can实例中保存的id转换成电机实例的指针
+    DM_Motor_Measure_s *measure = &(motor->measure);
 
     DaemonReload(motor->motor_daemon);
 
+    // ================= [新增] 解析 Byte 0: ID 和 ERR =================
+    // 格式: MST_ID ID | ERR<<4 (即高4位为ERR，低4位为ID)
+    uint8_t raw_err = (rxbuff[0] >> 4) & 0x0F;
+    uint8_t feedback_id = rxbuff[0] & 0x0F;
+
+    measure->id = feedback_id; // 更新反馈ID
+    measure->err_code = (DM_Motor_Error_e)raw_err;
+
+    // // [可选] 如果发现错误，打印日志 (依赖 bsp_log.h)
+    // if (measure->err_code != DM_ERR_NONE) {
+    //     LOGWARNING("[dm_motor] Error Detected! ID:%d, Code:0x%X", feedback_id, raw_err);
+    // }
+    // ===============================================================
+
     measure->last_position = measure->position;
+
+    // 原有逻辑: Byte 1-2 位置
     tmp = (uint16_t)((rxbuff[1] << 8) | rxbuff[2]);
     measure->position = uint_to_float(tmp, DM_P_MIN, DM_P_MAX, 16);
 
-    tmp = (uint16_t)((rxbuff[3] << 4) | rxbuff[4] >> 4);
+    // 原有逻辑: Byte 3-4 速度 (VEL[11:4] | VEL[3:0])
+    // 现有代码逻辑是正确的: (Byte3 << 4) | (Byte4 >> 4)
+    tmp = (uint16_t)((rxbuff[3] << 4) | (rxbuff[4] >> 4));
     measure->velocity = uint_to_float(tmp, DM_V_MIN, DM_V_MAX, 12);
 
+    // 原有逻辑: Byte 4-5 扭矩 (T[11:8] | T[7:0])
+    // 现有代码逻辑是正确的: ((Byte4 & 0x0F) << 8) | Byte5
     tmp = (uint16_t)(((rxbuff[4] & 0x0f) << 8) | rxbuff[5]);
     measure->torque = uint_to_float(tmp, DM_T_MIN, DM_T_MAX, 12);
 
@@ -83,6 +104,9 @@ static void DMMotorDecode(CANInstance *motor_can)
 
 static void DMMotorLostCallback(void *motor_ptr)
 {
+    DMMotorInstance *motor = (DMMotorInstance *)motor_ptr;
+    uint16_t can_bus = motor->motor_can_instace->can_handle == &hcan1 ? 1 : 2;
+    LOGWARNING("[dm_motor] Motor lost, can bus [%d] , id [%d]", can_bus, motor->motor_can_instace->tx_id);
 }
 void DMMotorCaliEncoder(DMMotorInstance *motor)
 {
@@ -258,7 +282,7 @@ void DMMotorTask(void const *argument)
         motor->motor_can_instace->tx_buff[6] = (uint8_t)(((motor_send_mailbox.Kd & 0xF) << 4) | (motor_send_mailbox.torque_des >> 8));
         motor->motor_can_instace->tx_buff[7] = (uint8_t)(motor_send_mailbox.torque_des);
 
-        CANTransmit(motor->motor_can_instace, 1);
+        CANTransmit(motor->motor_can_instace, 2);
 
         osDelay(2); // 500Hz 控制频率
     }
