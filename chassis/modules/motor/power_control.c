@@ -3,18 +3,18 @@
 #include "bsp_dwt.h"
 #include "bsp_log.h"
 
-#define TORQUE_COEF 0.0003662109375f        // (20/16384)*(0.3), 电机转矩系数，与电流和转矩相关
+#define TORQUE_COEF 0.0003662109375f // (20/16384)*(0.3), 电机转矩系数，与电流和转矩相关
 #define POWER_COEF 187.0f / 3591.0f / 9.55f // 电机机械功率系数，与力矩和转速相关，注意框架中速度单位为aps
-const float K1[4] = {1.23e-07, 1.23e-07, 1.23e-07, 1.23e-07};
-const float K2[4] = {1.453e-07, 1.453e-07, 1.453e-07, 1.453e-07};
-const float constant[4] = {4.081f, 4.081f, 4.081f, 4.081f};
+const float K1[4] = { 1.23e-07, 1.23e-07, 1.23e-07, 1.23e-07 };
+const float K2[4] = { 1.453e-07, 1.453e-07, 1.453e-07, 1.453e-07 };
+const float constant[4] = { 4.081f, 4.081f, 4.081f, 4.081f };
 
 static uint8_t idx = 0; // register idx,是该文件的全局电机索引,在注册时使用
 /* DJI电机的实例,此处仅保存指针,内存的分配将通过电机实例初始化时通过malloc()进行 */
-static DJIMotorInstance *dji_motor_instance[DJI_MOTOR_CNT] = {NULL}; // 会在control任务中遍历该指针数组进行pid计算
-static float initial_torque[4];                                      // 电机输出轴实际转矩，单位N·m
-static float A, B, C;                                                // 测试用
-static float power_control_out[4], initial_give_power[4];            // 电机输出功率
+static DJIMotorInstance *dji_motor_instance[DJI_MOTOR_CNT] = { NULL }; // 会在control任务中遍历该指针数组进行pid计算
+static float initial_torque[4]; // 电机输出轴实际转矩，单位N·m
+static float A, B, C; // 测试用
+static float power_control_out[4], initial_give_power[4]; // 电机输出功率
 static float chassis_max_power, chassis_power, initial_total_power = 0.0f;
 /**
  * @brief 由于DJI电机发送以四个一组的形式进行,故对其进行特殊处理,用6个(2can*3group)can_instance专门负责发送
@@ -29,19 +29,19 @@ static float chassis_max_power, chassis_power, initial_total_power = 0.0f;
  * can2: [3]:0x1FF,[4]:0x200,[5]:0x2FF
  */
 static CANInstance sender_assignment[6] = {
-    [0] = {.can_handle = &hcan1, .txconf.StdId = 0x1ff, .txconf.IDE = CAN_ID_STD, .txconf.RTR = CAN_RTR_DATA, .txconf.DLC = 0x08, .tx_buff = {0}},
-    [1] = {.can_handle = &hcan1, .txconf.StdId = 0x200, .txconf.IDE = CAN_ID_STD, .txconf.RTR = CAN_RTR_DATA, .txconf.DLC = 0x08, .tx_buff = {0}},
-    [2] = {.can_handle = &hcan1, .txconf.StdId = 0x2ff, .txconf.IDE = CAN_ID_STD, .txconf.RTR = CAN_RTR_DATA, .txconf.DLC = 0x08, .tx_buff = {0}},
-    [3] = {.can_handle = &hcan2, .txconf.StdId = 0x1ff, .txconf.IDE = CAN_ID_STD, .txconf.RTR = CAN_RTR_DATA, .txconf.DLC = 0x08, .tx_buff = {0}},
-    [4] = {.can_handle = &hcan2, .txconf.StdId = 0x200, .txconf.IDE = CAN_ID_STD, .txconf.RTR = CAN_RTR_DATA, .txconf.DLC = 0x08, .tx_buff = {0}},
-    [5] = {.can_handle = &hcan2, .txconf.StdId = 0x2ff, .txconf.IDE = CAN_ID_STD, .txconf.RTR = CAN_RTR_DATA, .txconf.DLC = 0x08, .tx_buff = {0}},
+    [0] = { .can_handle = &hcan1, .txconf.StdId = 0x1ff, .txconf.IDE = CAN_ID_STD, .txconf.RTR = CAN_RTR_DATA, .txconf.DLC = 0x08, .tx_buff = { 0 } },
+    [1] = { .can_handle = &hcan1, .txconf.StdId = 0x200, .txconf.IDE = CAN_ID_STD, .txconf.RTR = CAN_RTR_DATA, .txconf.DLC = 0x08, .tx_buff = { 0 } },
+    [2] = { .can_handle = &hcan1, .txconf.StdId = 0x2ff, .txconf.IDE = CAN_ID_STD, .txconf.RTR = CAN_RTR_DATA, .txconf.DLC = 0x08, .tx_buff = { 0 } },
+    [3] = { .can_handle = &hcan2, .txconf.StdId = 0x1ff, .txconf.IDE = CAN_ID_STD, .txconf.RTR = CAN_RTR_DATA, .txconf.DLC = 0x08, .tx_buff = { 0 } },
+    [4] = { .can_handle = &hcan2, .txconf.StdId = 0x200, .txconf.IDE = CAN_ID_STD, .txconf.RTR = CAN_RTR_DATA, .txconf.DLC = 0x08, .tx_buff = { 0 } },
+    [5] = { .can_handle = &hcan2, .txconf.StdId = 0x2ff, .txconf.IDE = CAN_ID_STD, .txconf.RTR = CAN_RTR_DATA, .txconf.DLC = 0x08, .tx_buff = { 0 } },
 };
 
 /**
  * @brief 6个用于确认是否有电机注册到sender_assignment中的标志位,防止发送空帧,此变量将在DJIMotorControl()使用
  *        flag的初始化在 MotorSenderGrouping()中进行
  */
-static uint8_t sender_enable_flag[6] = {0};
+static uint8_t sender_enable_flag[6] = { 0 };
 
 /**
  * @brief 设置底盘的最大功率限制
@@ -63,32 +63,27 @@ static void MotorSenderGrouping(DJIMotorInstance *motor, CAN_Init_Config_s *conf
     uint8_t motor_send_num;
     uint8_t motor_grouping;
 
-    switch (motor->motor_type)
-    {
+    switch (motor->motor_type) {
     case M2006:
     case M3508:
         if (motor_id < 4) // 根据ID分组
         {
             motor_send_num = motor_id;
             motor_grouping = config->can_handle == &hcan1 ? 1 : 4;
-        }
-        else
-        {
+        } else {
             motor_send_num = motor_id - 4;
             motor_grouping = config->can_handle == &hcan1 ? 0 : 3;
         }
 
         // 计算接收id并设置分组发送id
-        config->rx_id = 0x200 + motor_id + 1;   // 把ID+1,进行分组设置
+        config->rx_id = 0x200 + motor_id + 1; // 把ID+1,进行分组设置
         sender_enable_flag[motor_grouping] = 1; // 设置发送标志位,防止发送空帧
         motor->message_num = motor_send_num;
         motor->sender_group = motor_grouping;
 
         // 检查是否发生id冲突
-        for (size_t i = 0; i < idx; ++i)
-        {
-            if (dji_motor_instance[i]->motor_can_instance->can_handle == config->can_handle && dji_motor_instance[i]->motor_can_instance->rx_id == config->rx_id)
-            {
+        for (size_t i = 0; i < idx; ++i) {
+            if (dji_motor_instance[i]->motor_can_instance->can_handle == config->can_handle && dji_motor_instance[i]->motor_can_instance->rx_id == config->rx_id) {
                 LOGERROR("[dji_motor] ID crash. Check in debug mode, add dji_motor_instance to watch to get more information.");
                 uint16_t can_bus = config->can_handle == &hcan1 ? 1 : 2;
                 while (1) // 6020的id 1-4和2006/3508的id 5-8会发生冲突(若有注册,即1!5,2!6,3!7,4!8) (1!5!,LTC! (((不是)
@@ -98,26 +93,21 @@ static void MotorSenderGrouping(DJIMotorInstance *motor, CAN_Init_Config_s *conf
         break;
 
     case GM6020:
-        if (motor_id < 4)
-        {
+        if (motor_id < 4) {
             motor_send_num = motor_id;
             motor_grouping = config->can_handle == &hcan1 ? 0 : 3;
-        }
-        else
-        {
+        } else {
             motor_send_num = motor_id - 4;
             motor_grouping = config->can_handle == &hcan1 ? 2 : 5;
         }
 
-        config->rx_id = 0x204 + motor_id + 1;   // 把ID+1,进行分组设置
+        config->rx_id = 0x204 + motor_id + 1; // 把ID+1,进行分组设置
         sender_enable_flag[motor_grouping] = 1; // 只要有电机注册到这个分组,置为1;在发送函数中会通过此标志判断是否有电机注册
         motor->message_num = motor_send_num;
         motor->sender_group = motor_grouping;
 
-        for (size_t i = 0; i < idx; ++i)
-        {
-            if (dji_motor_instance[i]->motor_can_instance->can_handle == config->can_handle && dji_motor_instance[i]->motor_can_instance->rx_id == config->rx_id)
-            {
+        for (size_t i = 0; i < idx; ++i) {
+            if (dji_motor_instance[i]->motor_can_instance->can_handle == config->can_handle && dji_motor_instance[i]->motor_can_instance->rx_id == config->rx_id) {
                 LOGERROR("[dji_motor] ID crash. Check in debug mode, add dji_motor_instance to watch to get more information.");
                 uint16_t can_bus = config->can_handle == &hcan1 ? 1 : 2;
                 while (1) // 6020的id 1-4和2006/3508的id 5-8会发生冲突(若有注册,即1!5,2!6,3!7,4!8) (1!5!,LTC! (((不是)
@@ -177,12 +167,11 @@ static void DJIMotorLostCallback(void *motor_ptr)
 // 电机初始化,返回一个电机实例
 DJIMotorInstance *PowerControlInit(Motor_Init_Config_s *config)
 {
-
     DJIMotorInstance *instance = (DJIMotorInstance *)malloc(sizeof(DJIMotorInstance));
     memset(instance, 0, sizeof(DJIMotorInstance));
 
     // motor basic setting 电机基本设置
-    instance->motor_type = config->motor_type;                         // 6020 or 2006 or 3508
+    instance->motor_type = config->motor_type; // 6020 or 2006 or 3508
     instance->motor_settings = config->controller_setting_init_config; // 正反转,闭环类型等
 
     // motor controller init 电机控制器初始化
@@ -200,7 +189,7 @@ DJIMotorInstance *PowerControlInit(Motor_Init_Config_s *config)
 
     // 注册电机到CAN总线
     config->can_init_config.can_module_callback = DecodeDJIMotor; // set callback
-    config->can_init_config.id = instance;                        // set id,eq to address(it is identity)
+    config->can_init_config.id = instance; // set id,eq to address(it is identity)
     instance->motor_can_instance = CANRegister(&config->can_init_config);
 
     // 注册守护线程
@@ -221,16 +210,16 @@ void PowerControl()
 {
     // 直接保存一次指针引用从而减小访存的开销,同样可以提高可读性
     uint8_t group, num; // 电机组号和组内编号
-    int16_t set;        // 电机控制CAN发送设定值
+    int16_t set; // 电机控制CAN发送设定值
     DJIMotorInstance *motor;
     Motor_Control_Setting_s *motor_setting; // 电机控制参数
-    Motor_Controller_s *motor_controller;   // 电机控制器
-    DJI_Motor_Measure_s *measure;           // 电机测量值
-    float pid_measure, pid_ref;             // 电机PID测量值和设定值
+    Motor_Controller_s *motor_controller; // 电机控制器
+    DJI_Motor_Measure_s *measure; // 电机测量值
+    float pid_measure, pid_ref; // 电机PID测量值和设定值
     initial_total_power = 0.0f;
     // 遍历所有电机实例,进行串级PID的计算并设置发送报文的值
     for (size_t i = 0; i < idx; ++i) // idx实际上是4个
-    {                                // 减小访存开销,先保存指针引用
+    { // 减小访存开销,先保存指针引用
         motor = dji_motor_instance[i];
         motor_setting = &motor->motor_settings;
         motor_controller = &motor->motor_controller;
@@ -243,8 +232,7 @@ void PowerControl()
         // 计算位置环,只有启用位置环且外层闭环为位置时会计算速度环输出
 
         // 计算速度环,(外层闭环为速度或位置)且(启用速度环)时会计算速度环
-        if ((motor_setting->close_loop_type & SPEED_LOOP) && (motor_setting->outer_loop_type & (ANGLE_LOOP | SPEED_LOOP)))
-        {
+        if ((motor_setting->close_loop_type & SPEED_LOOP) && (motor_setting->outer_loop_type & (ANGLE_LOOP | SPEED_LOOP))) {
             if (motor_setting->feedforward_flag & SPEED_FEEDFORWARD)
                 pid_ref += *motor_controller->speed_feedforward_ptr;
 
@@ -268,19 +256,22 @@ void PowerControl()
         // 获取最终输出
         power_control_out[i] = pid_ref;
     }
-    for (uint8_t i = 0; i < idx; i++)
-    {
-        if (initial_give_power[i] < 0)
-        {
+    for (uint8_t i = 0; i < idx; i++) {
+        if (initial_give_power[i] < 0) {
             continue;
         }
         initial_total_power += initial_give_power[i];
     }
-    if (initial_total_power > chassis_max_power)
-    {
+    if (initial_total_power > chassis_max_power) {
         float ratio = chassis_max_power / initial_total_power; // 根据允许的最大功率进行放缩
-        for (uint8_t i = 0; i < idx; i++)
-        {
+        chassis_power = 0.0f;
+        for (uint8_t i = 0; i < idx; i++) {
+            // 只有做功（功率>0）才计入底盘功率消耗，发电（功率<0）通常不计入或由电容吸收
+            if (initial_give_power[i] > 0) {
+                chassis_power += initial_give_power[i];
+            }
+        }
+        for (uint8_t i = 0; i < idx; i++) {
             motor = dji_motor_instance[i];
             measure = &motor->measure;
             pid_measure = measure->speed_aps / 6.0f; // 电机的速度单位是度每秒,转换为rpm
@@ -292,32 +283,26 @@ void PowerControl()
             float a = K1[i];
             float b = TORQUE_COEF * POWER_COEF * pid_measure;
             float c = K2[i] * pid_measure * pid_measure - initial_give_power[i] + constant[i];
-            if (power_control_out[i] > 0)
-            {
+            if (power_control_out[i] > 0) {
                 power_control_out[i] = (-b + sqrt(b * b - 4 * a * c)) / (2 * a);
-                if (power_control_out[i] > 15000)
-                {
+                if (power_control_out[i] > 15000) {
                     power_control_out[i] = 15000;
                 }
-            }
-            else
-            {
+            } else {
                 power_control_out[i] = (-b - sqrt(b * b - 4 * a * c)) / (2 * a);
-                if (power_control_out[i] < -15000)
-                {
+                if (power_control_out[i] < -15000) {
                     power_control_out[i] = -15000;
                 }
             }
         }
     }
 
-    for (uint8_t i = 0; i < idx; i++)
-    {
+    for (uint8_t i = 0; i < idx; i++) {
         motor = dji_motor_instance[i];
         set = (int16_t)power_control_out[i];
         group = motor->sender_group;
         num = motor->message_num;
-        sender_assignment[group].tx_buff[2 * num] = (uint8_t)(set >> 8);         // 低八位
+        sender_assignment[group].tx_buff[2 * num] = (uint8_t)(set >> 8); // 低八位
         sender_assignment[group].tx_buff[2 * num + 1] = (uint8_t)(set & 0x00ff); // 高八位
 
         // 若该电机处于停止状态,直接将buff置零
@@ -326,10 +311,8 @@ void PowerControl()
     }
 
     // 遍历flag,检查是否要发送这一帧报文
-    for (size_t i = 0; i < 6; ++i)
-    {
-        if (sender_enable_flag[i])
-        {
+    for (size_t i = 0; i < 6; ++i) {
+        if (sender_enable_flag[i]) {
             CANTransmit(&sender_assignment[i], 1);
         }
     }
