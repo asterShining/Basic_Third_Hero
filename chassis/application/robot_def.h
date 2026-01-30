@@ -44,6 +44,25 @@
 #define RADIUS_WHEEL 60 // 轮子半径
 #define REDUCTION_RATIO_WHEEL 19.0f // 电机减速比,因为编码器量测的是转子的速度而不是输出轴的速度故需进行转换
 
+// ==========================================
+// [新增] 机器人物理模型参数 (用于功率控制和坡道力矩补偿)
+// ==========================================
+#define ROBOT_MASS 20.0f // 机器人质量 (kg) [需根据实际称重修改]
+#define ROBOT_COG_H 0.15f // 重心高度 (m) [需根据CAD或实测修改]
+#define GRAVITY_ACC 9.8f // 重力加速度 (m/s^2)
+
+// 几何参数单位转换 (mm -> m), 供力学解算使用
+#define RADIUS_WHEEL_M (RADIUS_WHEEL / 1000.0f)
+#define WHEEL_BASE_M (WHEEL_BASE / 1000.0f)
+#define TRACK_WIDTH_M (TRACK_WIDTH / 1000.0f)
+#define HALF_WHEEL_BASE_M (WHEEL_BASE_M / 2.0f)
+#define HALF_TRACK_WIDTH_M (TRACK_WIDTH_M / 2.0f)
+
+// 电机扭矩系数转换
+// M3508/M2006: 电流Raw(0-16384) -> 扭矩(Nm) 的系数约为 0.0003662
+// 补偿算法需要反向: 目标扭矩(Nm) -> 目标电流Raw
+#define TORQUE_2_CURRENT_COEF (1.0f / 0.0003662109375f)
+
 #define GYRO2GIMBAL_DIR_YAW 1 // 陀螺仪数据相较于云台的yaw的方向,1为相同,-1为相反
 #define GYRO2GIMBAL_DIR_PITCH 1 // 陀螺仪数据相较于云台的pitch的方向,1为相同,-1为相反
 #define GYRO2GIMBAL_DIR_ROLL 1 // 陀螺仪数据相较于云台的roll的方向,1为相同,-1为相反

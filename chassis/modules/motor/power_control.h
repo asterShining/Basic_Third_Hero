@@ -22,7 +22,6 @@
 #include "daemon.h"
 #include "dji_motor.h"
 
-
 DJIMotorInstance *PowerControlInit(Motor_Init_Config_s *config);
 
 /**
@@ -39,4 +38,17 @@ void PowerControl(void);
  * @param power_limit 功率限制值
  */
 void SetPowerLimit(float power_limit);
+
+/**
+ * @brief 更新底盘姿态信息用于坡道力补偿 (需要在底盘任务中定时调用)
+ * @param pitch_rad 俯仰角 (弧度)
+ * @param roll_rad  横滚角 (弧度)
+ */
+void PowerControl_UpdateIMU(float pitch_rad, float roll_rad);
+
+/**
+ * @brief 使能/失能 坡道力矩补偿
+ * @param enable 1:开启, 0:关闭
+ */
+void PowerControl_EnableSlopeComp(uint8_t enable);
 #endif // !DJI_MOTOR_H

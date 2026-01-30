@@ -30,7 +30,7 @@
 #define HALF_WHEEL_BASE (WHEEL_BASE / 2.0f) // 半轴距
 #define HALF_TRACK_WIDTH (TRACK_WIDTH / 2.0f) // 半轮距
 #define PERIMETER_WHEEL (RADIUS_WHEEL * 2 * PI) // 轮子周长
-#define DEFAULT_TEST_POWER 55.0f // 调试用的基础功率
+#define DEFAULT_TEST_POWER 100.0f // 调试用的基础功率
 
 /* 底盘应用包含的模块和信息存储,底盘是单例模式,因此不需要为底盘建立单独的结构体 */
 #ifdef CHASSIS_BOARD // 如果是底盘板,使用板载IMU获取底盘转动角速度
@@ -115,7 +115,7 @@ void ChassisInit()
     motor_lb = PowerControlInit(&chassis_motor_config);
 
     // referee_data = UITaskInit(&huart6, &ui_data); // 裁判系统初始化,会同时初始化UI
-
+    PowerControl_EnableSlopeComp(0);
     SuperCap_Init_Config_s cap_conf = {
         .can_config = {
             .can_handle = &hcan1,
@@ -331,11 +331,19 @@ void ChassisTask()
 
     /* 超级电容爆发功率策略 */
     /* 超级电容爆发功率策略 */
-    // 1. 获取基础限制
-    float final_power_limit = referee_data->GameRobotState.chassis_power_limit;
-    if (final_power_limit < 1.0f) // 简单判断裁判系统是否在线/有效
-    {
-        final_power_limit = DEFAULT_TEST_POWER;
+    float final_power_limit;
+
+    // 【修复】先判断指针是否为空
+    // 如果没有初始化裁判系统（referee_data == NULL），直接使用测试功率
+    if (referee_data == NULL) {
+        final_power_limit = DEFAULT_TEST_POWER; // 强制使用
+    } else {
+        // 只有指针有效时才去读取
+        final_power_limit = referee_data->GameRobotState.chassis_power_limit;
+        // 即使有指针，如果读出来是0（裁判系统刚启动），也用测试功率兜底
+        if (final_power_limit < 1.0f) {
+            final_power_limit = DEFAULT_TEST_POWER;
+        }
     }
 
     // 2. 判断是否可以爆发 (电容模式开启 + 电容在线 + 电量充足 + DCDC已使能)
@@ -398,6 +406,8 @@ void ChassisTask()
     // 根据控制模式进行正运动学解算,计算底盘输出
     MecanumCalculate();
     // HybridCalculate();
+    // PowerControl_UpdateIMU(Chassis_IMU_data->Pitch * DEGREE_2_RAD,
+    //                        Chassis_IMU_data->Roll * DEGREE_2_RAD);
 
     // 根据裁判系统的反馈数据和电容数据对输出限幅并设定闭环参考值
     LimitChassisOutput();

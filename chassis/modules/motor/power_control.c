@@ -1,7 +1,9 @@
 #include "power_control.h"
 #include "general_def.h"
+#include "robot_def.h"
 #include "bsp_dwt.h"
 #include "bsp_log.h"
+#include <math.h> // 需要用到 sin, cos, tan, sqrt
 
 #define TORQUE_COEF 0.0003662109375f // (20/16384)*(0.3), 电机转矩系数，与电流和转矩相关
 #define POWER_COEF 187.0f / 3591.0f / 9.55f // 电机机械功率系数，与力矩和转速相关，注意框架中速度单位为aps
@@ -16,6 +18,14 @@ static float initial_torque[4]; // 电机输出轴实际转矩，单位N·m
 static float A, B, C; // 测试用
 static float power_control_out[4], initial_give_power[4]; // 电机输出功率
 static float chassis_max_power, chassis_power, initial_total_power = 0.0f;
+
+// ==========================================
+// [新增] 坡道补偿相关变量
+// ==========================================
+static float chassis_pitch = 0.0f;
+static float chassis_roll = 0.0f;
+static uint8_t slope_comp_enable = 0; // 默认关闭，需要在初始化或任务中开启
+static float slope_feedforward_current[4] = { 0.0f }; // 存储计算出的前馈电流
 /**
  * @brief 由于DJI电机发送以四个一组的形式进行,故对其进行特殊处理,用6个(2can*3group)can_instance专门负责发送
  *        该变量将在 DJIMotorControl() 中使用,分组在 MotorSenderGrouping()中进行
@@ -37,6 +47,85 @@ static CANInstance sender_assignment[6] = {
     [5] = { .can_handle = &hcan2, .txconf.StdId = 0x2ff, .txconf.IDE = CAN_ID_STD, .txconf.RTR = CAN_RTR_DATA, .txconf.DLC = 0x08, .tx_buff = { 0 } },
 };
 
+void PowerControl_UpdateIMU(float pitch_rad, float roll_rad)
+{
+    chassis_pitch = pitch_rad;
+    chassis_roll = roll_rad;
+}
+
+void PowerControl_EnableSlopeComp(uint8_t enable)
+{
+    slope_comp_enable = enable;
+}
+
+/**
+ * @brief [内部函数] 计算高配版上坡力矩补偿
+ * @note  对应 PPT 中的算法逻辑
+ */
+static void CalculateSlopeFeedforward(void)
+{
+    if (idx < 4)
+        return; // 确保4个电机都已注册
+
+    // 1. 计算重力沿底盘平面的分力 (需要电机产生的反向力)
+    // 假设 Pitch > 0 为车头抬起 (上坡)，需要电机产生向前的力 (X正方向)
+    // F_gravity_x = mg * sin(pitch)
+    float F_gravity_x = ROBOT_MASS * GRAVITY_ACC * sinf(chassis_pitch);
+    float F_gravity_y = -ROBOT_MASS * GRAVITY_ACC * sinf(chassis_roll) * cosf(chassis_pitch);
+
+    // 2. 计算重心投影点偏移 (p点)
+    float cog_shift_x = ROBOT_COG_H * tanf(chassis_pitch);
+    float cog_shift_y = ROBOT_COG_H * tanf(chassis_roll);
+
+    // 3. 定义轮子坐标 (相对于几何中心)
+    // 顺序必须与 dji_motor_instance[i] 的注册顺序一致！
+    // 根据 chassis.c: LF(0), RF(1), RB(2), LB(3)
+    const float wheel_pos_x[4] = { HALF_WHEEL_BASE_M, HALF_WHEEL_BASE_M, -HALF_WHEEL_BASE_M, -HALF_WHEEL_BASE_M }; // 前, 前, 后, 后
+    const float wheel_pos_y[4] = { HALF_TRACK_WIDTH_M, -HALF_TRACK_WIDTH_M, -HALF_TRACK_WIDTH_M, HALF_TRACK_WIDTH_M }; // 左, 右, 右, 左
+
+    float weights[4];
+    float total_weight = 0.0f;
+
+    // 4. 计算权重 (距离越近，权重越大)
+    for (int i = 0; i < 4; i++) {
+        float dx = wheel_pos_x[i] - cog_shift_x;
+        float dy = wheel_pos_y[i] - cog_shift_y;
+        float d = sqrtf(dx * dx + dy * dy);
+        if (d < 0.001f)
+            d = 0.001f; // 防止除零
+        weights[i] = 1.0f / d;
+        total_weight += weights[i];
+    }
+
+    // 5. 计算各轮所需的基础牵引力 (麦轮逆解算: 平动部分)
+    // LF: Fx - Fy
+    // RF: Fx + Fy
+    // RB: Fx - Fy
+    // LB: Fx + Fy
+    float raw_force[4];
+    raw_force[0] = F_gravity_x - F_gravity_y;
+    raw_force[1] = F_gravity_x + F_gravity_y;
+    raw_force[2] = F_gravity_x - F_gravity_y;
+    raw_force[3] = F_gravity_x + F_gravity_y;
+
+    // 6. 分配并计算最终电流
+    for (int i = 0; i < 4; i++) {
+        float eta = weights[i] / total_weight;
+        // 4.0f * eta 是相对于平均分配的缩放系数
+        float final_force = raw_force[i] * (4.0f * eta);
+
+        // 限幅保护 (防止重心极度偏移时数值爆炸, 设为 0.5G)
+        float max_force = 0.5f * ROBOT_MASS * GRAVITY_ACC;
+        if (final_force > max_force)
+            final_force = max_force;
+        if (final_force < -max_force)
+            final_force = -max_force;
+
+        // 力 -> 力矩 -> 电流 (注意电流单位是raw值，对应M3508/2006量级)
+        float torque = final_force * RADIUS_WHEEL_M;
+        slope_feedforward_current[i] = torque * TORQUE_2_CURRENT_COEF;
+    }
+}
 /**
  * @brief 6个用于确认是否有电机注册到sender_assignment中的标志位,防止发送空帧,此变量将在DJIMotorControl()使用
  *        flag的初始化在 MotorSenderGrouping()中进行
@@ -217,6 +306,12 @@ void PowerControl()
     DJI_Motor_Measure_s *measure; // 电机测量值
     float pid_measure, pid_ref; // 电机PID测量值和设定值
     initial_total_power = 0.0f;
+    // 计算前馈值
+    if (slope_comp_enable) {
+        CalculateSlopeFeedforward();
+    } else {
+        memset(slope_feedforward_current, 0, sizeof(slope_feedforward_current));
+    }
     // 遍历所有电机实例,进行串级PID的计算并设置发送报文的值
     for (size_t i = 0; i < idx; ++i) // idx实际上是4个
     { // 减小访存开销,先保存指针引用
@@ -242,6 +337,10 @@ void PowerControl()
                 pid_measure = measure->speed_aps / 6.0f; // 电机的速度单位是度每秒,转换为rpm
             // 更新pid_ref进入下一个环
             pid_ref = PIDCalculate(&motor_controller->speed_PID, pid_measure, pid_ref);
+            // [新增] 2. 注入坡道扭矩前馈 (Add Feedforward)
+            // 注意：一定要在PID计算之后，功率模型计算之前添加
+            // 这样功率控制模块才会知道“为了维持不下滑，我额外支出了这些力”，从而正确估算功率
+            pid_ref += slope_feedforward_current[i];
             initial_torque[i] = pid_ref;
             power_control_out[i] = pid_ref;
             A = K1[i] * initial_torque[i] * initial_torque[i];
@@ -264,13 +363,6 @@ void PowerControl()
     }
     if (initial_total_power > chassis_max_power) {
         float ratio = chassis_max_power / initial_total_power; // 根据允许的最大功率进行放缩
-        chassis_power = 0.0f;
-        for (uint8_t i = 0; i < idx; i++) {
-            // 只有做功（功率>0）才计入底盘功率消耗，发电（功率<0）通常不计入或由电容吸收
-            if (initial_give_power[i] > 0) {
-                chassis_power += initial_give_power[i];
-            }
-        }
         for (uint8_t i = 0; i < idx; i++) {
             motor = dji_motor_instance[i];
             measure = &motor->measure;
@@ -294,6 +386,14 @@ void PowerControl()
                     power_control_out[i] = -15000;
                 }
             }
+        }
+    }
+    chassis_power = 0.0f; // 先清零
+    for (uint8_t i = 0; i < idx; i++) {
+        // initial_give_power[i] 在此时已经是乘以 ratio 之后的值了
+        // 只统计正功（消耗电池能量），不统计发电（负功）
+        if (initial_give_power[i] > 0) {
+            chassis_power += initial_give_power[i];
         }
     }
 
