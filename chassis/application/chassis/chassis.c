@@ -315,66 +315,11 @@ static void EstimateSpeed()
     last_wz = real_wz;
 }
 
-static void ChassisHeadLock()
-{
-    if (Chassis_IMU_data == NULL)
-        return;
-
-    // --- 1. 初始化逻辑 (防止上电瞬间乱转) ---
-    static uint8_t is_initialized = 0;
-    if (!is_initialized) {
-        lock_target_yaw = Chassis_IMU_data->Yaw; // 上电第一刻，锁定当前角度
-        is_initialized = 1;
-    }
-
-    // --- 2. 获取输入并积分 (核心步骤) ---
-    // 假设摇杆 wz 范围是 -660 ~ +660
-    float input_wz = chassis_cmd_recv.gimbal_cmd_wz;
-
-    // 死区处理：防止摇杆回中时的微小漂移导致目标角度缓慢移动
-    if (fabsf(input_wz) < 100.0f) {
-        input_wz = 0.0f;
-    }
-
-    // 灵敏度系数：决定了你推满摇杆时，底盘旋转得有多快
-    // 计算公式：最大转速(度/秒) = 660 * 系数 * 控制频率(Hz)
-    // 例如：0.002 * 660 * 500Hz(假设) = 660度/秒 (约2圈/秒)
-    // 建议从 0.001f 开始调，觉得慢了就加大
-    const float SENSITIVITY = 0.00015f;
-
-    // 积分：输入改变的是“目标”，而不是直接改变“速度”
-    lock_target_yaw += input_wz * SENSITIVITY;
-
-    // --- 3. 目标角度过零处理 (归一化到 -180 ~ 180) ---
-    // 这一步至关重要！否则转几圈后 target 变成 720度，PID 就失效了
-    if (lock_target_yaw > 180.0f) {
-        lock_target_yaw -= 360.0f;
-    } else if (lock_target_yaw < -180.0f) {
-        lock_target_yaw += 360.0f;
-    }
-
-    // --- 4. 计算最短路径误差 ---
-    float current_yaw = Chassis_IMU_data->Yaw;
-    float err_angle = lock_target_yaw - current_yaw;
-
-    if (err_angle > 180.0f) {
-        err_angle -= 360.0f;
-    } else if (err_angle < -180.0f) {
-        err_angle += 360.0f;
-    }
-
-    // --- 5. PID 计算与输出 ---
-    // 此时 PID 全时在线，负责把底盘拉向 target
-    // 你的 PID 配置中启用了 PID_Derivative_On_Measurement，这非常棒！
-    // 它可以防止当你快速推摇杆改变 target 时，D项产生冲击。
-    float pid_out = PIDCalculate(&yaw_lock_pid, 0.0f, err_angle);
-
-    // 最终将 PID 计算出的力矩/速度赋值给 wz
-    chassis_cmd_recv.wz = pid_out;
-}
 /* 机器人底盘控制核心任务 */
 void ChassisTask()
 {
+    float gimbal_wz = 0.0f;
+    gimbal_wz = chassis_cmd_recv.gimbal_gyro_z;
     // 后续增加没收到消息的处理(双板的情况)
     // 获取新的控制信息
 #ifdef ONE_BOARD
@@ -428,7 +373,9 @@ void ChassisTask()
     case CHASSIS_NO_FOLLOW: // 底盘不旋转,但维持全向机动,一般用于调整云台姿态
         break;
     case CHASSIS_FOLLOW_GIMBAL_YAW:
-        chassis_cmd_recv.wz = -1.5f * chassis_cmd_recv.offset_angle * abs(chassis_cmd_recv.offset_angle);
+
+        chassis_cmd_recv.wz = -2.8f * chassis_cmd_recv.offset_angle * abs(chassis_cmd_recv.offset_angle) - 1.0 * gimbal_wz;
+
         break;
     case CHASSIS_ROTATE: // 自旋,同时保持全向机动;当前wz维持定值,后续增加不规则的变速策略
         chassis_cmd_recv.wz = 4000;

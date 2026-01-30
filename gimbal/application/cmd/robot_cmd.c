@@ -13,7 +13,7 @@
 #include "bmi088.h"
 #include "buzzer.h"
 #include "remote_control.h"
-#include "gimbal_calibration.h"
+
 // bsp
 #include "bsp_dwt.h"
 #include "bsp_log.h"
@@ -280,44 +280,18 @@ static void RemoteControlSet()
     // [上] 底盘无力，云台能够转动
     else if (switch_is_up(current_switch_right)) {
         // --- 子模式：自动标定 (左拨杆为上) ---
-        if (switch_is_up(current_switch_left)) {
-            robot_state = ROBOT_READY;
-            chassis_cmd_send.chassis_mode = CHASSIS_NO_FOLLOW;
-            gimbal_cmd_send.gimbal_mode = GIMBAL_CALI_MODE; // 设定为标定模式
-            shoot_cmd_send.shoot_mode = SHOOT_OFF;
 
-            // ==================== [新增] 蜂鸣器提示逻辑 ====================
-            // 逻辑：只要标定没完成且没出错，就一直响；一旦完成(COMPLETE)或出错(ERROR)，就停。
-            if (g_cali.state != CALI_STATE_COMPLETE && g_cali.state != CALI_STATE_ERROR) {
-                if (hint_buzzer != NULL) {
-                    AlarmSetStatus(hint_buzzer, ALARM_ON);
-                }
-            } else {
-                // 标定结束（成功或失败），自动关闭蜂鸣器
-                if (hint_buzzer != NULL) {
-                    AlarmSetStatus(hint_buzzer, ALARM_OFF);
-                }
-            }
-            // ============================================================
+        // 无扰切换判断
+        if (!switch_is_up(last_switch_right)) {
+            gimbal_cmd_send.yaw = gimbal_fetch_data.gimbal_imu_data.YawTotalAngle;
+            gimbal_cmd_send.pitch = gimbal_fetch_data.gimbal_imu_data.Pitch;
         }
-        // --- 子模式：自由模式 (左拨杆为中或下) ---
-        else {
-            // [重要] 如果用户中途手动切出标定模式，必须强制关闭蜂鸣器
-            if (hint_buzzer != NULL) {
-                AlarmSetStatus(hint_buzzer, ALARM_OFF);
-            }
 
-            // 无扰切换判断
-            if (!switch_is_up(last_switch_right)) {
-                gimbal_cmd_send.yaw = gimbal_fetch_data.gimbal_imu_data.YawTotalAngle;
-                gimbal_cmd_send.pitch = gimbal_fetch_data.gimbal_imu_data.Pitch;
-            }
+        robot_state = ROBOT_READY;
+        chassis_cmd_send.chassis_mode = CHASSIS_NO_FOLLOW;
+        gimbal_cmd_send.gimbal_mode = GIMBAL_FREE_MODE;
+        shoot_cmd_send.shoot_mode = SHOOT_ON;
 
-            robot_state = ROBOT_READY;
-            chassis_cmd_send.chassis_mode = CHASSIS_NO_FOLLOW;
-            gimbal_cmd_send.gimbal_mode = GIMBAL_FREE_MODE;
-            shoot_cmd_send.shoot_mode = SHOOT_ON;
-        }
     }
     // [中] 底盘跟随云台模式
     else if (switch_is_mid(current_switch_right)) {

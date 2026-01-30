@@ -7,14 +7,11 @@
 #include "message_center.h"
 #include "general_def.h"
 #include "bmi088.h"
-#include "gimbal_calibration.h"
-#define PITCH_GRAVITY_COEFFICIENT_K1 -68.632f // 重力补偿系数K1的默认值,需要根据实际云台调整
-#define PITCH_GRAVITY_COEFFICIENT_K2 296.274f // 重力补偿系数K2的默认值,需要根据实际云台调整
+
+#define PITCH_GRAVITY_COEFFICIENT_K1 7.74f
+#define PITCH_GRAVITY_COEFFICIENT_K2 6.0f
 static attitude_t *gimba_IMU_data; // 云台IMU数据
 static DMMotorInstance *yaw_motor, *pitch_motor;
-
-/* 全局标定实例（在 gimbal_calibration.h 中声明为 extern） */
-GimbalCali_t g_cali;
 
 static Publisher_t *gimbal_pub; // 云台应用消息发布者(云台反馈给cmd)
 static Subscriber_t *gimbal_sub; // cmd控制消息订阅者
@@ -40,7 +37,7 @@ void GimbalInit()
         },
         .controller_param_init_config = {
             .angle_PID = {
-                .Kp = 0.54, //
+                .Kp = 0.52, //
                 .Ki = 0,
                 .Kd = 0,
 
@@ -50,8 +47,8 @@ void GimbalInit()
                 .MaxOut = 20,
             },
             .speed_PID = {
-                .Kp = 2.7, //
-                .Ki = 0.05, //
+                .Kp = 1.2, //
+                .Ki = 0.1, //
                 .Kd = 0,
                 .Improve = PID_Trapezoid_Intergral | PID_Integral_Limit | PID_Derivative_On_Measurement,
                 .IntegralLimit = 3,
@@ -109,7 +106,7 @@ void GimbalInit()
     };
     // 电机对total_angle闭环,上电时为零,会保持静止,收到遥控器数据再动
     yaw_motor = DMMotorInit(&yaw_config);
-    pitch_motor = DMMotorInit(&pitch_config);
+    // pitch_motor = DMMotorInit(&pitch_config);
 
     gimbal_pub = PubRegister("gimbal_feed", sizeof(Gimbal_Upload_Data_s));
     gimbal_sub = SubRegister("gimbal_cmd", sizeof(Gimbal_Ctrl_Cmd_s));
@@ -121,101 +118,69 @@ void GimbalTask()
     // 获取云台控制数据
     // 后续增加未收到数据的处理
     SubGetMessage(gimbal_sub, &gimbal_cmd_recv);
-
-    // [新增] 静态变量: 用于记录标定初始化状态
-    static uint8_t is_cali_inited = 0;
     // [新增] 静态变量: 用于存储前馈值 (必须是static，因为指针会被传递给电机驱动)
     static float pitch_ff_storage = 0.0f;
 
-    // ==========================================
-    // 分支 1: 标定模式
-    // ==========================================
-    if (gimbal_cmd_recv.gimbal_mode == GIMBAL_CALI_MODE) {
-        // 1. 初始化逻辑 (仅进入模式时执行一次)
-        if (!is_cali_inited) {
-            Gimbal_Calibration_Init(); // 复位标定状态机
-            is_cali_inited = 1;
-        }
-
-        // 2. Yaw 轴逻辑: 锁定在 0 度，防止乱转干扰 Pitch 标定
-        DMMotorEnable(yaw_motor);
-        DMMotorOuterLoop(yaw_motor, ANGLE_LOOP);
-        DMMotorSetRef(yaw_motor, 0.0f);
-
-        // 3. Pitch 轴逻辑: 交给标定 Handler 处理
-        // Handler 内部会自动接管电机控制权（切换到电流环、发送测试力矩等）
-        Gimbal_Calibration_Handler(pitch_motor, gimba_IMU_data);
-
-    }
-    // ==========================================
     // 分支 2: 正常控制模式
     // ==========================================
-    else {
-        // @todo:现在已不再需要电机反馈,实际上可以始终使用IMU的姿态数据来作为云台的反馈,yaw电机的offset只是用来跟随底盘
-        // 根据控制模式进行电机反馈切换和过渡,视觉模式在robot_cmd模块就已经设置好,gimbal只看yaw_ref和pitch_ref
-        switch (gimbal_cmd_recv.gimbal_mode) {
-        // 停止
-        case GIMBAL_ZERO_FORCE:
-            DMMotorStop(yaw_motor);
-            DMMotorStop(pitch_motor);
-            break;
-        // 使用陀螺仪的反馈,底盘根据yaw电机的offset跟随云台或视觉模式采用
-        case GIMBAL_GYRO_MODE: // 后续只保留此模式
-            DMMotorEnable(yaw_motor);
-            DMMotorEnable(pitch_motor);
 
-            DMMotorSetRef(yaw_motor, gimbal_cmd_recv.yaw); // yaw和pitch会在robot_cmd中处理好多圈和单圈
-            DMMotorSetRef(pitch_motor, gimbal_cmd_recv.pitch);
-            break;
-        // 云台自由模式,使用编码器反馈,底盘和云台分离,仅云台旋转,一般用于调整云台姿态(英雄吊射等)/能量机关
-        case GIMBAL_FREE_MODE: // 后续删除,或加入云台追地盘的跟随模式(响应速度更快)
-            DMMotorEnable(yaw_motor);
-            DMMotorEnable(pitch_motor);
+    // @todo:现在已不再需要电机反馈,实际上可以始终使用IMU的姿态数据来作为云台的反馈,yaw电机的offset只是用来跟随底盘
+    // 根据控制模式进行电机反馈切换和过渡,视觉模式在robot_cmd模块就已经设置好,gimbal只看yaw_ref和pitch_ref
+    switch (gimbal_cmd_recv.gimbal_mode) {
+    // 停止
+    case GIMBAL_ZERO_FORCE:
+        DMMotorStop(yaw_motor);
+        DMMotorStop(pitch_motor);
+        break;
+    // 使用陀螺仪的反馈,底盘根据yaw电机的offset跟随云台或视觉模式采用
+    case GIMBAL_GYRO_MODE: // 后续只保留此模式
+        DMMotorEnable(yaw_motor);
+        DMMotorEnable(pitch_motor);
 
-            DMMotorSetRef(yaw_motor, gimbal_cmd_recv.yaw); // yaw和pitch会在robot_cmd中处理好多圈和单圈
-            DMMotorSetRef(pitch_motor, gimbal_cmd_recv.pitch);
-            break;
-        default:
-            break;
-        }
+        DMMotorSetRef(yaw_motor, gimbal_cmd_recv.yaw); // yaw和pitch会在robot_cmd中处理好多圈和单圈
+        DMMotorSetRef(pitch_motor, gimbal_cmd_recv.pitch);
+        break;
+    // 云台自由模式,使用编码器反馈,底盘和云台分离,仅云台旋转,一般用于调整云台姿态(英雄吊射等)/能量机关
+    case GIMBAL_FREE_MODE: // 后续删除,或加入云台追地盘的跟随模式(响应速度更快)
+        DMMotorEnable(yaw_motor);
+        DMMotorEnable(pitch_motor);
 
-        // 在合适的地方添加pitch重力补偿前馈力矩
-        // 根据IMU姿态/pitch电机角度反馈计算出当前配重下的重力矩
-        // ...
-        if (gimbal_cmd_recv.gimbal_mode != GIMBAL_ZERO_FORCE) {
-            float k1_val, k2_val;
+        DMMotorSetRef(yaw_motor, gimbal_cmd_recv.yaw); // yaw和pitch会在robot_cmd中处理好多圈和单圈
+        DMMotorSetRef(pitch_motor, gimbal_cmd_recv.pitch);
+        break;
+    default:
+        break;
+    }
 
-            // A. 选择参数来源
-            // 如果标定已完成，使用标定出的参数；否则使用宏定义的默认参数
-            if (g_cali.state == CALI_STATE_COMPLETE) {
-                k1_val = g_cali.result_k1;
-                k2_val = g_cali.result_k2;
-            } else {
-                k1_val = PITCH_GRAVITY_COEFFICIENT_K1;
-                k2_val = PITCH_GRAVITY_COEFFICIENT_K2;
-            }
+    // 在合适的地方添加pitch重力补偿前馈力矩
+    // 根据IMU姿态/pitch电机角度反馈计算出当前配重下的重力矩
+    // ...
+    if (gimbal_cmd_recv.gimbal_mode != GIMBAL_ZERO_FORCE) {
+        float k1_val, k2_val;
 
-            // B. 获取当前 Pitch 角度 (弧度制)
-            // 务必确认 gimba_IMU_data->Roll 对应的是 Pitch 轴的物理运动
-            float pitch_rad = gimba_IMU_data->Roll * DEGREE_2_RAD;
+        k1_val = PITCH_GRAVITY_COEFFICIENT_K1;
+        k2_val = PITCH_GRAVITY_COEFFICIENT_K2;
 
-            // C. 计算补偿力矩
-            // 公式: T_motor = -T_gravity = -(K1*cos + K2*sin)
-            // 物理含义:
-            //  K1*cos: 抵消主重力矩 (重心在水平轴上的分量)
-            //  K2*sin: 抵消重心偏移带来的非正弦畸变
-            float gravity_ff = -(k1_val * arm_cos_f32(pitch_rad) - k2_val * arm_sin_f32(pitch_rad));
+        // B. 获取当前 Pitch 角度 (弧度制)
+        // 务必确认 gimba_IMU_data->Roll 对应的是 Pitch 轴的物理运动
+        float pitch_rad = gimba_IMU_data->Roll * DEGREE_2_RAD;
 
-            // D. 应用前馈
-            pitch_ff_storage = gravity_ff; // 更新静态变量
-            pitch_motor->current_feedforward_ptr = &pitch_ff_storage; // 更新指针 (防防御性编程，尽管Init时可能已赋值)
-            pitch_motor->motor_settings.feedforward_flag |= CURRENT_FEEDFORWARD; // 开启前馈标志位
+        // C. 计算补偿力矩
+        // 公式: T_motor = -T_gravity = -(K1*cos + K2*sin)
+        // 物理含义:
+        //  K1*cos: 抵消主重力矩 (重心在水平轴上的分量)
+        //  K2*sin: 抵消重心偏移带来的非正弦畸变
+        float gravity_ff = -(k1_val * arm_cos_f32(pitch_rad) - k2_val * arm_sin_f32(pitch_rad));
 
-        } else {
-            // 停止模式下清除前馈，防止切回时突变
-            pitch_motor->motor_settings.feedforward_flag &= ~CURRENT_FEEDFORWARD;
-            pitch_ff_storage = 0.0f;
-        }
+        // D. 应用前馈
+        pitch_ff_storage = gravity_ff; // 更新静态变量
+        pitch_motor->current_feedforward_ptr = &pitch_ff_storage; // 更新指针 (防防御性编程，尽管Init时可能已赋值)
+        pitch_motor->motor_settings.feedforward_flag |= CURRENT_FEEDFORWARD; // 开启前馈标志位
+
+    } else {
+        // 停止模式下清除前馈，防止切回时突变
+        pitch_motor->motor_settings.feedforward_flag &= ~CURRENT_FEEDFORWARD;
+        pitch_ff_storage = 0.0f;
     }
 
     // 设置反馈数据,主要是imu和yaw的ecd
