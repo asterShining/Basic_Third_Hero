@@ -62,125 +62,89 @@ void PowerControl_EnableSlopeComp(uint8_t enable)
 }
 
 /**
- * @brief [内部函数] 上坡力矩补偿 (带限幅 & 重心修正版)
- * @note  已针对 "抬头Pitch为负" 和 "前轮电流过大" 问题进行修正
+ * @brief [内部函数] PID 动态分配策略 (无前馈版)
+ * @note  策略：根据重心位置，动态调整前后轮的 PID 输出比例。
+ * 上坡时：前轮 PID 缩水(防打滑)，后轮 PID 放大(主出力)。
  */
-static void CalculateSlopeFeedforward(void)
+static void CalculatePIDDistribution(void)
 {
+    // 默认恢复 1.0 (平地模式)
+    for (int i = 0; i < 4; i++)
+        pid_gain_scale[i] = 1.0f;
+
     if (idx < 4)
         return;
 
-    if (fabsf(chassis_pitch) < 0.5236f) {
-        memset(slope_feedforward_current, 0, sizeof(slope_feedforward_current));
-        // 【关键】：恢复平地 PID 分配
-        for (int i = 0; i < 4; i++)
-            pid_gain_scale[i] = 1.0f;
+    // 0. 阈值判断 (例如 25度 ~ 30度)
+    // 小于此角度不进行干预，使用默认 PID
+    if (fabsf(chassis_pitch) < 0.5236f) { // 30度
         return;
     }
 
-    // 1. 计算需要的补偿力 (Target Force)
-    // Pitch负(上坡) -> 重力向后 -> 需要向前的力(+X)
-    // -sin(负) = 正，方向正确 (向前推)
-    float F_comp_x = -ROBOT_MASS * GRAVITY_ACC * sinf(chassis_pitch);
-
-    // 忽略 Y 轴侧倾干扰，专注爬坡
-    float F_comp_y = 0.0f;
-
-    // 2. 计算重心偏移 (无负号，方向正确)
+    // 1. 计算重心偏移 (无负号，方向正确)
+    // Pitch负(上坡) -> tan负 -> 重心后移 -> 后轮近
     float shift_gain = 1.0f;
     float cog_shift_x = ROBOT_COG_H * tanf(chassis_pitch) * shift_gain;
 
     // 投影点安全限幅 (防止数值爆炸)
-    float half_wb = 0.225f; // 根据你的机型调整
+    float half_wb = 0.225f; // 半轴距
     float safe_margin = 0.02f;
     if (cog_shift_x < -(half_wb - safe_margin))
         cog_shift_x = -(half_wb - safe_margin);
     if (cog_shift_x > (half_wb - safe_margin))
         cog_shift_x = (half_wb - safe_margin);
 
-    // 3. 定义轮子坐标 (根据 chassis.c: LF, RF, RB, LB)
-    // 确保 robot_def.h 中定义的 WHEEL_BASE 是米制单位，或者在这里除以1000
+    // 2. 定义轮子坐标 (保持不变)
 #ifdef HALF_WHEEL_BASE_M
     const float wb = HALF_WHEEL_BASE_M;
     const float tw = HALF_TRACK_WIDTH_M;
-    const float wheel_r = RADIUS_WHEEL_M;
 #else
     const float wb = HALF_WHEEL_BASE / 1000.0f;
     const float tw = HALF_TRACK_WIDTH / 1000.0f;
-    const float wheel_r = RADIUS_WHEEL / 1000.0f;
 #endif
 
-    // 假设顺序: LF(0), RF(1), RB(2), LB(3)
-    // LF/RF 是前轮 (+wb), RB/LB 是后轮 (-wb)
+    // 0:LF, 1:RF, 2:RB, 3:LB
     const float wheel_pos_x[4] = { wb, wb, -wb, -wb };
     const float wheel_pos_y[4] = { -tw, tw, tw, -tw };
 
     float weights[4];
     float total_weight = 0.0f;
 
-    // 4. 计算权重
+    // 3. 计算权重 (平方反比，对距离非常敏感)
     for (int i = 0; i < 4; i++) {
-        // 计算轮子到重心投影点的距离
         float dx = wheel_pos_x[i] - cog_shift_x;
-        float dy = wheel_pos_y[i] - 0.0f;
+        float dy = wheel_pos_y[i] - 0.0f; // 忽略侧倾
 
         float d_sq = dx * dx + dy * dy;
         if (d_sq < 0.0001f)
             d_sq = 0.0001f;
 
-        // 使用平方反比定律：距离越近，权重越大
         weights[i] = 1.0f / d_sq;
         total_weight += weights[i];
     }
 
-    // 5. 分配力 (Mecanum 逆解算, 仅考虑 X 方向)
-    float raw_force[4];
-    for (int i = 0; i < 4; i++) {
-        raw_force[i] = F_comp_x;
-    }
-
-    // 6. 计算电流 + 【限幅】 + 【反转修正】
-    static const float motor_dir[4] = { 1.0f, -1.0f, 1.0f, -1.0f };
+    // 4. 计算 PID 缩放系数
     for (int i = 0; i < 4; i++) {
         float eta = weights[i] / total_weight;
-        // ---------------------------------------------------------
-        // 【新增】：计算 PID 动态缩放系数
-        // 原理：平均分配时 eta = 0.25。
-        // scale = eta / 0.25 = eta * 4.0
-        // 如果后轮 eta 占 0.45，则 scale = 1.8 (1.8倍 PID 输出)
-        // 如果前轮 eta 占 0.05，则 scale = 0.2 (0.2倍 PID 输出)
-        // ---------------------------------------------------------
 
+        // 平均分配时 eta = 0.25。 Scale = eta * 4.0
         float scale = eta * 4.0f;
 
-        // 安全限幅：防止前轮完全失去动力(给点面子)，防止后轮过载
-        if (scale < 0.1f)
-            scale = 0.1f;
+        // 【强力优化】：针对大坡度的特殊处理
+        // 如果是前轮 (LF/RF)，且坡度很大，强制压得更低
+        // 这样前轮几乎处于“随动”状态，绝不打滑
+        if (i == 0 || i == 1) {
+            // 如果 scale 算出来是 0.3，我们再给它打个折，确保不空转
+            scale *= 0.5f;
+        }
+
+        // 限幅：最低给 0.05 (保留一点点力维持编码器)，最高给 3.0
+        if (scale < 0.05f)
+            scale = 0.05f;
         if (scale > 3.0f)
             scale = 3.0f;
 
         pid_gain_scale[i] = scale;
-        // ---------------------------------------------------------
-
-        // 计算前馈
-        float final_force = raw_force[i] * (4.0f * eta);
-        float output_current = final_force * wheel_r * TORQUE_2_CURRENT_COEF;
-
-        // 反转修正
-        output_current *= motor_dir[i];
-
-        // 43度极限坡度前馈削弱策略 (仅针对前轮前馈，可选)
-        if (fabsf(chassis_pitch) > 0.5236f && (i == 0 || i == 1)) {
-            output_current *= 0.1f;
-        }
-
-        // 幅度限制
-        if (output_current > MAX_SLOPE_FEEDFORWARD)
-            output_current = MAX_SLOPE_FEEDFORWARD;
-        else if (output_current < -MAX_SLOPE_FEEDFORWARD)
-            output_current = -MAX_SLOPE_FEEDFORWARD;
-
-        slope_feedforward_current[i] = output_current;
     }
 }
 
@@ -364,13 +328,12 @@ void PowerControl()
     DJI_Motor_Measure_s *measure; // 电机测量值
     float pid_measure, pid_ref; // 电机PID测量值和设定值
     initial_total_power = 0.0f;
-    // 计算前馈值
+    // 1. 计算 PID 分配系数
     if (slope_comp_enable) {
-        CalculateSlopeFeedforward();
+        CalculatePIDDistribution(); // <--- 改名后的函数
     } else {
-        memset(slope_feedforward_current, 0, sizeof(slope_feedforward_current));
         for (int i = 0; i < 4; i++)
-            pid_gain_scale[i] = 1.0f; // 默认不缩放
+            pid_gain_scale[i] = 1.0f;
     }
     // 遍历所有电机实例,进行串级PID的计算并设置发送报文的值
     for (size_t i = 0; i < idx; ++i) // idx实际上是4个
@@ -405,8 +368,6 @@ void PowerControl()
             pid_ref *= pid_gain_scale[i];
             // ============================================================
 
-            // 注入坡道力矩前馈 (Add Feedforward)
-            pid_ref += slope_feedforward_current[i];
             initial_torque[i] = pid_ref;
             power_control_out[i] = pid_ref;
             A = K1[i] * initial_torque[i] * initial_torque[i];
