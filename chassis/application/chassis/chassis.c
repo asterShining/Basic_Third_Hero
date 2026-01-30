@@ -75,9 +75,9 @@ void ChassisInit()
     Motor_Init_Config_s chassis_motor_config = {
         .controller_param_init_config = {
             .speed_PID = {
-                .Kp = 4.5, // 4.5
-                .Ki = 0, // 0
-                .Kd = 0, // 0
+                .Kp = 3.7, // 4.5
+                .Ki = 0.0, // 0
+                .Kd = 0.0, // 0
                 .IntegralLimit = 3000,
                 .Improve = PID_Trapezoid_Intergral | PID_Integral_Limit | PID_Derivative_On_Measurement,
                 .MaxOut = 15000,
@@ -115,7 +115,7 @@ void ChassisInit()
     motor_lb = PowerControlInit(&chassis_motor_config);
 
     // referee_data = UITaskInit(&huart6, &ui_data); // 裁判系统初始化,会同时初始化UI
-    PowerControl_EnableSlopeComp(0);
+    PowerControl_EnableSlopeComp(1);
     SuperCap_Init_Config_s cap_conf = {
         .can_config = {
             .can_handle = &hcan1,
@@ -382,7 +382,7 @@ void ChassisTask()
         break;
     case CHASSIS_FOLLOW_GIMBAL_YAW:
 
-        chassis_cmd_recv.wz = -3.1f * chassis_cmd_recv.offset_angle * abs(chassis_cmd_recv.offset_angle) - 1.0 * gimbal_wz;
+        chassis_cmd_recv.wz = -3.1f * chassis_cmd_recv.offset_angle * abs(chassis_cmd_recv.offset_angle) - 0.8 * gimbal_wz;
 
         break;
     case CHASSIS_ROTATE: // 自旋,同时保持全向机动;当前wz维持定值,后续增加不规则的变速策略
@@ -406,8 +406,8 @@ void ChassisTask()
     // 根据控制模式进行正运动学解算,计算底盘输出
     MecanumCalculate();
     // HybridCalculate();
-    // PowerControl_UpdateIMU(Chassis_IMU_data->Pitch * DEGREE_2_RAD,
-    //                        Chassis_IMU_data->Roll * DEGREE_2_RAD);
+    PowerControl_UpdateIMU(Chassis_IMU_data->Pitch * DEGREE_2_RAD,
+                           Chassis_IMU_data->Roll * DEGREE_2_RAD);
 
     // 根据裁判系统的反馈数据和电容数据对输出限幅并设定闭环参考值
     LimitChassisOutput();

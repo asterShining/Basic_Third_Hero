@@ -5,6 +5,8 @@
 #include "bsp_log.h"
 #include <math.h> // 需要用到 sin, cos, tan, sqrt
 
+#define MAX_SLOPE_FEEDFORWARD 8000.0f
+
 #define TORQUE_COEF 0.0003662109375f // (20/16384)*(0.3), 电机转矩系数，与电流和转矩相关
 #define POWER_COEF 187.0f / 3591.0f / 9.55f // 电机机械功率系数，与力矩和转速相关，注意框架中速度单位为aps
 const float K1[4] = { 1.23e-07, 1.23e-07, 1.23e-07, 1.23e-07 };
@@ -59,71 +61,106 @@ void PowerControl_EnableSlopeComp(uint8_t enable)
 }
 
 /**
- * @brief [内部函数] 计算高配版上坡力矩补偿
- * @note  对应 PPT 中的算法逻辑
+ * @brief [内部函数] 上坡力矩补偿 (带限幅 & 重心修正版)
+ * @note  已针对 "抬头Pitch为负" 和 "前轮电流过大" 问题进行修正
  */
 static void CalculateSlopeFeedforward(void)
 {
     if (idx < 4)
-        return; // 确保4个电机都已注册
+        return;
 
-    // 1. 计算重力沿底盘平面的分力 (需要电机产生的反向力)
-    // 假设 Pitch > 0 为车头抬起 (上坡)，需要电机产生向前的力 (X正方向)
-    // F_gravity_x = mg * sin(pitch)
-    float F_gravity_x = ROBOT_MASS * GRAVITY_ACC * sinf(chassis_pitch);
-    float F_gravity_y = -ROBOT_MASS * GRAVITY_ACC * sinf(chassis_roll) * cosf(chassis_pitch);
+    // 0. 死区限制 (防止平地微小震荡)
+    if (fabsf(chassis_pitch) < 0.5236f) {
+        memset(slope_feedforward_current, 0, sizeof(slope_feedforward_current));
+        return;
+    }
 
-    // 2. 计算重心投影点偏移 (p点)
-    float cog_shift_x = ROBOT_COG_H * tanf(chassis_pitch);
-    float cog_shift_y = ROBOT_COG_H * tanf(chassis_roll);
+    // 1. 计算需要的补偿力 (Target Force)
+    // Pitch负(上坡) -> 重力向后 -> 需要向前的力(+X)
+    // -sin(负) = 正，方向正确 (向前推)
+    float F_comp_x = -ROBOT_MASS * GRAVITY_ACC * sinf(chassis_pitch);
 
-    // 3. 定义轮子坐标 (相对于几何中心)
-    // 顺序必须与 dji_motor_instance[i] 的注册顺序一致！
-    // 根据 chassis.c: LF(0), RF(1), RB(2), LB(3)
-    const float wheel_pos_x[4] = { HALF_WHEEL_BASE_M, HALF_WHEEL_BASE_M, -HALF_WHEEL_BASE_M, -HALF_WHEEL_BASE_M }; // 前, 前, 后, 后
-    const float wheel_pos_y[4] = { HALF_TRACK_WIDTH_M, -HALF_TRACK_WIDTH_M, -HALF_TRACK_WIDTH_M, HALF_TRACK_WIDTH_M }; // 左, 右, 右, 左
+    // 忽略 Y 轴侧倾干扰，专注爬坡
+    float F_comp_y = 0.0f;
+
+    // 2. 计算重心投影点偏移 (CoG Shift)
+    // 【关键修正】：CSV显示之前前轮力大，说明之前算出来重心在前。
+    // 我们强制反转这个偏移量。
+    // 原逻辑: H * tan(pitch)。Pitch负 -> Shift负。
+    // 现逻辑: 加负号。如果觉得后轮力还是不够，可以乘以 1.5 倍放大重心偏移效果
+    float shift_gain = 1.5f; // 放大系数，让重心后移更明显
+    float cog_shift_x = -ROBOT_COG_H * tanf(chassis_pitch) * shift_gain;
+
+    float cog_shift_y = 0.0f;
+    
+
+    // 3. 定义轮子坐标 (根据 chassis.c: LF, RF, RB, LB)
+    // 确保 robot_def.h 中定义的 WHEEL_BASE 是米制单位，或者在这里除以1000
+#ifdef HALF_WHEEL_BASE_M
+    const float wb = HALF_WHEEL_BASE_M;
+    const float tw = HALF_TRACK_WIDTH_M;
+    const float wheel_r = RADIUS_WHEEL_M;
+#else
+    const float wb = HALF_WHEEL_BASE / 1000.0f;
+    const float tw = HALF_TRACK_WIDTH / 1000.0f;
+    const float wheel_r = RADIUS_WHEEL / 1000.0f;
+#endif
+
+    // 假设顺序: LF(0), RF(1), RB(2), LB(3)
+    // LF/RF 是前轮 (+wb), RB/LB 是后轮 (-wb)
+    const float wheel_pos_x[4] = { wb, wb, -wb, -wb };
+    const float wheel_pos_y[4] = { -tw, tw, tw, -tw };
 
     float weights[4];
     float total_weight = 0.0f;
 
-    // 4. 计算权重 (距离越近，权重越大)
+    // 4. 计算权重
     for (int i = 0; i < 4; i++) {
+        // 计算轮子到重心投影点的距离
         float dx = wheel_pos_x[i] - cog_shift_x;
-        float dy = wheel_pos_y[i] - cog_shift_y;
-        float d = sqrtf(dx * dx + dy * dy);
-        if (d < 0.001f)
-            d = 0.001f; // 防止除零
-        weights[i] = 1.0f / d;
+        float dy = wheel_pos_y[i] - 0.0f;
+
+        float d_sq = dx * dx + dy * dy;
+        if (d_sq < 0.0001f)
+            d_sq = 0.0001f;
+
+        // 使用平方反比定律：距离越近，权重越大
+        weights[i] = 1.0f / d_sq;
         total_weight += weights[i];
     }
 
-    // 5. 计算各轮所需的基础牵引力 (麦轮逆解算: 平动部分)
-    // LF: Fx - Fy
-    // RF: Fx + Fy
-    // RB: Fx - Fy
-    // LB: Fx + Fy
+    // 5. 分配力 (Mecanum 逆解算, 仅考虑 X 方向)
     float raw_force[4];
-    raw_force[0] = F_gravity_x - F_gravity_y;
-    raw_force[1] = F_gravity_x + F_gravity_y;
-    raw_force[2] = F_gravity_x - F_gravity_y;
-    raw_force[3] = F_gravity_x + F_gravity_y;
+    for (int i = 0; i < 4; i++) {
+        raw_force[i] = F_comp_x;
+    }
 
-    // 6. 分配并计算最终电流
+    // 6. 计算电流 + 【限幅】 + 【反转修正】
     for (int i = 0; i < 4; i++) {
         float eta = weights[i] / total_weight;
-        // 4.0f * eta 是相对于平均分配的缩放系数
         float final_force = raw_force[i] * (4.0f * eta);
+        float output_current = final_force * wheel_r * TORQUE_2_CURRENT_COEF;
 
-        // 限幅保护 (防止重心极度偏移时数值爆炸, 设为 0.5G)
-        float max_force = 0.5f * ROBOT_MASS * GRAVITY_ACC;
-        if (final_force > max_force)
-            final_force = max_force;
-        if (final_force < -max_force)
-            final_force = -max_force;
+        // 【关键修正】：RF(1) 和 LB(3) 是反转电机，需要负电流才能产生向前的力
+        // 索引说明: 0:LF, 1:RF, 2:RB, 3:LB
+        if (i == 1 || i == 3) {
+            output_current = -output_current;
+        }
+        if (fabsf(chassis_pitch) > 0.5236f) {
+            // 针对前轮 (LF=0, RF=1) 进行强力抑制
+            if (i == 0 || i == 1) {
+                output_current *= 0.09f; // 只给 9% 的力，防止打滑
+            }
+        }
 
-        // 力 -> 力矩 -> 电流 (注意电流单位是raw值，对应M3508/2006量级)
-        float torque = final_force * RADIUS_WHEEL_M;
-        slope_feedforward_current[i] = torque * TORQUE_2_CURRENT_COEF;
+        // 幅度限制
+        if (output_current > MAX_SLOPE_FEEDFORWARD) {
+            output_current = MAX_SLOPE_FEEDFORWARD;
+        } else if (output_current < -MAX_SLOPE_FEEDFORWARD) {
+            output_current = -MAX_SLOPE_FEEDFORWARD;
+        }
+
+        slope_feedforward_current[i] = output_current;
     }
 }
 /**
