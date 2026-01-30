@@ -28,6 +28,7 @@ static float chassis_pitch = 0.0f;
 static float chassis_roll = 0.0f;
 static uint8_t slope_comp_enable = 0; // 默认关闭，需要在初始化或任务中开启
 static float slope_feedforward_current[4] = { 0.0f }; // 存储计算出的前馈电流
+static float pid_gain_scale[4] = { 1.0f, 1.0f, 1.0f, 1.0f }; // PID增益缩放系数
 /**
  * @brief 由于DJI电机发送以四个一组的形式进行,故对其进行特殊处理,用6个(2can*3group)can_instance专门负责发送
  *        该变量将在 DJIMotorControl() 中使用,分组在 MotorSenderGrouping()中进行
@@ -69,9 +70,11 @@ static void CalculateSlopeFeedforward(void)
     if (idx < 4)
         return;
 
-    // 0. 死区限制 (防止平地微小震荡)
     if (fabsf(chassis_pitch) < 0.5236f) {
         memset(slope_feedforward_current, 0, sizeof(slope_feedforward_current));
+        // 【关键】：恢复平地 PID 分配
+        for (int i = 0; i < 4; i++)
+            pid_gain_scale[i] = 1.0f;
         return;
     }
 
@@ -83,16 +86,17 @@ static void CalculateSlopeFeedforward(void)
     // 忽略 Y 轴侧倾干扰，专注爬坡
     float F_comp_y = 0.0f;
 
-    // 2. 计算重心投影点偏移 (CoG Shift)
-    // 【关键修正】：CSV显示之前前轮力大，说明之前算出来重心在前。
-    // 我们强制反转这个偏移量。
-    // 原逻辑: H * tan(pitch)。Pitch负 -> Shift负。
-    // 现逻辑: 加负号。如果觉得后轮力还是不够，可以乘以 1.5 倍放大重心偏移效果
-    float shift_gain = 1.5f; // 放大系数，让重心后移更明显
-    float cog_shift_x = -ROBOT_COG_H * tanf(chassis_pitch) * shift_gain;
+    // 2. 计算重心偏移 (无负号，方向正确)
+    float shift_gain = 1.0f;
+    float cog_shift_x = ROBOT_COG_H * tanf(chassis_pitch) * shift_gain;
 
-    float cog_shift_y = 0.0f;
-    
+    // 投影点安全限幅 (防止数值爆炸)
+    float half_wb = 0.225f; // 根据你的机型调整
+    float safe_margin = 0.02f;
+    if (cog_shift_x < -(half_wb - safe_margin))
+        cog_shift_x = -(half_wb - safe_margin);
+    if (cog_shift_x > (half_wb - safe_margin))
+        cog_shift_x = (half_wb - safe_margin);
 
     // 3. 定义轮子坐标 (根据 chassis.c: LF, RF, RB, LB)
     // 确保 robot_def.h 中定义的 WHEEL_BASE 是米制单位，或者在这里除以1000
@@ -136,33 +140,50 @@ static void CalculateSlopeFeedforward(void)
     }
 
     // 6. 计算电流 + 【限幅】 + 【反转修正】
+    static const float motor_dir[4] = { 1.0f, -1.0f, 1.0f, -1.0f };
     for (int i = 0; i < 4; i++) {
         float eta = weights[i] / total_weight;
+        // ---------------------------------------------------------
+        // 【新增】：计算 PID 动态缩放系数
+        // 原理：平均分配时 eta = 0.25。
+        // scale = eta / 0.25 = eta * 4.0
+        // 如果后轮 eta 占 0.45，则 scale = 1.8 (1.8倍 PID 输出)
+        // 如果前轮 eta 占 0.05，则 scale = 0.2 (0.2倍 PID 输出)
+        // ---------------------------------------------------------
+
+        float scale = eta * 4.0f;
+
+        // 安全限幅：防止前轮完全失去动力(给点面子)，防止后轮过载
+        if (scale < 0.1f)
+            scale = 0.1f;
+        if (scale > 3.0f)
+            scale = 3.0f;
+
+        pid_gain_scale[i] = scale;
+        // ---------------------------------------------------------
+
+        // 计算前馈
         float final_force = raw_force[i] * (4.0f * eta);
         float output_current = final_force * wheel_r * TORQUE_2_CURRENT_COEF;
 
-        // 【关键修正】：RF(1) 和 LB(3) 是反转电机，需要负电流才能产生向前的力
-        // 索引说明: 0:LF, 1:RF, 2:RB, 3:LB
-        if (i == 1 || i == 3) {
-            output_current = -output_current;
-        }
-        if (fabsf(chassis_pitch) > 0.5236f) {
-            // 针对前轮 (LF=0, RF=1) 进行强力抑制
-            if (i == 0 || i == 1) {
-                output_current *= 0.09f; // 只给 9% 的力，防止打滑
-            }
+        // 反转修正
+        output_current *= motor_dir[i];
+
+        // 43度极限坡度前馈削弱策略 (仅针对前轮前馈，可选)
+        if (fabsf(chassis_pitch) > 0.5236f && (i == 0 || i == 1)) {
+            output_current *= 0.1f;
         }
 
         // 幅度限制
-        if (output_current > MAX_SLOPE_FEEDFORWARD) {
+        if (output_current > MAX_SLOPE_FEEDFORWARD)
             output_current = MAX_SLOPE_FEEDFORWARD;
-        } else if (output_current < -MAX_SLOPE_FEEDFORWARD) {
+        else if (output_current < -MAX_SLOPE_FEEDFORWARD)
             output_current = -MAX_SLOPE_FEEDFORWARD;
-        }
 
         slope_feedforward_current[i] = output_current;
     }
 }
+
 /**
  * @brief 6个用于确认是否有电机注册到sender_assignment中的标志位,防止发送空帧,此变量将在DJIMotorControl()使用
  *        flag的初始化在 MotorSenderGrouping()中进行
@@ -348,6 +369,8 @@ void PowerControl()
         CalculateSlopeFeedforward();
     } else {
         memset(slope_feedforward_current, 0, sizeof(slope_feedforward_current));
+        for (int i = 0; i < 4; i++)
+            pid_gain_scale[i] = 1.0f; // 默认不缩放
     }
     // 遍历所有电机实例,进行串级PID的计算并设置发送报文的值
     for (size_t i = 0; i < idx; ++i) // idx实际上是4个
@@ -374,9 +397,15 @@ void PowerControl()
                 pid_measure = measure->speed_aps / 6.0f; // 电机的速度单位是度每秒,转换为rpm
             // 更新pid_ref进入下一个环
             pid_ref = PIDCalculate(&motor_controller->speed_PID, pid_measure, pid_ref);
-            // [新增] 2. 注入坡道扭矩前馈 (Add Feedforward)
-            // 注意：一定要在PID计算之后，功率模型计算之前添加
-            // 这样功率控制模块才会知道“为了维持不下滑，我额外支出了这些力”，从而正确估算功率
+
+            // ============================================================
+            // 【新增步骤】应用 PID 动态分配 (Weight Distribution)
+            // ============================================================
+            // 上坡时：前轮 pid_ref 变小，后轮 pid_ref 变大
+            pid_ref *= pid_gain_scale[i];
+            // ============================================================
+
+            // 注入坡道力矩前馈 (Add Feedforward)
             pid_ref += slope_feedforward_current[i];
             initial_torque[i] = pid_ref;
             power_control_out[i] = pid_ref;
