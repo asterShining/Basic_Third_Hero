@@ -382,7 +382,7 @@ void ChassisTask()
         break;
     case CHASSIS_FOLLOW_GIMBAL_YAW:
 
-        chassis_cmd_recv.wz = -2.8f * chassis_cmd_recv.offset_angle * abs(chassis_cmd_recv.offset_angle) - 1.0 * gimbal_wz;
+        chassis_cmd_recv.wz = -3.1f * chassis_cmd_recv.offset_angle * abs(chassis_cmd_recv.offset_angle) - 1.0 * gimbal_wz;
 
         break;
     case CHASSIS_ROTATE: // 自旋,同时保持全向机动;当前wz维持定值,后续增加不规则的变速策略
