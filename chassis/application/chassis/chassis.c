@@ -20,6 +20,7 @@
 #include "message_center.h"
 #include "referee_task.h"
 #include "chassis_follow.h"
+#include "buzzer.h"
 
 #include "general_def.h"
 #include "bsp_dwt.h"
@@ -58,6 +59,10 @@ static ChassisFollowInstance *chassis_follow_ptr = NULL;
 static PIDInstance yaw_lock_pid; // 航向锁定专用PID
 static float lock_target_yaw = 0.0f; // 锁定的目标角度
 static uint8_t is_manual_rotating = 0; // 标记是否正在手动旋转
+
+// 底盘蜂鸣器初始化 [!code ++]
+static BuzzzerInstance *chassis_buzzer = NULL; // [!code ++]
+static uint8_t last_cali_flag = 0; // 上一次的校准标志位
 
 /* 用于自旋变速策略的时间变量 */
 // static float t;
@@ -127,6 +132,15 @@ void ChassisInit()
 
     // cap = SuperCapInit(&cap_conf); // 超级电容初始化
 
+    // 底盘蜂鸣器初始化 [!code ++]
+    Buzzer_config_s buzzer_config = {
+        .alarm_level = ALARM_LEVEL_ABOVE_MEDIUM,
+        .octave = OCTAVE_4, // 使用中音，区别于云台的高音
+        .loudness = 0.5f, // 音量
+    };
+    chassis_buzzer = BuzzerRegister(&buzzer_config); // [!code ++]
+
+    // 航向锁定PID初始化
     PID_Init_Config_s yaw_lock_conf = {
         .Kp = -29.0f, // 强力纠正
         .Ki = 12.0f, // 消除静差
@@ -138,6 +152,7 @@ void ChassisInit()
         .DeadBand = 0.5f,
     };
     PIDInit(&yaw_lock_pid, &yaw_lock_conf);
+
     // 底盘跟随云台
     ChassisFollow_Config_s follow_config = {
         .deadzone_angle = 0.4f, // 1.5度死区
@@ -167,7 +182,6 @@ void ChassisInit()
         // 错误处理，例如亮红灯或记录日志
         LOGERROR("Chassis Follow Init Failed!");
     }
-    Chassis_IMU_data = INS_Init();
 
     // 发布订阅初始化,如果为双板,则需要can comm来传递消息
 #ifdef CHASSIS_BOARD
@@ -386,6 +400,24 @@ static void ChassisHeadLock()
 
     // 最终将 PID 计算出的力矩/速度赋值给 wz
     chassis_cmd_recv.wz = pid_out;
+}
+
+void IMU_cali()
+{
+    if (chassis_buzzer != NULL) {
+        AlarmSetStatus(chassis_buzzer, ALARM_ON);
+    }
+
+    // 2. 执行底盘陀螺仪校准 (阻塞 1-2秒)
+    // 在此期间 CPU 会忙等待，导致其他任务暂停，所以蜂鸣器会一直响
+    INS_Calibrate();
+
+    // 3. 校准结束后关闭蜂鸣器
+    if (chassis_buzzer != NULL) {
+        AlarmSetStatus(chassis_buzzer, ALARM_OFF);
+    }
+
+    last_cali_flag = chassis_cmd_recv.calibrate_imu; // 更新状态
 }
 /* 机器人底盘控制核心任务 */
 void ChassisTask()

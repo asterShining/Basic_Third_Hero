@@ -62,6 +62,11 @@ BMI088Instance *bmi088_test; // 云台IMU
 BMI088_Data_t bmi088_data;
 // 定义一个静态变量来保存上一次的开关状态，初始化为下（急停/停止状态）
 static uint16_t last_switch_right = RC_SW_DOWN;
+
+// --- 新增的静态变量，用于长按计时 ---
+static uint32_t inner_eight_cnt = 0; // 内八计时器
+static uint32_t outer_eight_cnt = 0; // 外八计时器
+static uint8_t cali_triggered = 0; // 触发状态：0-无，1-内八触发，2-外八触发
 void RobotCMDInit()
 {
     // BMI088_Init_Config_s bmi088_config = {
@@ -242,36 +247,74 @@ static void RemoteControlSet()
     // --- 状态机逻辑 ---
 
     // [下] 急停模式
-    if (switch_is_down(current_switch_right)) {
-        EmergencyHandler();
-        if (switch_is_down(current_switch_left)) {
-            static uint8_t cali_triggered = 0;
-            bool is_inner_eight = (rc_data[TEMP].rc.rocker_l_ > RC_TRIGGER_TH) && // 左摇杆向右
-                                  (rc_data[TEMP].rc.rocker_l1 < -RC_TRIGGER_TH) && // 左摇杆向下
-                                  (rc_data[TEMP].rc.rocker_r_ < -RC_TRIGGER_TH) && // 右摇杆向左
-                                  (rc_data[TEMP].rc.rocker_r1 < -RC_TRIGGER_TH); // 右摇杆向下
+    if (switch_is_down(current_switch_left)) {
+        // --- 杆位判定 ---
+        // 内八：左摇杆(右下)，右摇杆(左下) -> ↘ ↙
+        bool is_inner_eight = (rc_data[TEMP].rc.rocker_l_ > RC_TRIGGER_TH) &&
+                              (rc_data[TEMP].rc.rocker_l1 < -RC_TRIGGER_TH) &&
+                              (rc_data[TEMP].rc.rocker_r_ < -RC_TRIGGER_TH) &&
+                              (rc_data[TEMP].rc.rocker_r1 < -RC_TRIGGER_TH);
 
-            if (is_inner_eight) {
-                if (cali_triggered == 0) {
-                    // 1. 调用校准
+        // 外八：左摇杆(左下)，右摇杆(右下) -> ↙ ↘
+        bool is_outer_eight = (rc_data[TEMP].rc.rocker_l_ < -RC_TRIGGER_TH) &&
+                              (rc_data[TEMP].rc.rocker_l1 < -RC_TRIGGER_TH) &&
+                              (rc_data[TEMP].rc.rocker_r_ > RC_TRIGGER_TH) &&
+                              (rc_data[TEMP].rc.rocker_r1 < -RC_TRIGGER_TH);
+
+        // --- 逻辑 1：内八 (2.5秒) -> 校准电机零点 ---
+        if (is_inner_eight) {
+            if (cali_triggered == 0) { // 只有在未触发状态下才计时
+                inner_eight_cnt++;
+                if (inner_eight_cnt >= 500) { // 200Hz * 2.5s = 500次
+                    // 1. 执行电机校准
                     GimbalCalibrateYaw();
 
-                    // 2. 【新增】开启蜂鸣器提示
+                    // 2. 蜂鸣器提示 (高音 Octave 6)
                     if (hint_buzzer != NULL) {
+                        hint_buzzer->octave = OCTAVE_6; // 设置为高音
                         AlarmSetStatus(hint_buzzer, ALARM_ON);
                     }
 
-                    cali_triggered = 1;
-                }
-            } else {
-                // 摇杆回中后，关闭蜂鸣器并重置触发位
-                if (cali_triggered == 1) {
-                    if (hint_buzzer != NULL) {
-                        AlarmSetStatus(hint_buzzer, ALARM_OFF);
-                    }
-                    cali_triggered = 0;
+                    cali_triggered = 1; // 标记为内八已触发，防止重复执行
                 }
             }
+        } else {
+            inner_eight_cnt = 0; // 只要摇杆没有保持住，计时器立马清零
+        }
+
+        // --- 逻辑 2：外八 (2.5秒) -> 校准陀螺仪 ---
+        if (is_outer_eight) {
+            if (cali_triggered == 0) {
+                outer_eight_cnt++;
+                if (outer_eight_cnt >= 500) { // 200Hz * 2.5s = 500次
+                    if (hint_buzzer != NULL) {
+                        hint_buzzer->octave = OCTAVE_4; // 设置为中音
+                        AlarmSetStatus(hint_buzzer, ALARM_ON);
+                    }
+
+                    // 1. 执行陀螺仪校准 (调用 INS_Init 重新初始化姿态)
+                    chassis_cmd_send.calibrate_imu = 1;
+                    INS_Calibrate();
+
+                    if (hint_buzzer != NULL) {
+                        AlarmSetStatus(hint_buzzer, ALARM_OFF);
+                        // 【关键】手动刷新一次任务，确保蜂鸣器立即停止
+                    }
+
+                    cali_triggered = 2; // 标记为外八已触发
+                }
+            }
+        } else {
+            outer_eight_cnt = 0; // 摇杆松开清零
+        }
+
+        // --- 逻辑 3：复位 ---
+        // 当摇杆都回中(或不满足条件) 且 之前处于触发状态时，关闭蜂鸣器
+        if (!is_inner_eight && !is_outer_eight && cali_triggered != 0) {
+            if (hint_buzzer != NULL) {
+                AlarmSetStatus(hint_buzzer, ALARM_OFF);
+            }
+            cali_triggered = 0; // 重置触发标志，允许下一次触发
         }
         gimbal_cmd_send.yaw = gimbal_fetch_data.gimbal_imu_data.YawTotalAngle;
         gimbal_cmd_send.pitch = gimbal_fetch_data.gimbal_imu_data.Pitch;

@@ -140,4 +140,6 @@ void BodyFrameToEarthFrame(const float *vecBF, float *vecEF, float *q);
  */
 void EarthFrameToBodyFrame(const float *vecEF, float *vecBF, float *q);
 
+void INS_Calibrate(void);
+
 #endif
