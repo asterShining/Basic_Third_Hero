@@ -9,12 +9,12 @@
 #include "bmi088.h"
 #include "gimbal_pitch_cali.h"
 
-// gimbal.c 顶部宏定义区域
-// 更新为拟合结果
+// 顶部宏定义区域
 #define PITCH_GRAVITY_COEFFICIENT_K1 -15.2383f
 #define PITCH_GRAVITY_COEFFICIENT_K2 -0.2070f
 // 新增 Offset 宏 (注意保留负号)
 #define PITCH_GRAVITY_OFFSET -16.1574f
+
 static attitude_t *gimba_IMU_data; // 云台IMU数据
 static DMMotorInstance *yaw_motor, *pitch_motor;
 
@@ -25,11 +25,14 @@ static Gimbal_Ctrl_Cmd_s gimbal_cmd_recv; // 来自cmd的控制信息
 static GimbalCali_Handler_t pitch_cali_handler; // 定义标定句柄
 
 static BMI088Instance *bmi088; // 云台IMU
-void GimbalCalibrateYaw()
+void GimbalCalibrate()
 {
     if (yaw_motor != NULL) {
         DMMotorCaliEncoder(yaw_motor);
     }
+    // if (pitch_motor != NULL) {
+    //     DMMotorCaliEncoder(pitch_motor);
+    // }
 }
 void GimbalInit()
 {
@@ -90,21 +93,22 @@ void GimbalInit()
                 .Kp = 0.0,
                 .Ki = 0.0,
                 .Kd = 0.0,
-                .DeadBand = 0.1,
+                .DeadBand = 0.0,
                 .Improve = PID_Trapezoid_Intergral | PID_Integral_Limit | PID_Derivative_On_Measurement,
                 .IntegralLimit = 100,
                 .MaxOut = 5,
             },
             .speed_PID = {
-                .Kp = 0.0,
-                .Ki = 0.0,
+                // 此处为速度环参数，均为负数
+                .Kp = -7.34,
+                .Ki = -0.23,
                 .Kd = 0, // 0
                 .Improve = PID_Trapezoid_Intergral | PID_Integral_Limit | PID_Derivative_On_Measurement,
                 .IntegralLimit = 5,
-                .MaxOut = 7,
+                .MaxOut = 15,
             },
-            .other_angle_feedback_ptr = &gimba_IMU_data->Pitch,
-            .other_speed_feedback_ptr = (&gimba_IMU_data->Gyro[0]),
+            .other_angle_feedback_ptr = &gimba_IMU_data->Roll,
+            .other_speed_feedback_ptr = (&gimba_IMU_data->Gyro[1]),
         },
         .controller_setting_init_config = {
             .angle_feedback_source = OTHER_FEED,
@@ -113,6 +117,7 @@ void GimbalInit()
             .close_loop_type = SPEED_LOOP | ANGLE_LOOP,
             .motor_reverse_flag = MOTOR_DIRECTION_REVERSE,
         },
+
         .motor_type = J4310,
     };
     // 电机对total_angle闭环,上电时为零,会保持静止,收到遥控器数据再动
@@ -130,7 +135,7 @@ void GimbalInit()
         /* optional logging */
     }
 
-    GimbalCali_Init(&pitch_cali_handler);
+    // GimbalCali_Init(&pitch_cali_handler);
 }
 
 /* 机器人云台控制核心任务,后续考虑只保留IMU控制,不再需要电机的反馈 */
@@ -145,25 +150,24 @@ void GimbalTask()
     }
     // [新增] 静态变量: 用于存储前馈值 (必须是static，因为指针会被传递给电机驱动)
     static float pitch_ff_storage = 0.0f;
-    if (gimbal_cmd_recv.gimbal_mode == GIMBAL_CALI_MODE) {
-        // 如果当前是空闲状态，则开始标定
-        if (pitch_cali_handler.state == CALI_STATE_IDLE) {
-            GimbalCali_Start(&pitch_cali_handler);
-        }
-    }
-
-    // 获取当前Roll角度 (根据你的描述，Pitch轴对应IMU的Roll)
-    float current_imu_roll = (gimba_IMU_data ? gimba_IMU_data->Roll : 0.0f);
-
-    // 调用更新函数，如果正在标定(返回1)，则跳过后面的正常控制逻辑
-    if (GimbalCali_Update(&pitch_cali_handler, pitch_motor, current_imu_roll)) {
-        // 正在标定中...
-        // 此时不要执行下面的 switch(gimbal_mode) 逻辑，防止冲突
-        // 也不要推送反馈消息，或者仅推送标定状态
-        osDelay(2);
-        return;
-    }
-
+    // 调用标定更新函数
+    /******************
+    // if (gimbal_cmd_recv.gimbal_mode == GIMBAL_CALI_MODE) {
+    //     // 如果当前是空闲状态，则开始标定
+    //     if (pitch_cali_handler.state == CALI_STATE_IDLE) {
+    //         GimbalCali_Start(&pitch_cali_handler);
+    //     }
+    // }
+    // float current_imu_roll = (gimba_IMU_data ? gimba_IMU_data->Roll : 0.0f);
+    // // 调用更新函数，如果正在标定(返回1)，则跳过后面的正常控制逻辑
+    // if (GimbalCali_Update(&pitch_cali_handler, pitch_motor, current_imu_roll)) {
+    //     // 正在标定中...
+    //     // 此时不要执行下面的 switch(gimbal_mode) 逻辑，防止冲突
+    //     // 也不要推送反馈消息，或者仅推送标定状态
+    //     osDelay(2);
+    //     return;
+    // }
+          */
     // @todo:现在已不再需要电机反馈,实际上可以始终使用IMU的姿态数据来作为云台的反馈,yaw电机的offset只是用来跟随底盘
     // 根据控制模式进行电机反馈切换和过渡,视觉模式在robot_cmd模块就已经设置好,gimbal只看yaw_ref和pitch_ref
     switch (gimbal_cmd_recv.gimbal_mode) {
@@ -204,7 +208,6 @@ void GimbalTask()
 
     // 在合适的地方添加pitch重力补偿前馈力矩
     // 根据IMU姿态/pitch电机角度反馈计算出当前配重下的重力矩
-    // ...
     if (gimbal_cmd_recv.gimbal_mode != GIMBAL_ZERO_FORCE) {
         float k1_val, k2_val;
 
@@ -216,12 +219,7 @@ void GimbalTask()
         float pitch_rad = (gimba_IMU_data ? gimba_IMU_data->Roll : 0.0f) * DEGREE_2_RAD;
 
         // C. 计算补偿力矩
-        // 公式: T_motor = -T_gravity = -(K1*cos + K2*sin)
-        // 物理含义:
-        //  K1*cos: 抵消主重力矩 (重心在水平轴上的分量)
-        //  K2*sin: 抵消重心偏移带来的非正弦畸变
-        // 公式变形以匹配拟合模型: T = -k1*cos + k2*sin + offset
-        // 注意：原代码是 -(k1*cos - k2*sin) = -k1*cos + k2*sin，正好匹配前两项
+        // 匹配拟合模型: T = -k1*cos + k2*sin + offset
         float gravity_ff = -(k1_val * arm_cos_f32(pitch_rad) - k2_val * arm_sin_f32(pitch_rad)) + PITCH_GRAVITY_OFFSET;
 
         // D. 应用前馈
