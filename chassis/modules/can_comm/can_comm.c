@@ -94,6 +94,10 @@ static void CANCommLostCallback(void *cancomm)
 CANCommInstance *CANCommInit(CANComm_Init_Config_s *comm_config)
 {
     CANCommInstance *ins = (CANCommInstance *)malloc(sizeof(CANCommInstance));
+    if (ins == NULL) {
+        LOGERROR("[can_comm] malloc failed in CANCommInit()");
+        return NULL; // 严重错误，调用方需检查返回值
+    }
     memset(ins, 0, sizeof(CANCommInstance));
 
     ins->recv_data_len = comm_config->recv_data_len;

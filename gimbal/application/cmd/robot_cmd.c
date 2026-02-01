@@ -13,6 +13,7 @@
 #include "bmi088.h"
 #include "buzzer.h"
 #include "remote_control.h"
+
 // bsp
 #include "bsp_dwt.h"
 #include "bsp_log.h"
@@ -56,7 +57,7 @@ static Shoot_Upload_Data_s shoot_fetch_data; // 从发射获取的反馈信息
 static Robot_Status_e robot_state; // 机器人整体工作状态
 static BuzzzerInstance *hint_buzzer;
 
-#define RC_DEADZONE 10.0f // 遥控器摇杆死区阈值
+#define RC_DEADZONE 5.0f // 遥控器摇杆死区阈值
 
 BMI088Instance *bmi088_test; // 云台IMU
 BMI088_Data_t bmi088_data;
@@ -244,30 +245,26 @@ static void RemoteControlSet()
     uint16_t current_switch_right = rc_data[TEMP].rc.switch_right;
     uint16_t current_switch_left = rc_data[TEMP].rc.switch_left;
 
+    float current_real_pitch = gimbal_fetch_data.gimbal_imu_data.Roll; // 实际pitch角度反馈值
+
     // --- 状态机逻辑 ---
 
     // [下] 急停模式
-    if (switch_is_down(current_switch_left)) {
-        // --- 杆位判定 ---
-        // 内八：左摇杆(右下)，右摇杆(左下) -> ↘ ↙
-        bool is_inner_eight = (rc_data[TEMP].rc.rocker_l_ > RC_TRIGGER_TH) &&
-                              (rc_data[TEMP].rc.rocker_l1 < -RC_TRIGGER_TH) &&
-                              (rc_data[TEMP].rc.rocker_r_ < -RC_TRIGGER_TH) &&
-                              (rc_data[TEMP].rc.rocker_r1 < -RC_TRIGGER_TH);
+    if (switch_is_down(current_switch_right)) {
+        EmergencyHandler();
+        gimbal_cmd_send.yaw = gimbal_fetch_data.gimbal_imu_data.YawTotalAngle;
+        gimbal_cmd_send.pitch = 0.0f; // 这个之后看看，或者不要突然变为0
+        if (switch_is_down(current_switch_left)) {
+            static uint8_t cali_triggered = 0;
+            bool is_inner_eight = (rc_data[TEMP].rc.rocker_l_ > RC_TRIGGER_TH) && // 左摇杆向右
+                                  (rc_data[TEMP].rc.rocker_l1 < -RC_TRIGGER_TH) && // 左摇杆向下
+                                  (rc_data[TEMP].rc.rocker_r_ < -RC_TRIGGER_TH) && // 右摇杆向左
+                                  (rc_data[TEMP].rc.rocker_r1 < -RC_TRIGGER_TH); // 右摇杆向下
 
-        // 外八：左摇杆(左下)，右摇杆(右下) -> ↙ ↘
-        bool is_outer_eight = (rc_data[TEMP].rc.rocker_l_ < -RC_TRIGGER_TH) &&
-                              (rc_data[TEMP].rc.rocker_l1 < -RC_TRIGGER_TH) &&
-                              (rc_data[TEMP].rc.rocker_r_ > RC_TRIGGER_TH) &&
-                              (rc_data[TEMP].rc.rocker_r1 < -RC_TRIGGER_TH);
-
-        // --- 逻辑 1：内八 (2.5秒) -> 校准电机零点 ---
-        if (is_inner_eight) {
-            if (cali_triggered == 0) { // 只有在未触发状态下才计时
-                inner_eight_cnt++;
-                if (inner_eight_cnt >= 500) { // 200Hz * 2.5s = 500次
-                    // 1. 执行电机校准
-                    GimbalCalibrateYaw();
+            if (is_inner_eight) {
+                if (cali_triggered == 0) {
+                    // 1. 调用校准
+                    GimbalCalibrate();
 
                     // 2. 蜂鸣器提示 (高音 Octave 6)
                     if (hint_buzzer != NULL) {
@@ -282,56 +279,23 @@ static void RemoteControlSet()
             inner_eight_cnt = 0; // 只要摇杆没有保持住，计时器立马清零
         }
 
-        // --- 逻辑 2：外八 (2.5秒) -> 校准陀螺仪 ---
-        if (is_outer_eight) {
-            if (cali_triggered == 0) {
-                outer_eight_cnt++;
-                if (outer_eight_cnt >= 500) { // 200Hz * 2.5s = 500次
-                    if (hint_buzzer != NULL) {
-                        hint_buzzer->octave = OCTAVE_4; // 设置为中音
-                        AlarmSetStatus(hint_buzzer, ALARM_ON);
-                    }
-
-                    // 1. 执行陀螺仪校准 (调用 INS_Init 重新初始化姿态)
-                    chassis_cmd_send.calibrate_imu = 1;
-                    INS_Calibrate();
-
-                    if (hint_buzzer != NULL) {
-                        AlarmSetStatus(hint_buzzer, ALARM_OFF);
-                        // 【关键】手动刷新一次任务，确保蜂鸣器立即停止
-                    }
-
-                    cali_triggered = 2; // 标记为外八已触发
-                }
-            }
-        } else {
-            outer_eight_cnt = 0; // 摇杆松开清零
-        }
-
-        // --- 逻辑 3：复位 ---
-        // 当摇杆都回中(或不满足条件) 且 之前处于触发状态时，关闭蜂鸣器
-        if (!is_inner_eight && !is_outer_eight && cali_triggered != 0) {
-            if (hint_buzzer != NULL) {
-                AlarmSetStatus(hint_buzzer, ALARM_OFF);
-            }
-            cali_triggered = 0; // 重置触发标志，允许下一次触发
-        }
-        gimbal_cmd_send.yaw = gimbal_fetch_data.gimbal_imu_data.YawTotalAngle;
-        gimbal_cmd_send.pitch = gimbal_fetch_data.gimbal_imu_data.Pitch;
     }
     // [上] 底盘无力，云台能够转动
     else if (switch_is_up(current_switch_right)) {
-        // 如果是从[下]或其他模式刚刚切换到[中]
+        // --- 子模式：自动标定 (左拨杆为上) ---
+
+        // 无扰切换判断
         if (!switch_is_up(last_switch_right)) {
-            // 无扰切换：将目标角度重置为当前实际角度
-            gimbal_cmd_send.yaw = gimbal_fetch_data.gimbal_imu_data.YawTotalAngle;
-            gimbal_cmd_send.pitch = gimbal_fetch_data.gimbal_imu_data.Pitch;
+            if (!switch_is_up(last_switch_right)) {
+                gimbal_cmd_send.yaw = gimbal_fetch_data.gimbal_imu_data.YawTotalAngle;
+            }
         }
 
         robot_state = ROBOT_READY;
         chassis_cmd_send.chassis_mode = CHASSIS_NO_FOLLOW;
         gimbal_cmd_send.gimbal_mode = GIMBAL_FREE_MODE;
         shoot_cmd_send.shoot_mode = SHOOT_ON;
+
     }
     // [中] 底盘跟随云台模式
     else if (switch_is_mid(current_switch_right)) {
@@ -341,7 +305,6 @@ static void RemoteControlSet()
             // 将云台控制的"目标值"强行设定为当前的"反馈值"
             // 这样PID的误差(Error)在这一瞬间为0，避免云台疯转
             gimbal_cmd_send.yaw = gimbal_fetch_data.gimbal_imu_data.YawTotalAngle;
-            gimbal_cmd_send.pitch = gimbal_fetch_data.gimbal_imu_data.Pitch;
         }
 
         robot_state = ROBOT_READY;
@@ -373,14 +336,23 @@ static void RemoteControlSet()
     if (!switch_is_down(current_switch_right)) {
         // 使用处理后的 rocker_lx 和 rocker_ly
         gimbal_cmd_send.yaw -= 0.001f * rocker_lx;
-        gimbal_cmd_send.pitch += 0.0001f * rocker_ly;
+        gimbal_cmd_send.pitch += 0.0003f * rocker_ly;
+
+        // ==================== [新增] 软件限幅逻辑 ====================
+
+        // 1. Pitch 轴限幅 (最重要，防止撞击)
+        if (gimbal_cmd_send.pitch > PITCH_MAX_ANGLE) {
+            gimbal_cmd_send.pitch = PITCH_MAX_ANGLE;
+        } else if (gimbal_cmd_send.pitch < PITCH_MIN_ANGLE) {
+            gimbal_cmd_send.pitch = PITCH_MIN_ANGLE;
+        }
     }
 
     // 底盘参数
     // 右手系 x正向前进 y正向右移
     // 使用处理后的 rocker_rx 和 rocker_ry
-    chassis_cmd_send.vy = 10.0f * rocker_rx; // _水平方向
-    chassis_cmd_send.vx = 10.0f * rocker_ry; // 1数值方向
+    chassis_cmd_send.vx = 10.0f * rocker_ry; // 竖直方向,发送给vx
+    chassis_cmd_send.vy = 10.0f * rocker_rx; // 水平方向
 
     // 发射参数
     if (switch_is_up(rc_data[TEMP].rc.switch_right)) // 右侧开关状态[上],弹舱打开
