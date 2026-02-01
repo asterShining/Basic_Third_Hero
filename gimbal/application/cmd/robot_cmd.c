@@ -310,6 +310,26 @@ static void RemoteControlSet()
         shoot_cmd_send.shoot_mode = SHOOT_ON;
     }
 
+    if (switch_is_up(current_switch_left)) {
+        // 1. 设置模式
+        gimbal_cmd_send.gimbal_mode = GIMBAL_CALI_MODE;
+
+        // 2. 开启蜂鸣器 [新增]
+        if (hint_buzzer != NULL) {
+            AlarmSetStatus(hint_buzzer, ALARM_ON);
+        }
+    } else {
+        // 3. 关闭蜂鸣器 [新增]
+        // 注意：加一个判断 !switch_is_down(current_switch_right)
+        // 只有在【非急停模式】下，才由这里关闭蜂鸣器。
+        // 如果右拨杆在下（急停），蜂鸣器由急停模式内部的“内八字”逻辑接管，这里不能强行关掉。
+        if (!switch_is_down(current_switch_right)) {
+            if (hint_buzzer != NULL) {
+                AlarmSetStatus(hint_buzzer, ALARM_OFF);
+            }
+        }
+    }
+
     // --- 1. 提取原始数据并转为浮点数 ---
     float rocker_lx = (float)rc_data[TEMP].rc.rocker_l_; // 左摇杆 X (云台Yaw)
     float rocker_ly = (float)rc_data[TEMP].rc.rocker_l1; // 左摇杆 Y (云台Pitch)

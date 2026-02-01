@@ -47,7 +47,6 @@ target_link_directories(${CMAKE_PROJECT_NAME} PRIVATE
 
 file(GLOB_RECURSE SOURCES
     "application/*.c"
-    "application/chassis/*.c"
     "application/shoot/*.c"
     "application/gimbal/*.c"
     "application/cmd/*.c"
@@ -106,7 +105,6 @@ target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
     # application subdirectories
     application
     application/gimbal
-    application/chassis
     application/cmd
     application/shoot
 
