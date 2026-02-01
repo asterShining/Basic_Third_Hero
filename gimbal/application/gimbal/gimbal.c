@@ -15,6 +15,9 @@
 // 新增 Offset 宏 (注意保留负号)
 #define PITCH_GRAVITY_OFFSET -16.1574f
 
+#define PITCH_MECH_LIMIT_MAX 0.08f // 上极限
+#define PITCH_MECH_LIMIT_MIN -0.967f // 下极限
+
 static attitude_t *gimba_IMU_data; // 云台IMU数据
 static DMMotorInstance *yaw_motor, *pitch_motor;
 
@@ -90,7 +93,7 @@ void GimbalInit()
         },
         .controller_param_init_config = {
             .angle_PID = {
-                .Kp = 0.0,
+                .Kp = 0.68,
                 .Ki = 0.0,
                 .Kd = 0.0,
                 .DeadBand = 0.0,
@@ -100,7 +103,7 @@ void GimbalInit()
             },
             .speed_PID = {
                 // 此处为速度环参数，均为负数
-                .Kp = -7.34,
+                .Kp = -6.34,
                 .Ki = -0.23,
                 .Kd = 0, // 0
                 .Improve = PID_Trapezoid_Intergral | PID_Integral_Limit | PID_Derivative_On_Measurement,
@@ -115,14 +118,18 @@ void GimbalInit()
             .speed_feedback_source = OTHER_FEED,
             .outer_loop_type = ANGLE_LOOP,
             .close_loop_type = SPEED_LOOP | ANGLE_LOOP,
-            .motor_reverse_flag = MOTOR_DIRECTION_REVERSE,
+            .motor_reverse_flag = MOTOR_DIRECTION_NORMAL,
         },
 
         .motor_type = J4310,
     };
     // 电机对total_angle闭环,上电时为零,会保持静止,收到遥控器数据再动
-    // yaw_motor = DMMotorInit(&yaw_config);
+    yaw_motor = DMMotorInit(&yaw_config);
     pitch_motor = DMMotorInit(&pitch_config);
+    if (pitch_motor) {
+        pitch_motor->pos_limit_max = PITCH_MECH_LIMIT_MAX;
+        pitch_motor->pos_limit_min = PITCH_MECH_LIMIT_MIN;
+    }
 
     gimbal_pub = PubRegister("gimbal_feed", sizeof(Gimbal_Upload_Data_s));
     gimbal_sub = SubRegister("gimbal_cmd", sizeof(Gimbal_Ctrl_Cmd_s));

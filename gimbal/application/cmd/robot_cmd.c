@@ -240,11 +240,15 @@ static void RemoteControlSet()
     uint16_t current_switch_right = rc_data[TEMP].rc.switch_right;
     uint16_t current_switch_left = rc_data[TEMP].rc.switch_left;
 
+    float current_real_pitch = gimbal_fetch_data.gimbal_imu_data.Roll; // 实际pitch角度反馈值
+
     // --- 状态机逻辑 ---
 
     // [下] 急停模式
     if (switch_is_down(current_switch_right)) {
         EmergencyHandler();
+        gimbal_cmd_send.yaw = gimbal_fetch_data.gimbal_imu_data.YawTotalAngle;
+        gimbal_cmd_send.pitch = 0.0f;
         if (switch_is_down(current_switch_left)) {
             static uint8_t cali_triggered = 0;
             bool is_inner_eight = (rc_data[TEMP].rc.rocker_l_ > RC_TRIGGER_TH) && // 左摇杆向右
@@ -274,8 +278,6 @@ static void RemoteControlSet()
                 }
             }
         }
-        gimbal_cmd_send.yaw = gimbal_fetch_data.gimbal_imu_data.YawTotalAngle;
-        gimbal_cmd_send.pitch = gimbal_fetch_data.gimbal_imu_data.Pitch;
     }
     // [上] 底盘无力，云台能够转动
     else if (switch_is_up(current_switch_right)) {
@@ -283,8 +285,9 @@ static void RemoteControlSet()
 
         // 无扰切换判断
         if (!switch_is_up(last_switch_right)) {
-            gimbal_cmd_send.yaw = gimbal_fetch_data.gimbal_imu_data.YawTotalAngle;
-            gimbal_cmd_send.pitch = gimbal_fetch_data.gimbal_imu_data.Pitch;
+            if (!switch_is_up(last_switch_right)) {
+                gimbal_cmd_send.yaw = gimbal_fetch_data.gimbal_imu_data.YawTotalAngle;
+            }
         }
 
         robot_state = ROBOT_READY;
@@ -301,7 +304,6 @@ static void RemoteControlSet()
             // 将云台控制的"目标值"强行设定为当前的"反馈值"
             // 这样PID的误差(Error)在这一瞬间为0，避免云台疯转
             gimbal_cmd_send.yaw = gimbal_fetch_data.gimbal_imu_data.YawTotalAngle;
-            gimbal_cmd_send.pitch = gimbal_fetch_data.gimbal_imu_data.Pitch;
         }
 
         robot_state = ROBOT_READY;
@@ -333,7 +335,7 @@ static void RemoteControlSet()
     if (!switch_is_down(current_switch_right)) {
         // 使用处理后的 rocker_lx 和 rocker_ly
         gimbal_cmd_send.yaw -= 0.001f * rocker_lx;
-        gimbal_cmd_send.pitch += 0.00003f * rocker_ly;
+        gimbal_cmd_send.pitch += 0.0003f * rocker_ly;
 
         // ==================== [新增] 软件限幅逻辑 ====================
 

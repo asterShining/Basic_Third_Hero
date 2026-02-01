@@ -255,6 +255,25 @@ void DMMotorTask(void const *argument)
         // *对比 DJI 代码*：DJI 在循环开始处 `if (reverse) pid_ref *= -1;`，之后全程传递。
         // 所以这里不需要再次反转 set_torque，除非你想实现特殊的逻辑。
         // 保持与 DJI 一致，上面入口处已处理。
+        // ================= [新增] 机械限位保护 (Hard Limit) =================
+        // 只有当限位值不为0时才启用保护 (防止影响其他没设置限位的电机)
+        if (motor->pos_limit_max != 0.0f || motor->pos_limit_min != 0.0f) {
+            float curr_pos = motor->measure.position;
+
+            // 情况1: 超过上极限，且力矩是向上的(正) -> 掐断力矩 (允许输出负力矩拉回来)
+            // 注意：这里假设 正力矩 = 向正位置运动。如果你的电机反了，这里逻辑要反。
+            // DM电机通常符合右手定则：Torque > 0 -> Position 增加
+            if (curr_pos > motor->pos_limit_max && set_torque > 0.0f) {
+                set_torque = 0.0f;
+                // 可选: 给一个微小的反向阻尼 let it dampen? 不，0最安全，让重力拉回来
+            }
+
+            // 情况2: 低于下极限，且力矩是向下的(负) -> 掐断力矩
+            if (curr_pos < motor->pos_limit_min && set_torque < 0.0f) {
+                set_torque = 0.0f;
+            }
+        }
+        // ====================================
 
         // 限制力矩范围 (安全保护)
         LIMIT_MIN_MAX(set_torque, DM_T_MIN, DM_T_MAX);
