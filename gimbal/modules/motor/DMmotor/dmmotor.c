@@ -301,7 +301,7 @@ void DMMotorTask(void const *argument)
         motor->motor_can_instace->tx_buff[6] = (uint8_t)(((motor_send_mailbox.Kd & 0xF) << 4) | (motor_send_mailbox.torque_des >> 8));
         motor->motor_can_instace->tx_buff[7] = (uint8_t)(motor_send_mailbox.torque_des);
 
-        CANTransmit(motor->motor_can_instace, 2);
+        CANTransmit(motor->motor_can_instace, 1);
 
         osDelay(2); // 500Hz 控制频率
     }

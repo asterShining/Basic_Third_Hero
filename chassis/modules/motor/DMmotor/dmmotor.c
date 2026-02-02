@@ -7,6 +7,7 @@
 #include "daemon.h"
 #include "stdlib.h"
 #include "bsp_log.h"
+#include <math.h>
 
 static uint8_t idx;
 static DMMotorInstance *dm_motor_instance[DM_MOTOR_CNT];
@@ -31,23 +32,51 @@ static void DMMotorSetMode(DMMotor_Mode_e cmd, DMMotorInstance *motor)
     motor->motor_can_instace->tx_buff[7] = (uint8_t)cmd; // 最后一位是命令id
     CANTransmit(motor->motor_can_instace, 1);
 }
+void DMMotorChangeFeed(DMMotorInstance *motor, Closeloop_Type_e loop, Feedback_Source_e type)
+{
+    if (loop == ANGLE_LOOP)
+        motor->motor_settings.angle_feedback_source = type;
+    else if (loop == SPEED_LOOP)
+        motor->motor_settings.speed_feedback_source = type;
+    // DM电机通常不需要像DJI那样检查指针越界，因为结构体是一样的
+}
 
 static void DMMotorDecode(CANInstance *motor_can)
 {
-    uint16_t tmp; // 用于暂存解析值,稍后转换成float数据,避免多次创建临时变量
+    uint16_t tmp;
     uint8_t *rxbuff = motor_can->rx_buff;
     DMMotorInstance *motor = (DMMotorInstance *)motor_can->id;
-    DM_Motor_Measure_s *measure = &(motor->measure); // 将can实例中保存的id转换成电机实例的指针
+    DM_Motor_Measure_s *measure = &(motor->measure);
 
     DaemonReload(motor->motor_daemon);
 
+    // ================= [新增] 解析 Byte 0: ID 和 ERR =================
+    // 格式: MST_ID ID | ERR<<4 (即高4位为ERR，低4位为ID)
+    uint8_t raw_err = (rxbuff[0] >> 4) & 0x0F;
+    uint8_t feedback_id = rxbuff[0] & 0x0F;
+
+    measure->id = feedback_id; // 更新反馈ID
+    measure->err_code = (DM_Motor_Error_e)raw_err;
+
+    // // [可选] 如果发现错误，打印日志 (依赖 bsp_log.h)
+    // if (measure->err_code != DM_ERR_NONE) {
+    //     LOGWARNING("[dm_motor] Error Detected! ID:%d, Code:0x%X", feedback_id, raw_err);
+    // }
+    // ===============================================================
+
     measure->last_position = measure->position;
+
+    // 原有逻辑: Byte 1-2 位置
     tmp = (uint16_t)((rxbuff[1] << 8) | rxbuff[2]);
     measure->position = uint_to_float(tmp, DM_P_MIN, DM_P_MAX, 16);
 
-    tmp = (uint16_t)((rxbuff[3] << 4) | rxbuff[4] >> 4);
+    // 原有逻辑: Byte 3-4 速度 (VEL[11:4] | VEL[3:0])
+    // 现有代码逻辑是正确的: (Byte3 << 4) | (Byte4 >> 4)
+    tmp = (uint16_t)((rxbuff[3] << 4) | (rxbuff[4] >> 4));
     measure->velocity = uint_to_float(tmp, DM_V_MIN, DM_V_MAX, 12);
 
+    // 原有逻辑: Byte 4-5 扭矩 (T[11:8] | T[7:0])
+    // 现有代码逻辑是正确的: ((Byte4 & 0x0F) << 8) | Byte5
     tmp = (uint16_t)(((rxbuff[4] & 0x0f) << 8) | rxbuff[5]);
     measure->torque = uint_to_float(tmp, DM_T_MIN, DM_T_MAX, 12);
 
@@ -75,6 +104,9 @@ static void DMMotorDecode(CANInstance *motor_can)
 
 static void DMMotorLostCallback(void *motor_ptr)
 {
+    DMMotorInstance *motor = (DMMotorInstance *)motor_ptr;
+    uint16_t can_bus = motor->motor_can_instace->can_handle == &hcan1 ? 1 : 2;
+    LOGWARNING("[dm_motor] Motor lost, can bus [%d] , id [%d]", can_bus, motor->motor_can_instace->tx_id);
 }
 void DMMotorCaliEncoder(DMMotorInstance *motor)
 {
@@ -111,7 +143,7 @@ DMMotorInstance *DMMotorInit(Motor_Init_Config_s *config)
     DMMotorEnable(motor);
     DMMotorSetMode(DM_CMD_MOTOR_MODE, motor);
     DWT_Delay(0.1);
-    DMMotorCaliEncoder(motor);
+    // DMMotorCaliEncoder(motor);
     DWT_Delay(0.1);
     dm_motor_instance[idx++] = motor;
     return motor;
@@ -223,6 +255,25 @@ void DMMotorTask(void const *argument)
         // *对比 DJI 代码*：DJI 在循环开始处 `if (reverse) pid_ref *= -1;`，之后全程传递。
         // 所以这里不需要再次反转 set_torque，除非你想实现特殊的逻辑。
         // 保持与 DJI 一致，上面入口处已处理。
+        // ================= [新增] 机械限位保护 (Hard Limit) =================
+        // 只有当限位值不为0时才启用保护 (防止影响其他没设置限位的电机)
+        if (motor->pos_limit_max != 0.0f || motor->pos_limit_min != 0.0f) {
+            float curr_pos = motor->measure.position;
+
+            // 情况1: 超过上极限，且力矩是向上的(正) -> 掐断力矩 (允许输出负力矩拉回来)
+            // 注意：这里假设 正力矩 = 向正位置运动。如果你的电机反了，这里逻辑要反。
+            // DM电机通常符合右手定则：Torque > 0 -> Position 增加
+            if (curr_pos > motor->pos_limit_max && set_torque > 0.0f) {
+                set_torque = 0.0f;
+                // 可选: 给一个微小的反向阻尼 let it dampen? 不，0最安全，让重力拉回来
+            }
+
+            // 情况2: 低于下极限，且力矩是向下的(负) -> 掐断力矩
+            if (curr_pos < motor->pos_limit_min && set_torque < 0.0f) {
+                set_torque = 0.0f;
+            }
+        }
+        // ====================================
 
         // 限制力矩范围 (安全保护)
         LIMIT_MIN_MAX(set_torque, DM_T_MIN, DM_T_MAX);
@@ -250,7 +301,7 @@ void DMMotorTask(void const *argument)
         motor->motor_can_instace->tx_buff[6] = (uint8_t)(((motor_send_mailbox.Kd & 0xF) << 4) | (motor_send_mailbox.torque_des >> 8));
         motor->motor_can_instace->tx_buff[7] = (uint8_t)(motor_send_mailbox.torque_des);
 
-        CANTransmit(motor->motor_can_instace, 1);
+        CANTransmit(motor->motor_can_instace, 2);
 
         osDelay(2); // 500Hz 控制频率
     }

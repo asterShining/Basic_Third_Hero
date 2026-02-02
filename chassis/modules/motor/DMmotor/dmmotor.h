@@ -15,10 +15,18 @@
 #define DM_T_MIN (-18.0f)
 #define DM_T_MAX 18.0f
 
+typedef enum {
+    DM_ERR_NONE = 0x0,
+    DM_ERR_OVER_VOLTAGE = 0x8, // 超压
+    DM_ERR_UNDER_VOLTAGE = 0x9, // 欠压
+    DM_ERR_OVER_CURRENT = 0xA, // 过流
+    DM_ERR_MOS_OVERHEAT = 0xB // MOS过温
+} DM_Motor_Error_e;
 typedef struct
 {
     uint8_t id;
     uint8_t state;
+    DM_Motor_Error_e err_code; // [新增] 存储解析出的错误码
     float velocity;
     float last_position;
     float position;
@@ -28,6 +36,7 @@ typedef struct
     int32_t total_round;
     float total_angle;
 } DM_Motor_Measure_s;
+
 
 typedef struct
 {
@@ -49,6 +58,8 @@ typedef struct
     float *speed_feedforward_ptr;
     float *current_feedforward_ptr;
     float pid_ref;
+    float pos_limit_min; // 最小机械角度 (如 -0.6)
+    float pos_limit_max; // 最大机械角度 (如 0.75)
     Motor_Working_Type_e stop_flag;
     CANInstance *motor_can_instace;
     DaemonInstance *motor_daemon;
@@ -73,4 +84,5 @@ void DMMotorEnable(DMMotorInstance *motor);
 void DMMotorStop(DMMotorInstance *motor);
 void DMMotorCaliEncoder(DMMotorInstance *motor);
 void DMMotorControlInit();
+void DMMotorChangeFeed(DMMotorInstance *motor, Closeloop_Type_e loop, Feedback_Source_e type);
 #endif // !DMMOTOR

@@ -1,4 +1,5 @@
 #include "shoot.h"
+#include "motor_def.h"
 #include "robot_def.h"
 
 #include "dji_motor.h"
@@ -29,8 +30,8 @@ void ShootInit()
         },
         .controller_param_init_config = {
             .speed_PID = {
-                .Kp = 20, // 20
-                .Ki = 1, // 1
+                .Kp = 0, // 20
+                .Ki = 0, // 1
                 .Kd = 0,
                 .Improve = PID_Integral_Limit,
                 .IntegralLimit = 10000,
@@ -54,8 +55,8 @@ void ShootInit()
         },
         .controller_param_init_config = {
             .speed_PID = {
-                .Kp = 25, 
-                .Ki = 1, 
+                .Kp = 0,
+                .Ki = 0,
                 .Kd = 0,
                 .Improve = PID_Integral_Limit,
                 .IntegralLimit = 10000,
@@ -74,35 +75,35 @@ void ShootInit()
         .motor_type = M3508
     };
     // 内摩擦轮初始化
-    friction_config_inner.can_init_config.tx_id = 1; // 上摩擦轮,改txid和方向就行
-    friction_config_inner.controller_setting_init_config.motor_reverse_flag = MOTOR_DIRECTION_NORMAL;
-    friction_inner_up = DJIMotorInit(&friction_config_inner);
+    // friction_config_inner.can_init_config.tx_id = 1; // 上摩擦轮,改txid和方向就行
+    // friction_config_inner.controller_setting_init_config.motor_reverse_flag = MOTOR_DIRECTION_NORMAL;
+    // friction_inner_up = DJIMotorInit(&friction_config_inner);
 
-    friction_config_inner.can_init_config.tx_id = 2; // 左摩擦轮,改txid和方向就行
-    friction_config_inner.controller_setting_init_config.motor_reverse_flag = MOTOR_DIRECTION_REVERSE;
-    friction_inner_left = DJIMotorInit(&friction_config_inner);
+    // friction_config_inner.can_init_config.tx_id = 2; // 左摩擦轮,改txid和方向就行
+    // friction_config_inner.controller_setting_init_config.motor_reverse_flag = MOTOR_DIRECTION_REVERSE;
+    // friction_inner_left = DJIMotorInit(&friction_config_inner);
 
-    friction_config_inner.can_init_config.tx_id = 3; // 右摩擦轮,改txid和方向就行
-    friction_config_inner.controller_setting_init_config.motor_reverse_flag = MOTOR_DIRECTION_REVERSE;
-    friction_inner_right = DJIMotorInit(&friction_config_inner);
+    // friction_config_inner.can_init_config.tx_id = 3; // 右摩擦轮,改txid和方向就行
+    // friction_config_inner.controller_setting_init_config.motor_reverse_flag = MOTOR_DIRECTION_REVERSE;
+    // friction_inner_right = DJIMotorInit(&friction_config_inner);
 
-    // 外摩擦轮初始化
-    friction_config_outer.can_init_config.tx_id = 4; // 上摩擦轮,改txid和方向就行
-    friction_config_outer.controller_setting_init_config.motor_reverse_flag = MOTOR_DIRECTION_NORMAL;
-    friction_outer_up = DJIMotorInit(&friction_config_outer);
+    // // 外摩擦轮初始化
+    // friction_config_outer.can_init_config.tx_id = 4; // 上摩擦轮,改txid和方向就行
+    // friction_config_outer.controller_setting_init_config.motor_reverse_flag = MOTOR_DIRECTION_NORMAL;
+    // friction_outer_up = DJIMotorInit(&friction_config_outer);
 
-    friction_config_outer.can_init_config.tx_id = 5; // 左摩擦轮,改txid和方向就行
-    friction_config_outer.controller_setting_init_config.motor_reverse_flag = MOTOR_DIRECTION_NORMAL;
-    friction_outer_left = DJIMotorInit(&friction_config_outer);
+    // friction_config_outer.can_init_config.tx_id = 5; // 左摩擦轮,改txid和方向就行
+    // friction_config_outer.controller_setting_init_config.motor_reverse_flag = MOTOR_DIRECTION_NORMAL;
+    // friction_outer_left = DJIMotorInit(&friction_config_outer);
 
-    friction_config_outer.can_init_config.tx_id = 6; // 右摩擦轮,改txid和方向就行
-    friction_config_outer.controller_setting_init_config.motor_reverse_flag = MOTOR_DIRECTION_NORMAL;
-    friction_outer_right = DJIMotorInit(&friction_config_outer);
+    // friction_config_outer.can_init_config.tx_id = 6; // 右摩擦轮,改txid和方向就行
+    // friction_config_outer.controller_setting_init_config.motor_reverse_flag = MOTOR_DIRECTION_NORMAL;
+    // friction_outer_right = DJIMotorInit(&friction_config_outer);
     // 拨盘电机
     Motor_Init_Config_s loader_config = {
         .can_init_config = {
-            .can_handle = &hcan2,
-            .tx_id = 3,
+            .can_handle = &hcan1,
+            .tx_id = 2,
         },
         .controller_param_init_config = {
             .angle_PID = {
@@ -113,27 +114,20 @@ void ShootInit()
                 .MaxOut = 200,
             },
             .speed_PID = {
-                .Kp = 0, // 10
+                .Kp = 4.5, // 10
                 .Ki = 0, // 1
                 .Kd = 0,
                 .Improve = PID_Integral_Limit,
                 .IntegralLimit = 5000,
                 .MaxOut = 5000,
             },
-            .current_PID = {
-                .Kp = 0, // 0.7
-                .Ki = 0, // 0.1
-                .Kd = 0,
-                .Improve = PID_Integral_Limit,
-                .IntegralLimit = 5000,
-                .MaxOut = 5000,
-            },
+
         },
         .controller_setting_init_config = {
             .angle_feedback_source = MOTOR_FEED,
             .speed_feedback_source = MOTOR_FEED,
             .outer_loop_type = SPEED_LOOP, // 初始化成SPEED_LOOP,让拨盘停在原地,防止拨盘上电时乱转
-            .close_loop_type = SPEED_LOOP,
+            .close_loop_type = SPEED_LOOP | ANGLE_LOOP,
             .motor_reverse_flag = MOTOR_DIRECTION_NORMAL, // 注意方向设置为拨盘的拨出的击发方向
         },
         .motor_type = M2006 // 英雄使用m3508
@@ -222,8 +216,8 @@ void ShootTask()
             DJIMotorSetRef(friction_inner_right, 0);
             break;
         default: // 当前为了调试设定的默认值4000,因为还没有加入裁判系统无法读取弹速.
-            DJIMotorSetRef(friction_inner_left, 30000);
-            DJIMotorSetRef(friction_inner_right, 30000);
+            DJIMotorSetRef(friction_inner_left, 0);
+            DJIMotorSetRef(friction_inner_right, 0);
             break;
         }
     } else // 关闭摩擦轮

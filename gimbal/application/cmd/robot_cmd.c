@@ -70,47 +70,6 @@ static uint32_t outer_eight_cnt = 0; // 外八计时器
 static uint8_t cali_triggered = 0; // 触发状态：0-无，1-内八触发，2-外八触发
 void RobotCMDInit()
 {
-    // BMI088_Init_Config_s bmi088_config = {
-    //     .cali_mode = BMI088_CALIBRATE_ONLINE_MODE,
-    //     .work_mode = BMI088_BLOCK_TRIGGER_MODE,
-    //     .spi_acc_config = {
-    //         .spi_handle = &hspi1,
-    //         .GPIOx = GPIOA,
-    //         .cs_pin = GPIO_PIN_4,
-    //         .spi_work_mode = SPI_DMA_MODE,
-    //     },
-    //     .acc_int_config = {
-    //         .GPIOx = GPIOC,
-    //         .GPIO_Pin = GPIO_PIN_4,
-    //         .exti_mode = GPIO_EXTI_MODE_RISING,
-    //     },
-    //     .spi_gyro_config = {
-    //         .spi_handle = &hspi1,
-    //         .GPIOx = GPIOB,
-    //         .cs_pin = GPIO_PIN_0,
-    //         .spi_work_mode = SPI_DMA_MODE,
-    //     },
-    //     .gyro_int_config = {
-    //         .GPIO_Pin = GPIO_PIN_5,
-    //         .GPIOx = GPIOC,
-    //         .exti_mode = GPIO_EXTI_MODE_RISING,
-    //     },
-    //     .heat_pwm_config = {
-    //         .htim = &htim10,
-    //         .channel = TIM_CHANNEL_1,
-    //         .period = 1,
-    //     },
-    //     .heat_pid_config = {
-    //         .Kp = 0.5,
-    //         .Ki = 0,
-    //         .Kd = 0,
-    //         .DeadBand = 0.1,
-    //         .Improve = PID_Trapezoid_Intergral | PID_Integral_Limit | PID_Derivative_On_Measurement,
-    //         .IntegralLimit = 100,
-    //         .MaxOut = 100,
-    //     },
-    // };
-    // bmi088_test = BMI088Register(&bmi088_config);
     rc_data = RemoteControlInit(&huart3); // 修改为对应串口,注意如果是自研板dbus协议串口需选用添加了反相器的那个
     // vision_recv_data = VisionInit(&huart1); // 视觉通信串口
     Buzzer_config_s hint_config = {
@@ -362,25 +321,18 @@ static void RemoteControlSet()
             // 弹舱舵机控制,待添加servo_motor模块,关闭
         };
     }
-    if (rc_data[TEMP].rc.dial < -200) // 向上超过100,打开摩擦轮
-        chassis_cmd_send.gimbal_cmd_wz = 4000;
-    else if (rc_data[TEMP].rc.dial > 200)
-        chassis_cmd_send.gimbal_cmd_wz = -4000;
-    else
-        chassis_cmd_send.gimbal_cmd_wz = 0;
-
     // // 摩擦轮控制,拨轮向上打为负,向下为正
     // if (rc_data[TEMP].rc.dial < -100) // 向上超过100,打开摩擦轮
     //     shoot_cmd_send.friction_mode = FRICTION_ON;
     // else
     //     shoot_cmd_send.friction_mode = FRICTION_OFF;
     // // 拨弹控制,遥控器固定为一种拨弹模式,可自行选择
-    // if (rc_data[TEMP].rc.dial < -500)
-    //     shoot_cmd_send.load_mode = LOAD_BURSTFIRE;
-    // else
-    //     shoot_cmd_send.load_mode = LOAD_STOP;
+    if (rc_data[TEMP].rc.dial < -100)
+        shoot_cmd_send.load_mode = LOAD_BURSTFIRE;
+    else
+        shoot_cmd_send.load_mode = LOAD_STOP;
     // // 射频控制,固定每秒1发,后续可以根据左侧拨轮的值大小切换射频,
-    // shoot_cmd_send.shoot_rate = 8;
+    shoot_cmd_send.shoot_rate = 8;
 
     last_switch_right = current_switch_right; // 更新上一次开关状态
 }

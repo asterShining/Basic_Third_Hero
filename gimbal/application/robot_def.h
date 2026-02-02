@@ -28,21 +28,39 @@
 // 云台参数
 #define YAW_CHASSIS_ALIGN_ECD 2711 // 云台和底盘对齐指向相同方向时的电机编码器值,若对云台有机械改动需要修改
 #define YAW_ECD_GREATER_THAN_4096 0 // ALIGN_ECD值是否大于4096,是为1,否为0;用于计算云台偏转角度
-#define PITCH_HORIZON_ECD 3412 // 云台处于水平位置时编码器值,若对云台有机械改动需要修改
+#define PITCH_HORIZON_ECD 0 // 云台处于水平位置时编码器值,若对云台有机械改动需要修改
 #define PITCH_MAX_ANGLE 37 // 云台陀螺仪竖直方向最大角度
 #define PITCH_MIN_ANGLE -11 // 云台陀螺仪竖直方向最小角度
 // 发射参数
-#define ONE_BULLET_DELTA_ANGLE 36 // 发射一发弹丸拨盘转动的距离,由机械设计图纸给出
-#define REDUCTION_RATIO_LOADER 19.0f // 2006拨盘电机的减速比,英雄需要修改为3508的19.0f
-#define NUM_PER_CIRCLE 6 // 拨盘一圈的装载量
+#define ONE_BULLET_DELTA_ANGLE 40 // 发射一发弹丸拨盘转动的距离,由机械设计图纸给出
+#define REDUCTION_RATIO_LOADER 19.0f // 英雄需要修改为3508的19.0f
+#define NUM_PER_CIRCLE 9 // 拨盘一圈的装载量
 // 机器人底盘修改的参数,单位为mm(毫米)
-#define WHEEL_BASE 350 // 纵向轴距(前进后退方向)
-#define TRACK_WIDTH 300 // 横向轮距(左右平移方向)
+#define WHEEL_BASE 450 // 纵向轴距(前进后退方向)
+#define TRACK_WIDTH 415 // 横向轮距(左右平移方向)
 #define CENTER_GIMBAL_OFFSET_X 0 // 云台旋转中心距底盘几何中心的距离,前后方向,云台位于正中心时默认设为0
 #define CENTER_GIMBAL_OFFSET_Y 0 // 云台旋转中心距底盘几何中心的距离,左右方向,云台位于正中心时默认设为0
 #define RADIUS_WHEEL 60 // 轮子半径
 #define REDUCTION_RATIO_WHEEL 19.0f // 电机减速比,因为编码器量测的是转子的速度而不是输出轴的速度故需进行转换
 
+// ==========================================
+// [新增] 机器人物理模型参数 (用于功率控制和坡道力矩补偿)
+// ==========================================
+#define ROBOT_MASS 22.4f // 机器人质量 (kg) [需根据实际称重修改]
+#define ROBOT_COG_H 0.31f // 重心高度 (m) [需根据CAD或实测修改]
+#define GRAVITY_ACC 9.8f // 重力加速度 (m/s^2)
+
+// 几何参数单位转换 (mm -> m), 供力学解算使用
+#define RADIUS_WHEEL_M (RADIUS_WHEEL / 1000.0f)
+#define WHEEL_BASE_M (WHEEL_BASE / 1000.0f)
+#define TRACK_WIDTH_M (TRACK_WIDTH / 1000.0f)
+#define HALF_WHEEL_BASE_M (WHEEL_BASE_M / 2.0f)
+#define HALF_TRACK_WIDTH_M (TRACK_WIDTH_M / 2.0f)
+
+// 电机扭矩系数转换
+// M3508/M2006: 电流Raw(0-16384) -> 扭矩(Nm) 的系数约为 0.0003662
+// 补偿算法需要反向: 目标扭矩(Nm) -> 目标电流Raw
+#define TORQUE_2_CURRENT_COEF (1.0f / 0.0003662109375f)
 #define GYRO2GIMBAL_DIR_YAW 1 // 陀螺仪数据相较于云台的yaw的方向,1为相同,-1为相反
 #define GYRO2GIMBAL_DIR_PITCH -1 // 陀螺仪数据相较于云台的pitch的方向,1为相同,-1为相反
 #define GYRO2GIMBAL_DIR_ROLL 1 // 陀螺仪数据相较于云台的roll的方向,1为相同,-1为相反

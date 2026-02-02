@@ -168,11 +168,14 @@ void ChassisInit()
     };
     chasiss_can_comm = CANCommInit(&comm_conf); // can comm初始化
 
+    LOGINFO("[can_comm] Chassis_Upload_Data_s size: %d", sizeof(Chassis_Upload_Data_s));
+    LOGINFO("[can_comm] Chassis_Ctrl_Cmd_s size: %d", sizeof(Chassis_Ctrl_Cmd_s));
+    LOGINFO("[can_comm] CAN_COMM_MAX_BUFFSIZE: %d", CAN_COMM_MAX_BUFFSIZE);
+    // 【新增调试日志】
     if (chasiss_can_comm != NULL) {
-        LOGINFO("[DEBUG] Chassis CAN Comm Init SUCCESS! Handle: %p, recv:%d, send:%d",
-                chasiss_can_comm, sizeof(Chassis_Ctrl_Cmd_s), sizeof(Chassis_Upload_Data_s));
+        LOGINFO("[CHASSIS_DEBUG] CAN Comm Init Success! TxID: %d, RxID: %d", chasiss_can_comm->can_ins->tx_id, chasiss_can_comm->can_ins->rx_id);
     } else {
-        LOGERROR("[DEBUG] Chassis CAN Comm Init FAILED! Returned NULL.");
+        LOGERROR("[CHASSIS_DEBUG] CAN Comm Init Failed!");
     }
 #endif // CHASSIS_BOARD
 

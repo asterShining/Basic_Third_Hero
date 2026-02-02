@@ -26,8 +26,11 @@ static void CANCommResetRx(CANCommInstance *ins)
 static void CANCommRxCallback(CANInstance *_instance)
 {
     CANCommInstance *comm = (CANCommInstance *)_instance->id; // 注意写法,将can instance的id强制转换为CANCommInstance*类型
-    // LOGINFO("[can_comm] RX Callback - First byte: 0x%02X, RX Len: %d",
-    //         _instance->rx_buff[0], _instance->rx_len);
+    LOGINFO("[can_comm] ID:0x%X | 1st Byte: 0x%02X | Expect Len: %d | Rx Len: %d",
+            _instance->rx_id,
+            _instance->rx_buff[1],
+            comm->recv_data_len,
+            _instance->rx_buff[1]);
     /* 当前接收状态判断 */
     if (_instance->rx_buff[0] == CAN_COMM_HEADER && comm->recv_state == 0) // 之前尚未开始接收且此次包里第一个位置是帧头
     {
@@ -37,7 +40,9 @@ static void CANCommRxCallback(CANInstance *_instance)
         {
             comm->recv_state = 1; // 设置接收状态为1,说明已经开始接收
         } else
-            return; // 直接跳过即可
+            LOGERROR("[can_comm] Len Mismatch! My Expect: %d, Incoming: %d",
+                     comm->recv_data_len, _instance->rx_buff[1]);
+        return; // 直接跳过即可
     }
 
     if (comm->recv_state) // 已经收到过帧头
