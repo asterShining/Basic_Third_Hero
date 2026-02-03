@@ -218,13 +218,14 @@ typedef struct
 typedef struct
 {
     attitude_t gimbal_imu_data;
-    uint16_t yaw_motor_single_round_angle;
+    float yaw_motor_single_round_angle;
 } Gimbal_Upload_Data_s;
 
 typedef struct
 {
-    // code to go here
-    // ...
+    uint8_t bullet_fired_flag; // 发射确认标志 (1=确认发射, 0=未确认)
+    uint8_t empty_flag; // 缺弹标志 (1=缺弹, 0=正常)
+    uint16_t fire_count; // 累计确认发射计数
 } Shoot_Upload_Data_s;
 
 #pragma pack() // 开启字节对齐,结束前面的#pragma pack(1)

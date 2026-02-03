@@ -36,8 +36,12 @@ static void CANCommRxCallback(CANInstance *_instance)
         if (_instance->rx_buff[1] == comm->recv_data_len) // 如果这一包里的datalen也等于我们设定接收长度(这是因为暂时不支持动态包长)
         {
             comm->recv_state = 1; // 设置接收状态为1,说明已经开始接收
-        } else
-            return; // 直接跳过即可
+        } else {
+            LOGERROR("[can_comm] Len Mismatch! My Expect: %d, Incoming: %d",
+                     comm->recv_data_len, _instance->rx_buff[1]);
+        }
+
+        // return; // 直接跳过即可
     }
 
     if (comm->recv_state) // 已经收到过帧头
@@ -46,8 +50,8 @@ static void CANCommRxCallback(CANInstance *_instance)
         //         comm->cur_recv_len, comm->recv_buf_len, _instance->rx_len);
         // 如果已经接收到的长度加上当前一包的长度大于总buf len,说明接收错误
         if (comm->cur_recv_len + _instance->rx_len > comm->recv_buf_len) {
-            // LOGERROR("[can_comm] Buffer overflow! Current: %d, This: %d, Max: %d",
-            //          comm->cur_recv_len, _instance->rx_len, comm->recv_buf_len);
+            LOGERROR("[can_comm] Buffer overflow! Current: %d, This: %d, Max: %d",
+                     comm->cur_recv_len, _instance->rx_len, comm->recv_buf_len);
             CANCommResetRx(comm);
             return; // 重置状态然后返回
         }
@@ -67,17 +71,15 @@ static void CANCommRxCallback(CANInstance *_instance)
                     memcpy(comm->unpacked_recv_data, comm->raw_recvbuf + 2, comm->recv_data_len);
                     comm->update_flag = 1; // 数据更新flag置为1
                     DaemonReload(comm->comm_daemon); // 重载daemon,避免数据更新后一直不被读取而导致数据更新不及时
+                } else {
+                    LOGERROR("[can_comm] CRC failed! Expected: 0x%02X, Got: 0x%02X",
+                             crc_8(comm->raw_recvbuf + 2, comm->recv_data_len),
+                             comm->raw_recvbuf[comm->recv_buf_len - 2]);
                 }
-                // else {
-                //     // LOGERROR("[can_comm] CRC failed! Expected: 0x%02X, Got: 0x%02X",
-                //     //          crc_8(comm->raw_recvbuf + 2, comm->recv_data_len),
-                //     //          comm->raw_recvbuf[comm->recv_buf_len - 2]);
-                // }
+            } else {
+                LOGERROR("[can_comm] Tail mismatch! Expected: 0x%02X, Got: 0x%02X",
+                         CAN_COMM_TAIL, comm->raw_recvbuf[comm->recv_buf_len - 1]);
             }
-            // else {
-            //     LOGERROR("[can_comm] Tail mismatch! Expected: 0x%02X, Got: 0x%02X",
-            //             CAN_COMM_TAIL, comm->raw_recvbuf[comm->recv_buf_len - 1]);
-            // }
             CANCommResetRx(comm);
             return; // 重置状态然后返回
         }

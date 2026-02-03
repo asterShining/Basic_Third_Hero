@@ -20,6 +20,8 @@
 #include <stdint.h>
 #include <stdbool.h>
 
+#define LOAD_TRIGGER_DELAY 500
+
 // 私有宏,自动将编码器转换成角度值
 #define YAW_ALIGN_ANGLE (YAW_CHASSIS_ALIGN_ECD * ECD_ANGLE_COEF_DJI) // 对齐时的角度,0-360
 #define PTICH_HORIZON_ANGLE (PITCH_HORIZON_ECD * ECD_ANGLE_COEF_DJI) // pitch水平时电机的角度,0-360
@@ -185,6 +187,7 @@ static void EmergencyHandler()
     shoot_cmd_send.shoot_mode = SHOOT_OFF;
     shoot_cmd_send.friction_mode = FRICTION_OFF;
     shoot_cmd_send.load_mode = LOAD_STOP;
+    shoot_cmd_send.friction_mode = FRICTION_OFF;
     // }
     // 遥控器右侧开关为[上],恢复正常运行
     // if (switch_is_up(rc_data[TEMP].rc.switch_right)) {
@@ -211,33 +214,33 @@ static void RemoteControlSet()
     // [下] 急停模式
     if (switch_is_down(current_switch_right)) {
         EmergencyHandler();
-        gimbal_cmd_send.yaw = gimbal_fetch_data.gimbal_imu_data.YawTotalAngle;
-        gimbal_cmd_send.pitch = 0.0f; // 这个之后看看，或者不要突然变为0
-        if (switch_is_down(current_switch_left)) {
-            static uint8_t cali_triggered = 0;
-            bool is_inner_eight = (rc_data[TEMP].rc.rocker_l_ > RC_TRIGGER_TH) && // 左摇杆向右
-                                  (rc_data[TEMP].rc.rocker_l1 < -RC_TRIGGER_TH) && // 左摇杆向下
-                                  (rc_data[TEMP].rc.rocker_r_ < -RC_TRIGGER_TH) && // 右摇杆向左
-                                  (rc_data[TEMP].rc.rocker_r1 < -RC_TRIGGER_TH); // 右摇杆向下
+        static uint8_t cali_triggered = 0;
+        bool is_inner_eight = (rc_data[TEMP].rc.rocker_l_ > RC_TRIGGER_TH) && // 左摇杆向右
+                              (rc_data[TEMP].rc.rocker_l1 < -RC_TRIGGER_TH) && // 左摇杆向下
+                              (rc_data[TEMP].rc.rocker_r_ < -RC_TRIGGER_TH) && // 右摇杆向左
+                              (rc_data[TEMP].rc.rocker_r1 < -RC_TRIGGER_TH); // 右摇杆向下
 
-            if (is_inner_eight) {
-                if (cali_triggered == 0) {
-                    // 1. 调用校准
-                    GimbalCalibrate();
+        if (is_inner_eight) {
+            if (cali_triggered == 0) {
+                // 1. 调用校准
+                GimbalCalibrate();
 
-                    // 2. 蜂鸣器提示 (高音 Octave 6)
-                    if (hint_buzzer != NULL) {
-                        hint_buzzer->octave = OCTAVE_6; // 设置为高音
-                        AlarmSetStatus(hint_buzzer, ALARM_ON);
-                    }
-
-                    cali_triggered = 1; // 标记为内八已触发，防止重复执行
+                // 2. 【新增】开启蜂鸣器提示
+                if (hint_buzzer != NULL) {
+                    AlarmSetStatus(hint_buzzer, ALARM_ON);
                 }
+
+                cali_triggered = 1;
             }
         } else {
-            inner_eight_cnt = 0; // 只要摇杆没有保持住，计时器立马清零
+            // 摇杆回中后，关闭蜂鸣器并重置触发位
+            if (cali_triggered == 1) {
+                if (hint_buzzer != NULL) {
+                    AlarmSetStatus(hint_buzzer, ALARM_OFF);
+                }
+                cali_triggered = 0;
+            }
         }
-
     }
     // [上] 底盘无力，云台能够转动
     else if (switch_is_up(current_switch_right)) {
@@ -321,20 +324,45 @@ static void RemoteControlSet()
             // 弹舱舵机控制,待添加servo_motor模块,关闭
         };
     }
-    // // 摩擦轮控制,拨轮向上打为负,向下为正
-    // if (rc_data[TEMP].rc.dial < -100) // 向上超过100,打开摩擦轮
-    //     shoot_cmd_send.friction_mode = FRICTION_ON;
-    // else
-    //     shoot_cmd_send.friction_mode = FRICTION_OFF;
-    // // 拨弹控制,遥控器固定为一种拨弹模式,可自行选择
-    if (rc_data[TEMP].rc.dial < -100)
-        shoot_cmd_send.load_mode = LOAD_BURSTFIRE;
-    else
-        shoot_cmd_send.load_mode = LOAD_STOP;
-    // // 射频控制,固定每秒1发,后续可以根据左侧拨轮的值大小切换射频,
-    shoot_cmd_send.shoot_rate = 8;
 
-    last_switch_right = current_switch_right; // 更新上一次开关状态
+    static uint8_t friction_switch_state = 0; // 摩擦轮状态记录: 0-关, 1-开
+    static uint16_t last_switch_left = RC_SW_DOWN; // 记录左侧拨杆的上一次状态
+
+    // /* 1. 摩擦轮状态切换逻辑 (保持原有逻辑: 中 -> 上 的上升沿切换开关状态) */
+    if (switch_is_up(current_switch_left) && switch_is_mid(last_switch_left)) {
+        friction_switch_state = !friction_switch_state; // 状态取反
+    }
+
+    // /* 2. 执行发射逻辑 (摩擦轮 + 拨盘) */
+    if (friction_switch_state == 1) {
+        // --- 摩擦轮开启状态 ---
+        shoot_cmd_send.friction_mode = FRICTION_ON;
+        shoot_cmd_send.bullet_speed = BIG_AMU_12; // 设置射速
+
+        // --- 新增: 左侧拨杆向下触发拨盘 (开火) ---
+        // 逻辑: 只有在摩擦轮开启, 且拨杆处于[下]档位时, 才进行供弹
+        if (switch_is_down(current_switch_left)) {
+            // 这里使用 LOAD_BURSTFIRE (连发) 或 LOAD_1_BULLET (单发), 根据需求调整
+            // 通常拨杆拉下一直开火用 BURSTFIRE 配合射频控制比较顺手
+            shoot_cmd_send.load_mode = LOAD_BURSTFIRE;
+            shoot_cmd_send.shoot_rate = 8.0f; // 设置射频为8发/秒
+        } else {
+            // 拨杆在[中]或[上]时, 停止供弹
+            shoot_cmd_send.load_mode = LOAD_STOP;
+            shoot_cmd_send.shoot_rate = 0.0f;
+        }
+
+    } else {
+        // --- 摩擦轮关闭状态 ---
+        shoot_cmd_send.friction_mode = FRICTION_OFF;
+
+        // 安全保护: 摩擦轮没开, 强制停止拨盘, 防止堵弹或误触
+        shoot_cmd_send.load_mode = LOAD_STOP;
+    }
+
+    // 更新左侧拨杆历史状态
+    last_switch_left = current_switch_left;
+    last_switch_right = current_switch_right;
 }
 
 /**

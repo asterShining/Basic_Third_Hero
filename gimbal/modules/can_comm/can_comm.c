@@ -26,11 +26,11 @@ static void CANCommResetRx(CANCommInstance *ins)
 static void CANCommRxCallback(CANInstance *_instance)
 {
     CANCommInstance *comm = (CANCommInstance *)_instance->id; // 注意写法,将can instance的id强制转换为CANCommInstance*类型
-    LOGINFO("[can_comm] ID:0x%X | 1st Byte: 0x%02X | Expect Len: %d | Rx Len: %d",
-            _instance->rx_id,
-            _instance->rx_buff[1],
-            comm->recv_data_len,
-            _instance->rx_buff[1]);
+    // LOGINFO("[can_comm] ID:0x%X | 1st Byte: 0x%02X | Expect Len: %d | Rx Len: %d",
+    //         _instance->rx_id,
+    //         _instance->rx_buff[1],
+    //         comm->recv_data_len,
+    //         _instance->rx_buff[1]);
     /* 当前接收状态判断 */
     if (_instance->rx_buff[0] == CAN_COMM_HEADER && comm->recv_state == 0) // 之前尚未开始接收且此次包里第一个位置是帧头
     {

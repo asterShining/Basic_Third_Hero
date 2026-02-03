@@ -27,7 +27,7 @@ void StartINSTASK(void const *argument);
 void StartMOTORTASK(void const *argument);
 void StartDAEMONTASK(void const *argument);
 void StartROBOTTASK(void const *argument);
-void StartUITASK(void const *argument);
+// void StartUITASK(void const *argument);
 
 /**
  * @brief 初始化机器人任务,所有持续运行的任务都在这里初始化
@@ -47,8 +47,8 @@ void OSTaskInit()
     osThreadDef(robottask, StartROBOTTASK, osPriorityNormal, 0, 1024);
     robotTaskHandle = osThreadCreate(osThread(robottask), NULL);
 
-    osThreadDef(uitask, StartUITASK, osPriorityNormal, 0, 512);
-    uiTaskHandle = osThreadCreate(osThread(uitask), NULL);
+    // osThreadDef(uitask, StartUITASK, osPriorityNormal, 0, 512);
+    // uiTaskHandle = osThreadCreate(osThread(uitask), NULL);
 
     // HTMotorControlInit(); // 没有注册HT电机则不会执行
 }

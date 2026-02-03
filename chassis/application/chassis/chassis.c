@@ -138,20 +138,6 @@ void ChassisInit()
         .loudness = 0.5f, // 音量
     };
     chassis_buzzer = BuzzerRegister(&buzzer_config); // [!code ++]
-
-    // 航向锁定PID初始化
-    PID_Init_Config_s yaw_lock_conf = {
-        .Kp = -29.0f, // 强力纠正
-        .Ki = 12.0f, // 消除静差
-        .Kd = 5.0f, // 抑制震荡
-        .IntegralLimit = 500.0f, // 积分限幅
-        .Improve = PID_Trapezoid_Intergral | PID_Integral_Limit | PID_Derivative_On_Measurement,
-        .MaxOut = 7000.0f, // 输出限幅 (对应 chassis_cmd_recv.wz 的量级)
-        .Output_LPF_RC = 0.0f,
-        .DeadBand = 0.5f,
-    };
-    PIDInit(&yaw_lock_pid, &yaw_lock_conf);
-
     // 底盘跟随云台
 
     // 发布订阅初始化,如果为双板,则需要can comm来传递消息

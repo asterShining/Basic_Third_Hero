@@ -64,7 +64,7 @@
 #define TORQUE_2_CURRENT_COEF (1.0f / 0.0003662109375f)
 
 #define GYRO2GIMBAL_DIR_YAW 1 // 陀螺仪数据相较于云台的yaw的方向,1为相同,-1为相反
-#define GYRO2GIMBAL_DIR_PITCH 1 // 陀螺仪数据相较于云台的pitch的方向,1为相同,-1为相反
+#define GYRO2GIMBAL_DIR_PITCH -1 // 陀螺仪数据相较于云台的pitch的方向,1为相同,-1为相反
 #define GYRO2GIMBAL_DIR_ROLL 1 // 陀螺仪数据相较于云台的roll的方向,1为相同,-1为相反
 
 #define MAX_CHASSIS_VX_SPEED 6.0f
@@ -181,7 +181,7 @@ typedef struct
     float wz; // 旋转速度
     float offset_angle; // 底盘和归中位置的夹角
     float gimbal_gyro_z; // 来自云台的陀螺仪z轴角速度前馈
-    float gimbal_cmd_wz;// 来自云台的底盘旋转控制量
+    float gimbal_cmd_wz; // 来自云台的底盘旋转控制量
     uint8_t calibrate_imu; // 请求底盘IMU校准
     chassis_mode_e chassis_mode;
     int chassis_speed_buff;
@@ -243,8 +243,9 @@ typedef struct
 
 typedef struct
 {
-    // code to go here
-    // ...
+    uint8_t bullet_fired_flag; // 发射确认标志 (1=确认发射, 0=未确认)
+    uint8_t empty_flag; // 缺弹标志 (1=缺弹, 0=正常)
+    uint16_t fire_count; // 累计确认发射计数
 } Shoot_Upload_Data_s;
 
 #pragma pack() // 开启字节对齐,结束前面的#pragma pack(1)
