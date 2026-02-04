@@ -11,7 +11,6 @@
 static float current_inner_deg = 0.0f;
 static float current_outer_deg = 0.0f;
 
-/* 对于双发射机构的机器人,将下面的数据封装成结构体即可,生成两份shoot应用实例 */
 static DJIMotorInstance *loader; // 拨盘电机
 static DJIMotorInstance *friction_inner_down, *friction_inner_left, *friction_inner_right; // 内部摩擦轮电机
 static DJIMotorInstance *friction_outer_down, *friction_outer_left, *friction_outer_right; // 外部摩擦轮电机
@@ -26,6 +25,9 @@ ShootDebugSpeed_s shoot_debug_speed;
 
 // [新增] 全局堵转调试变量定义 (用于调试器实时观测堵转状态机状态)
 StallDebug_s stall_debug = { 0 };
+
+// [新增] 全局发射检测调试变量定义 (用于调试器实时观测摩擦轮单发检测状态)
+FireDebug_s fire_debug = { 0 };
 
 // dwt定时,计算冷却用
 static float hibernate_time = 0, dead_time = 0;
@@ -115,12 +117,11 @@ void ShootInit()
         .controller_param_init_config = {
             .angle_PID = {
                 // 如果启用位置环来控制发弹,需要较大的I值保证输出力矩的线性度否则出现接近拨出的力矩大幅下降
-                // [修改] 提高MaxOut和IntegralLimit以避免卡弹时输出力矩不足 (原值400/200)
                 .Kp = 6.3, // 10
-                .Ki = 12.5,
+                .Ki = 0.0,
                 .Kd = 0,
-                .MaxOut = 5000, // 角度环输出限幅 (deg/s), 提高以允许更大力矩
-                .IntegralLimit = 2500, // 积分限幅, 相应提高避免积分饱和
+                .MaxOut = 13000, // 角度环输出限幅 (deg/s), 提高以允许更大力矩
+
             },
             .speed_PID = {
                 .Kp = 5.6, // 10
@@ -421,6 +422,22 @@ static loader_mode_e HandleLoaderStall(loader_mode_e current_mode)
 static void HandleFireDetection(loader_mode_e load_mode)
 {
     float current_time = DWT_GetTimeline_ms();
+
+    // [新增] 更新全局调试变量 (supply摩擦轮单发检测的实时数据)
+    float cur_avg_speed = GetInnerFrictionAvgSpeed();
+    fire_debug.state = fire_detector.state;
+    fire_debug.baseline_speed = fire_detector.baseline_speed;
+    fire_debug.current_speed = cur_avg_speed;
+    fire_debug.speed_diff = fire_detector.baseline_speed - cur_avg_speed;
+    fire_debug.loader_target_angle = fire_detector.loader_target_angle;
+    fire_debug.loader_actual_angle = loader->measure.total_angle;
+    fire_debug.loader_error = fabsf(loader->measure.total_angle - fire_detector.loader_target_angle);
+    fire_debug.is_dipping = (fire_debug.speed_diff > FRICTION_SPEED_DIP_THRESHOLD) ? 1 : 0;
+    fire_debug.is_recovered = ((current_inner_deg - cur_avg_speed) < FRICTION_SPEED_RECOVER_THRESHOLD) ? 1 : 0;
+    fire_debug.loader_locked = fire_detector.loader_locked;
+    fire_debug.empty_flag = fire_detector.empty_flag;
+    fire_debug.trigger_consumed = fire_trigger.trigger_consumed;
+    fire_debug.fire_count = fire_detector.fire_count;
 
     // 仅在单发/二连发/三连发模式下进行检测
     // 连发模式不进行这种检测, 因为连发时掉速信号会重叠

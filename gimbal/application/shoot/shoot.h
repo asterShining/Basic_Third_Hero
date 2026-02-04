@@ -39,12 +39,18 @@ typedef struct
 // 连续反转次数上限, 超过则认为卡死,停止尝试
 #define MAX_REVERSE_COUNT 3
 
+// ==================== 预紧力矩参数 ====================
+// // 预紧目标弹丸数 (设置拨盘目标为2发距离, 让电流提前建立)
+// #define PRETENSION_BULLET_COUNT 2
+// // 检测到发射后重置偏移量 (回退到1发位置, 防止连发)
+// #define PRETENSION_RESET_OFFSET 1
+
 // ==================== 发射确认检测参数 ====================
 // 掉速检测阈值 (deg/s), 内圈摩擦轮速度下降超过此值认为有弹丸通过
 // 使用内圈检测是因为弹丸先接触内圈, 信号更早, 能更有效防止多发
-#define FRICTION_SPEED_DIP_THRESHOLD 400.0f
+#define FRICTION_SPEED_DIP_THRESHOLD 300.0f
 // 回升检测阈值 (deg/s), 与目标速度差小于此值认为回升完成
-#define FRICTION_SPEED_RECOVER_THRESHOLD 200.0f
+#define FRICTION_SPEED_RECOVER_THRESHOLD 100.0f
 // 拨盘位置误差阈值 (deg), 小于此值认为拨盘到位
 #define LOADER_POSITION_THRESHOLD 8.0f
 // 发射确认超时时间 (ms), 等待摩擦轮掉速的最大时间
@@ -94,6 +100,27 @@ typedef enum {
     FIRE_CONFIRMED, // 发射确认成功
     FIRE_EMPTY, // 缺弹 (拨盘到位但无掉速)
 } FireDetectState_e;
+
+// [新增] 发射检测调试信息结构体 (全局可观测)
+// 用于在调试器中实时观测摩擦轮单发检测状态机的工作情况
+typedef struct {
+    FireDetectState_e state; // 当前发射检测状态机状态
+    float baseline_speed; // 发射前基准摩擦轮速度 (deg/s)
+    float current_speed; // 当前内圈摩擦轮平均速度 (deg/s)
+    float speed_diff; // 速度差 (baseline - current), 正值表示掉速
+    float loader_target_angle; // 拨盘目标角度 (deg)
+    float loader_actual_angle; // 拨盘实际角度 (deg)
+    float loader_error; // 拨盘位置误差 (deg)
+    uint8_t is_dipping; // 是否检测到掉速 (1=掉速中, 0=正常)
+    uint8_t is_recovered; // 速度是否回升 (1=已回升, 0=未回升)
+    uint8_t loader_locked; // 拨盘锁定标志 (1=锁定, 0=解锁)
+    uint8_t empty_flag; // 缺弹标志 (1=缺弹, 0=正常)
+    uint8_t trigger_consumed; // 触发是否已消费 (1=已消费)
+    uint16_t fire_count; // 已确认发射计数
+} FireDebug_s;
+
+// [新增] 全局发射检测调试变量声明 (可在调试器中观测)
+extern FireDebug_s fire_debug;
 
 // 发射确认状态结构体
 // 用于管理发射检测状态机的所有运行时数据
