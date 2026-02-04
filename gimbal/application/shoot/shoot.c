@@ -26,8 +26,8 @@ ShootDebugSpeed_s shoot_debug_speed;
 // [新增] 全局堵转调试变量定义 (用于调试器实时观测堵转状态机状态)
 StallDebug_s stall_debug = { 0 };
 
-// [新增] 全局发射检测调试变量定义 (用于调试器实时观测摩擦轮单发检测状态)
-FireDebug_s fire_debug = { 0 };
+// [新增] 全局单发调试变量定义 (用于调试器实时观测单发状态机状态)
+SingleFireDebug_s sf_debug = { 0 };
 
 // dwt定时,计算冷却用
 static float hibernate_time = 0, dead_time = 0;
@@ -277,40 +277,7 @@ static uint8_t IsFrictionDipping(void)
 {
     float current_speed = GetInnerFrictionAvgSpeed();
     // 与基准速度对比, 下降超过阈值则认为掉速 (有弹丸正在通过)
-    return (fire_detector.baseline_speed - current_speed) > FRICTION_SPEED_DIP_THRESHOLD;
-}
-
-/**
- * @brief 检测内圈摩擦轮速度是否回升
- * @return 1 表示速度已回升 (弹丸已离开), 0 表示仍在恢复
- * @note 速度回升表示弹丸已经完全通过摩擦轮
- */
-static uint8_t IsFrictionRecovered(void)
-{
-    float current_speed = GetInnerFrictionAvgSpeed();
-    // 与目标速度对比, 差值小于阈值则认为回升完成
-    return (current_inner_deg - current_speed) < FRICTION_SPEED_RECOVER_THRESHOLD;
-}
-
-/**
- * @brief 检测拨盘是否到达目标位置
- * @return 1 表示拨盘已到位, 0 表示仍在旋转
- * @note 用于判断供弹动作是否完成
- */
-static uint8_t IsLoaderInPosition(void)
-{
-    float error = fabsf(loader->measure.total_angle - fire_detector.loader_target_angle);
-    return error < LOADER_POSITION_THRESHOLD;
-}
-
-/**
- * @brief 检查拨盘是否被锁定 (防多发机制)
- * @return 1 表示锁定中, 应拒绝新的发射指令; 0 表示未锁定
- * @note 该函数供外部模块调用, 用于在检测到发射时锁定拨盘
- */
-uint8_t ShootIsLoaderLocked(void)
-{
-    return fire_detector.loader_locked;
+    return (single_fire.baseline_speed - current_speed) > FRICTION_SPEED_DIP_THRESHOLD;
 }
 
 /**
@@ -325,8 +292,9 @@ static loader_mode_e HandleLoaderStall(loader_mode_e current_mode)
 
     // 仅在发射模式下进行堵转检测 (单发/二连发/三连发/连发)
     // LOAD_STOP 和 LOAD_REVERSE 模式不进行检测
-    uint8_t is_shooting = (current_mode == LOAD_1_BULLET) ||
-                          (current_mode == LOAD_2_BULLET) ||
+    // 仅在连发模式下进行通用堵转检测
+    // 单发模式由 HandleSingleFire 自行处理超时与异常
+    uint8_t is_shooting = (current_mode == LOAD_2_BULLET) ||
                           (current_mode == LOAD_3_BULLET) ||
                           (current_mode == LOAD_BURSTFIRE);
 
@@ -413,132 +381,95 @@ static loader_mode_e HandleLoaderStall(loader_mode_e current_mode)
 }
 
 /**
- * @brief 发射确认检测状态机
- * @param load_mode 当前的拨盘模式
- * @note 该函数应在 ShootTask 的拨盘控制之后调用
- *       检测流程: 拨盘到位 -> 内圈掉速 -> 锁定拨盘 -> 速度回升 -> 确认发射
- *       使用内圈检测是因为弹丸先接触内圈, 信号更早, 防多发效果更好
+ * @brief 单发处理逻辑 (基于摩擦轮入口限位 + 速度环 + 反向制动)
+ * @param trigger_active 是否触发 (边沿信号)
  */
-static void HandleFireDetection(loader_mode_e load_mode)
+static void HandleSingleFire(uint8_t trigger_active)
 {
     float current_time = DWT_GetTimeline_ms();
 
-    // [新增] 更新全局调试变量 (supply摩擦轮单发检测的实时数据)
-    float cur_avg_speed = GetInnerFrictionAvgSpeed();
-    fire_debug.state = fire_detector.state;
-    fire_debug.baseline_speed = fire_detector.baseline_speed;
-    fire_debug.current_speed = cur_avg_speed;
-    fire_debug.speed_diff = fire_detector.baseline_speed - cur_avg_speed;
-    fire_debug.loader_target_angle = fire_detector.loader_target_angle;
-    fire_debug.loader_actual_angle = loader->measure.total_angle;
-    fire_debug.loader_error = fabsf(loader->measure.total_angle - fire_detector.loader_target_angle);
-    fire_debug.is_dipping = (fire_debug.speed_diff > FRICTION_SPEED_DIP_THRESHOLD) ? 1 : 0;
-    fire_debug.is_recovered = ((current_inner_deg - cur_avg_speed) < FRICTION_SPEED_RECOVER_THRESHOLD) ? 1 : 0;
-    fire_debug.loader_locked = fire_detector.loader_locked;
-    fire_debug.empty_flag = fire_detector.empty_flag;
-    fire_debug.trigger_consumed = fire_trigger.trigger_consumed;
-    fire_debug.fire_count = fire_detector.fire_count;
+    // [新增] 更新全局调试变量
+    sf_debug.state = single_fire.state;
+    sf_debug.baseline_speed = single_fire.baseline_speed;
+    sf_debug.current_speed = GetInnerFrictionAvgSpeed();
+    // sf_debug.speed_diff = single_fire.baseline_speed - sf_debug.current_speed; // 放在下面计算
+    sf_debug.loader_speed = loader->measure.speed_aps;
+    sf_debug.is_dipping = IsFrictionDipping(); // 使用 single_fire.baseline_speed
+    sf_debug.speed_diff = single_fire.baseline_speed - sf_debug.current_speed;
+    sf_debug.trigger_edge = trigger_active;
+    sf_debug.fire_count = single_fire.fire_count;
+    sf_debug.feed_timeout_count = single_fire.feed_timeout_count;
+    sf_debug.brake_start_time = single_fire.brake_start_time;
+    sf_debug.feed_start_time = single_fire.feed_start_time;
 
-    // 仅在单发/二连发/三连发模式下进行检测
-    // 连发模式不进行这种检测, 因为连发时掉速信号会重叠
-    uint8_t is_single_fire = (load_mode == LOAD_1_BULLET) ||
-                             (load_mode == LOAD_2_BULLET) ||
-                             (load_mode == LOAD_3_BULLET);
+    switch (single_fire.state) {
+    case SF_IDLE:
+        if (trigger_active) {
+            // 触发: 记录基准速度,进入送弹
+            single_fire.baseline_speed = GetInnerFrictionAvgSpeed();
+            single_fire.feed_start_time = current_time;
+            single_fire.state = SF_FEEDING;
 
-    switch (fire_detector.state) {
-    case FIRE_IDLE:
-        // 空闲状态: 检测到发射指令时启动检测流程
-        if (is_single_fire && !fire_detector.loader_locked) {
-            fire_detector.state = FIRE_LOADING;
-            // 记录拨盘目标角度, 用于判断拨盘是否到位
-            fire_detector.loader_target_angle = loader->measure.total_angle + ONE_BULLET_DELTA_ANGLE;
-            // 记录发射前的摩擦轮基准速度, 用于后续掉速比较
-            fire_detector.baseline_speed = GetInnerFrictionAvgSpeed();
-            fire_detector.fire_start_time = current_time;
-            fire_detector.bullet_fired_flag = 0;
-        }
-        break;
-
-    case FIRE_LOADING:
-        // 等待拨盘到位: 拨盘电机正在旋转, 将弹丸推向摩擦轮
-        if (IsLoaderInPosition()) {
-            // 拨盘已到位, 弹丸应该即将接触摩擦轮
-            fire_detector.state = FIRE_WAIT_DIP;
-            fire_detector.loader_arrive_time = current_time;
-        } else if ((current_time - fire_detector.fire_start_time) > LOADER_ARRIVE_TIMEOUT) {
-            // 拨盘到位超时 -> 可能卡弹, 交给现有的堵转处理逻辑 (HandleLoaderStall)
-            fire_detector.state = FIRE_IDLE;
-        }
-        break;
-
-    case FIRE_WAIT_DIP:
-        // 等待内圈摩擦轮掉速: 弹丸接触摩擦轮会导致转速下降
-        if (IsFrictionDipping()) {
-            // 检测到掉速, 说明弹丸正在通过摩擦轮
-            // 立即锁定拨盘, 防止在弹丸完全离开前供入下一发
-            fire_detector.state = FIRE_WAIT_RECOVER;
-            fire_detector.loader_locked = 1; // 🔒 锁定拨盘, 防止多发
-        } else if ((current_time - fire_detector.loader_arrive_time) > FIRE_DETECT_TIMEOUT) {
-            // 超时无掉速 -> 缺弹 (拨盘转动了但没有弹丸被推出)
-            fire_detector.state = FIRE_EMPTY;
-            fire_detector.empty_flag = 1;
-        }
-        break;
-
-    case FIRE_WAIT_RECOVER:
-        // 等待内圈摩擦轮速度回升: 弹丸离开后摩擦轮速度会恢复
-        if (IsFrictionRecovered()) {
-            // 速度回升, 弹丸已完全离开摩擦轮, 发射确认成功
-            fire_detector.state = FIRE_CONFIRMED;
-            fire_detector.bullet_fired_flag = 1;
-            fire_detector.fire_count++;
-            fire_detector.loader_locked = 0; // 🔓 解锁拨盘, 允许下一发
-        } else if ((current_time - fire_detector.loader_arrive_time) > FIRE_DETECT_TIMEOUT) {
-            // 超时未回升 -> 仍视为发射成功 (弹丸可能卡在枪管中)
-            fire_detector.state = FIRE_CONFIRMED;
-            fire_detector.bullet_fired_flag = 1;
-            fire_detector.fire_count++;
-            fire_detector.loader_locked = 0; // 🔓 解锁拨盘
-        }
-        break;
-
-    case FIRE_CONFIRMED:
-        // 发射成功确认: 立即复位状态机和触发标志, 等待下一次新触发
-        fire_detector.state = FIRE_IDLE;
-        fire_detector.bullet_fired_flag = 0;
-        fire_detector.loader_locked = 0;
-        // [新增] 复位触发标志, 允许用户下一次触发
-        fire_trigger.trigger_consumed = 0;
-        fire_trigger.pending_fire = 0;
-        break;
-
-    case FIRE_EMPTY:
-        // 空仓/上弹状态: 加速拨盘继续推进, 直到检测到摩擦轮掉速
-        // [新增] 空仓加速逻辑: 继续推进拨盘, 尝试将弹丸推到摩擦轮
-        if (IsFrictionDipping()) {
-            // 检测到掉速, 说明弹丸已到达摩擦轮, 进入等待回升状态
-            fire_detector.state = FIRE_WAIT_RECOVER;
-            fire_detector.loader_locked = 1;
-            fire_detector.empty_flag = 0; // 清除空仓标志
-        } else {
-            // 继续加速推进拨盘 (使用速度环加速)
+            // 速度环 - 中速送弹
             DJIMotorOuterLoop(loader, SPEED_LOOP);
-            // 使用较高速度推进, 加速弹丸上升
-            DJIMotorSetRef(loader, 300.0f * EMPTY_SPEEDUP_RATIO);
-        }
-        // 当模式不再是单发时, 复位状态机
-        if (!is_single_fire) {
-            fire_detector.state = FIRE_IDLE;
-            fire_detector.loader_locked = 0;
-            fire_trigger.trigger_consumed = 0;
-            fire_trigger.pending_fire = 0;
+            DJIMotorSetRef(loader, SF_FEED_SPEED);
+        } else {
+            // 确保停止
+            DJIMotorOuterLoop(loader, SPEED_LOOP);
+            DJIMotorSetRef(loader, 0);
         }
         break;
 
-    default:
-        // 异常状态恢复
-        fire_detector.state = FIRE_IDLE;
-        fire_detector.loader_locked = 0;
+    case SF_FEEDING:
+        // 监测掉速
+        if (IsFrictionDipping()) {
+            // 掉速 -> 立即反向制动
+            single_fire.state = SF_BRAKING;
+            single_fire.brake_start_time = current_time;
+
+            DJIMotorOuterLoop(loader, SPEED_LOOP);
+            DJIMotorSetRef(loader, SF_BRAKE_SPEED); // 反向
+        } else if ((current_time - single_fire.feed_start_time) > SF_FEED_TIMEOUT) {
+            // 超时 (缺弹或卡住) -> 回到空闲
+            single_fire.state = SF_IDLE;
+            single_fire.feed_timeout_count++;
+
+            DJIMotorOuterLoop(loader, SPEED_LOOP);
+            DJIMotorSetRef(loader, 0);
+        } else {
+            // 保持送弹
+            DJIMotorOuterLoop(loader, SPEED_LOOP);
+            DJIMotorSetRef(loader, SF_FEED_SPEED);
+        }
+        break;
+
+    case SF_BRAKING:
+        if ((current_time - single_fire.brake_start_time) > SF_BRAKE_TIME) {
+            // 制动结束 -> 进入冷却
+            single_fire.state = SF_COOLDOWN;
+            single_fire.cooldown_start_time = current_time;
+
+            // 停止电机
+            DJIMotorOuterLoop(loader, SPEED_LOOP);
+            DJIMotorSetRef(loader, 0);
+
+            // 计数
+            single_fire.fire_count++;
+        } else {
+            // 保持制动
+            DJIMotorOuterLoop(loader, SPEED_LOOP);
+            DJIMotorSetRef(loader, SF_BRAKE_SPEED);
+        }
+        break;
+
+    case SF_COOLDOWN:
+        // 冷却时间 80ms (参考原 SF_COOLDOWN_TIME 建议，这里直接用宏或硬编码)
+        if (current_time - single_fire.cooldown_start_time > 80) {
+            single_fire.state = SF_IDLE;
+        }
+        // 保持停止
+        DJIMotorOuterLoop(loader, SPEED_LOOP);
+        DJIMotorSetRef(loader, 0);
         break;
     }
 }
@@ -571,11 +502,6 @@ void ShootTask()
         DJIMotorEnable(loader);
     }
 
-    // 如果上一次触发单发或3发指令的时间加上不应期仍然大于当前时间(尚未休眠完毕),直接返回即可
-    // 单发模式主要提供给能量机关激活使用(以及英雄的射击大部分处于单发)
-    if (hibernate_time + dead_time > DWT_GetTimeline_ms())
-        return;
-
     // [新增] 堵转检测与自动反转处理
     // 该函数会在堵转时自动替换发射模式为反转/停止状态
     loader_mode_e actual_load_mode = HandleLoaderStall(shoot_cmd_recv.load_mode);
@@ -589,42 +515,47 @@ void ShootTask()
         // [新增] 当模式切换到STOP时, 复位触发状态, 允许下一次触发
         fire_trigger.trigger_consumed = 0;
         fire_trigger.pending_fire = 0;
+        // [新增] 复位单发状态机
+        single_fire.state = SF_IDLE;
         break;
-    // 单发模式,根据鼠标按下的时间,触发一次之后需要进入不响应输入的状态(否则按下的时间内可能多次进入,导致多次发射)
-    case LOAD_1_BULLET: // 激活能量机关/干扰对方用,英雄用.
-        // [新增] 边沿触发检测: 只有当上一次是LOAD_STOP时才响应
-        // 如果已经在单发状态,且触发已被消费,则不再重复响应
-        if (fire_trigger.last_mode != LOAD_1_BULLET && !fire_trigger.trigger_consumed) {
-            // 检测到上升沿 (LOAD_STOP -> LOAD_1_BULLET)，触发一次发射
-            DJIMotorOuterLoop(loader, ANGLE_LOOP); // 切换到角度环
-            DJIMotorSetRef(loader, loader->measure.total_angle + ONE_BULLET_DELTA_ANGLE);
-            fire_trigger.trigger_consumed = 1; // 标记触发已消费
-            fire_trigger.pending_fire = 1; // 标记有待处理的发射
-            hibernate_time = DWT_GetTimeline_ms();
-            dead_time = 150;
+    // 单发模式
+    case LOAD_1_BULLET:
+        // [新增] 边沿触发检测
+        {
+            uint8_t measure_trigger = 0;
+            // 只有当上一次是LOAD_STOP时才认为是新的触发
+            if (fire_trigger.last_mode != LOAD_1_BULLET && !fire_trigger.trigger_consumed) {
+                measure_trigger = 1;
+                fire_trigger.trigger_consumed = 1; // 标记消费
+            }
+            // 调用单发逻辑处理 (包含速度环控制和制动)
+            HandleSingleFire(measure_trigger);
         }
-        // 如果触发已被消费且发射已确认, 或者空仓, 都不再响应
-        // (拨盘控制由 fire_detector 状态机接管)
         break;
-    // 三连发,如果不需要后续可能删除
+    // 三连发
     case LOAD_3_BULLET:
-        DJIMotorOuterLoop(loader, ANGLE_LOOP); // 切换到速度环
-        DJIMotorSetRef(loader, loader->measure.total_angle + 3 * ONE_BULLET_DELTA_ANGLE); // 增加3发
-        hibernate_time = DWT_GetTimeline_ms(); // 记录触发指令的时间
-        dead_time = 300; // 完成3发弹丸发射的时间
+        if (hibernate_time + dead_time > DWT_GetTimeline_ms())
+            break;
+        DJIMotorOuterLoop(loader, ANGLE_LOOP);
+        DJIMotorSetRef(loader, loader->measure.total_angle + 3 * ONE_BULLET_DELTA_ANGLE);
+        hibernate_time = DWT_GetTimeline_ms();
+        dead_time = 300;
         break;
     // 二连发模式 (英雄专用)
     case LOAD_2_BULLET:
-        DJIMotorOuterLoop(loader, ANGLE_LOOP); // 切换到角度环
-        DJIMotorSetRef(loader, loader->measure.total_angle + 2 * ONE_BULLET_DELTA_ANGLE); // 增加2发
-        hibernate_time = DWT_GetTimeline_ms(); // 记录触发指令的时间
-        dead_time = 200; // 完成2发弹丸发射的时间
+        if (hibernate_time + dead_time > DWT_GetTimeline_ms())
+            break;
+        DJIMotorOuterLoop(loader, ANGLE_LOOP);
+        DJIMotorSetRef(loader, loader->measure.total_angle + 2 * ONE_BULLET_DELTA_ANGLE);
+        hibernate_time = DWT_GetTimeline_ms();
+        dead_time = 200;
         break;
-    // 连发模式,对速度闭环,射频后续修改为可变,目前固定为1Hz
+    // 连发模式
     case LOAD_BURSTFIRE:
+        // 在连发模式下复位单发标志位，确保切回单发时可立即触发一次
+        fire_trigger.trigger_consumed = 0;
         DJIMotorOuterLoop(loader, SPEED_LOOP);
         DJIMotorSetRef(loader, shoot_cmd_recv.shoot_rate * 360 * REDUCTION_RATIO_LOADER / 8);
-        // x颗/秒换算成速度: 已知一圈的载弹量,由此计算出1s需要转的角度,注意换算角速度(DJIMotor的速度单位是angle per second)
         break;
     // 拨盘反转,对速度闭环,后续增加卡弹检测(通过裁判系统剩余热量反馈和电机电流)
     // 也有可能需要从switch-case中独立出来
@@ -674,14 +605,10 @@ void ShootTask()
     // 更新调试信息
     UpdateDebugSpeed();
 
-    // [新增] 发射确认检测状态机
-    // 检测流程: 拨盘到位 -> 内圈掉速 -> 锁定拨盘 -> 速度回升 -> 确认发射
-    HandleFireDetection(actual_load_mode);
-
     // [新增] 更新反馈数据, 供外部模块订阅
-    shoot_feedback_data.bullet_fired_flag = fire_detector.bullet_fired_flag;
-    shoot_feedback_data.empty_flag = fire_detector.empty_flag;
-    shoot_feedback_data.fire_count = fire_detector.fire_count;
+    shoot_feedback_data.fire_count = single_fire.fire_count;
+    shoot_feedback_data.bullet_fired_flag = (single_fire.state == SF_COOLDOWN); // 简单映射
+    shoot_feedback_data.empty_flag = (single_fire.feed_timeout_count > 0);
 
     // 反馈数据,目前暂时没有要设定的反馈数据,后续可能增加应用离线监测以及卡弹反馈
     PubPushMessage(shoot_pub, (void *)&shoot_feedback_data);

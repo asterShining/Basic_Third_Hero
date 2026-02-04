@@ -45,18 +45,22 @@ typedef struct
 // // 检测到发射后重置偏移量 (回退到1发位置, 防止连发)
 // #define PRETENSION_RESET_OFFSET 1
 
+// ==================== 单发控制参数 ====================
+// 送弹速度 (deg/s), 中速稳定推弹, 给检测留足时间
+#define SF_FEED_SPEED 3200.0f
+// 制动速度 (deg/s), 负值反向制动, 抵消惯性防止第二颗进入
+#define SF_BRAKE_SPEED -600.0f
+// 制动持续时间 (ms), 反向制动的持续时长
+#define SF_BRAKE_TIME 50
+// 送弹超时时间 (ms), 超时未检测到掉速则认为缺弹或卡弹
+#define SF_FEED_TIMEOUT 9500
+
 // ==================== 发射确认检测参数 ====================
 // 掉速检测阈值 (deg/s), 内圈摩擦轮速度下降超过此值认为有弹丸通过
 // 使用内圈检测是因为弹丸先接触内圈, 信号更早, 能更有效防止多发
 #define FRICTION_SPEED_DIP_THRESHOLD 300.0f
 // 回升检测阈值 (deg/s), 与目标速度差小于此值认为回升完成
 #define FRICTION_SPEED_RECOVER_THRESHOLD 100.0f
-// 拨盘位置误差阈值 (deg), 小于此值认为拨盘到位
-#define LOADER_POSITION_THRESHOLD 8.0f
-// 发射确认超时时间 (ms), 等待摩擦轮掉速的最大时间
-#define FIRE_DETECT_TIMEOUT 300
-// 拨盘到位超时时间 (ms), 等待拨盘转到位的最大时间
-#define LOADER_ARRIVE_TIMEOUT 200
 
 // 堵转检测状态枚举
 typedef enum {
@@ -90,51 +94,43 @@ static struct {
     loader_mode_e saved_mode; // 保存的原发射模式
 } stall_handler = { 0 };
 
-// 发射确认状态枚举
-// 用于追踪单发弹丸从拨盘推出到摩擦轮检测的完整流程
+// ==================== 单发状态机 ====================
+// 简化的单发状态枚举 (基于机械限位 + 掉速检测)
 typedef enum {
-    FIRE_IDLE = 0, // 空闲/等待发射指令
-    FIRE_LOADING, // 拨盘正在旋转, 等待到位
-    FIRE_WAIT_DIP, // 拨盘已到位, 等待摩擦轮掉速
-    FIRE_WAIT_RECOVER, // 检测到掉速, 等待回升 (拨盘已锁定)
-    FIRE_CONFIRMED, // 发射确认成功
-    FIRE_EMPTY, // 缺弹 (拨盘到位但无掉速)
-} FireDetectState_e;
+    SF_IDLE = 0, // 空闲, 等待触发
+    SF_FEEDING, // 速度环送弹中, 监测摩擦轮掉速
+    SF_BRAKING, // 检测到掉速, 反向制动中
+    SF_COOLDOWN, // 制动完成, 冷却等待
+} SingleFireState_e;
 
-// [新增] 发射检测调试信息结构体 (全局可观测)
-// 用于在调试器中实时观测摩擦轮单发检测状态机的工作情况
+// 单发调试信息结构体 (全局可观测, 用于调试器实时监控)
 typedef struct {
-    FireDetectState_e state; // 当前发射检测状态机状态
-    float baseline_speed; // 发射前基准摩擦轮速度 (deg/s)
+    SingleFireState_e state; // 当前单发状态机状态
+    float baseline_speed; // 触发时记录的基准摩擦轮速度 (deg/s)
     float current_speed; // 当前内圈摩擦轮平均速度 (deg/s)
     float speed_diff; // 速度差 (baseline - current), 正值表示掉速
-    float loader_target_angle; // 拨盘目标角度 (deg)
-    float loader_actual_angle; // 拨盘实际角度 (deg)
-    float loader_error; // 拨盘位置误差 (deg)
-    uint8_t is_dipping; // 是否检测到掉速 (1=掉速中, 0=正常)
-    uint8_t is_recovered; // 速度是否回升 (1=已回升, 0=未回升)
-    uint8_t loader_locked; // 拨盘锁定标志 (1=锁定, 0=解锁)
-    uint8_t empty_flag; // 缺弹标志 (1=缺弹, 0=正常)
-    uint8_t trigger_consumed; // 触发是否已消费 (1=已消费)
-    uint16_t fire_count; // 已确认发射计数
-} FireDebug_s;
+    float loader_speed; // 拨盘当前速度 (deg/s)
+    float feed_start_time; // 送弹开始时间 (ms)
+    float brake_start_time; // 制动开始时间 (ms)
+    uint8_t is_dipping; // 是否检测到掉速 (1=掉速中)
+    uint8_t trigger_edge; // 是否检测到触发边沿 (1=边沿触发)
+    uint16_t fire_count; // 累计发射弹丸计数
+    uint16_t feed_timeout_count; // 送弹超时计数 (可能缺弹)
+} SingleFireDebug_s;
 
-// [新增] 全局发射检测调试变量声明 (可在调试器中观测)
-extern FireDebug_s fire_debug;
+// 全局单发调试变量声明 (可在调试器中观测)
+extern SingleFireDebug_s sf_debug;
 
-// 发射确认状态结构体
-// 用于管理发射检测状态机的所有运行时数据
+// 单发控制状态结构体 (运行时数据)
 static struct {
-    FireDetectState_e state; // 当前状态
-    float loader_target_angle; // 拨盘目标角度
-    float baseline_speed; // 发射前的基准摩擦轮速度 (deg/s)
-    float fire_start_time; // 开始发射的时间戳 (ms)
-    float loader_arrive_time; // 拨盘到位的时间戳 (ms)
-    uint8_t bullet_fired_flag; // 发射确认标志位 (1=已确认发射)
-    uint8_t empty_flag; // 缺弹标志位 (1=检测到缺弹)
-    uint8_t loader_locked; // 拨盘锁定标志 (防多发核心机制)
-    uint16_t fire_count; // 已确认发射计数
-} fire_detector = { 0 };
+    SingleFireState_e state; // 当前状态
+    float baseline_speed; // 触发时的基准摩擦轮速度
+    float feed_start_time; // 送弹开始时间戳 (ms)
+    float brake_start_time; // 制动开始时间戳 (ms)
+    float cooldown_start_time; // 冷却开始时间戳 (ms)
+    uint16_t fire_count; // 累计发射计数
+    uint16_t feed_timeout_count; // 送弹超时计数
+} single_fire = { 0 };
 
 // ==================== 单发触发边沿检测 ====================
 // 用于确保每次触发只响应一次，防止持续按住导致多发
@@ -146,9 +142,6 @@ typedef struct {
 
 static FireTrigger_s fire_trigger = { .last_mode = LOAD_STOP, .trigger_consumed = 0, .pending_fire = 0 };
 
-// 空仓加速参数
-#define EMPTY_SPEEDUP_RATIO 1.5f // 空仓状态下加速倍率
-#define EMPTY_RETRY_ANGLE (ONE_BULLET_DELTA_ANGLE * 0.5f) // 空仓时继续推进的角度
 /**
  * @brief 发射初始化,会被RobotInit()调用
  *
