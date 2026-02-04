@@ -11,6 +11,9 @@
 static float current_inner_deg = 0.0f;
 static float current_outer_deg = 0.0f;
 
+// [新增] 摩擦轮前馈电流变量 (供所有摩擦轮电机共用)
+static float friction_feedforward = 0.0f;
+
 static DJIMotorInstance *loader; // 拨盘电机
 static DJIMotorInstance *friction_inner_down, *friction_inner_left, *friction_inner_right; // 内部摩擦轮电机
 static DJIMotorInstance *friction_outer_down, *friction_outer_left, *friction_outer_right; // 外部摩擦轮电机
@@ -21,13 +24,14 @@ static Shoot_Ctrl_Cmd_s shoot_cmd_recv; // 来自cmd的发射控制信息
 static Subscriber_t *shoot_sub;
 static Shoot_Upload_Data_s shoot_feedback_data; // 来自cmd的发射控制信息
 
-ShootDebugSpeed_s shoot_debug_speed;
-
 // [新增] 全局堵转调试变量定义 (用于调试器实时观测堵转状态机状态)
 StallDebug_s stall_debug = { 0 };
 
 // [新增] 全局单发调试变量定义 (用于调试器实时观测单发状态机状态)
 SingleFireDebug_s sf_debug = { 0 };
+
+// [新增] 全局摩擦轮调试变量
+FrictionWheelDebug_s friction_debug = { 0 };
 
 // dwt定时,计算冷却用
 static float hibernate_time = 0, dead_time = 0;
@@ -41,13 +45,15 @@ void ShootInit()
         },
         .controller_param_init_config = {
             .speed_PID = {
-                .Kp = 7.2, // 20
-                .Ki = 1, // 1
+                .Kp = 10.3, // 10.3
+                .Ki = 1.3, // 1.3
                 .Kd = 0,
                 .Improve = PID_Integral_Limit,
                 .IntegralLimit = 10000,
                 .MaxOut = 16000,
             },
+            // [新增] 关联前馈变量指针
+            .current_feedforward_ptr = &friction_feedforward,
         },
         .controller_setting_init_config = {
             .angle_feedback_source = MOTOR_FEED,
@@ -55,6 +61,8 @@ void ShootInit()
 
             .outer_loop_type = SPEED_LOOP,
             .close_loop_type = SPEED_LOOP,
+            // [新增] 启用电流前馈
+            .feedforward_flag = CURRENT_FEEDFORWARD,
         },
         .motor_type = M3508
     };
@@ -65,14 +73,15 @@ void ShootInit()
         },
         .controller_param_init_config = {
             .speed_PID = {
-                .Kp = 8,
-                .Ki = 1,
+                .Kp = 10.3, // 8
+                .Ki = 1.3, // 1
                 .Kd = 0,
                 .Improve = PID_Integral_Limit,
                 .IntegralLimit = 10000,
                 .MaxOut = 16000,
             },
-
+            // [新增] 关联前馈变量指针
+            .current_feedforward_ptr = &friction_feedforward,
         },
         .controller_setting_init_config = {
             .angle_feedback_source = MOTOR_FEED,
@@ -80,6 +89,8 @@ void ShootInit()
 
             .outer_loop_type = SPEED_LOOP,
             .close_loop_type = SPEED_LOOP,
+            // [新增] 启用电流前馈
+            .feedforward_flag = CURRENT_FEEDFORWARD,
         },
         .motor_type = M3508
     };
@@ -117,19 +128,19 @@ void ShootInit()
         .controller_param_init_config = {
             .angle_PID = {
                 // 如果启用位置环来控制发弹,需要较大的I值保证输出力矩的线性度否则出现接近拨出的力矩大幅下降
-                .Kp = 6.3, // 10
+                .Kp = 5.3, // 10
                 .Ki = 0.0,
-                .Kd = 0,
-                .MaxOut = 13000, // 角度环输出限幅 (deg/s), 提高以允许更大力矩
+                .Kd = 0.01,
+                .MaxOut = 9000, // 角度环输出限幅 (deg/s), 提高以允许更大力矩
 
             },
             .speed_PID = {
-                .Kp = 5.6, // 10
-                .Ki = 1.0, // 1
+                .Kp = 3.4, // 10
+                .Ki = 0.9, // 1
                 .Kd = 0.0,
                 .Improve = PID_Integral_Limit,
-                .IntegralLimit = 5000,
-                .MaxOut = 14000,
+                .IntegralLimit = 7000,
+                .MaxOut = 15000,
             },
 
         },
@@ -150,15 +161,34 @@ void ShootInit()
 /**
  * @brief 辅助函数：将线速度转换为角速度
  */
+/**
+ * @brief 辅助函数：将线速度转换为角速度 (m/s -> deg/s)
+ */
 float SpeedMps2Degs(float speed_mps)
 {
-    if (speed_mps <= 0.0f)
+    if (speed_mps == 0.0f)
         return 0.0f;
+
+    // 限制最大输入，防止异常值
     if (speed_mps > 20.0f)
-        speed_mps = 20.0f; // 安全限幅
+        speed_mps = 20.0f;
+    if (speed_mps < -20.0f)
+        speed_mps = -20.0f;
 
     // 公式: (线速度 / 半径) * (180/PI) * 补偿系数
+    // v = w * r  =>  w = v / r
     return (speed_mps / FRICTION_WHEEL_RADIUS) * RAD_2_DEGREE * SLIP_COMPENSATION;
+}
+
+/**
+ * @brief 辅助函数：将角速度转换为线速度 (deg/s -> m/s)
+ * @note 不包含打滑补偿，反映电机轴的理论线速度
+ */
+float SpeedAps2Mps(float speed_aps)
+{
+    // 公式: (角速度 / (180/PI)) * 半径
+    // v = w * r
+    return (speed_aps / RAD_2_DEGREE) * FRICTION_WHEEL_RADIUS;
 }
 
 /**
@@ -206,26 +236,24 @@ void ShootSetSpeedDual(float inner_mps, float outer_mps)
  * @brief 将电机反馈的角速度(deg/s)转换为线速度(m/s)用于调试
  * @note 不包含打滑补偿，反映的是摩擦轮表面的物理线速度
  */
-static void UpdateDebugSpeed(void)
+/**
+ * @brief 更新调试数据 (将电机反馈的角速度转换为线速度)
+ */
+static void UpdateFrictionDebugInfo(void)
 {
-// 定义局部宏简化代码
-#define CALC_MPS(motor) ((motor->measure.speed_aps / RAD_2_DEGREE) * FRICTION_WHEEL_RADIUS)
-
-    // 注意：这里保留了正负号，方便观察电机是否反转。
-    // 如果你只想看数值大小，可以使用 fabsf() 函数取绝对值。
     if (friction_inner_left)
-        shoot_debug_speed.inner_left = CALC_MPS(friction_inner_left);
+        friction_debug.inner_left_mps = SpeedAps2Mps(friction_inner_left->measure.speed_aps);
     if (friction_inner_right)
-        shoot_debug_speed.inner_right = CALC_MPS(friction_inner_right);
+        friction_debug.inner_right_mps = SpeedAps2Mps(friction_inner_right->measure.speed_aps);
     if (friction_inner_down)
-        shoot_debug_speed.inner_down = CALC_MPS(friction_inner_down);
+        friction_debug.inner_down_mps = SpeedAps2Mps(friction_inner_down->measure.speed_aps);
 
     if (friction_outer_left)
-        shoot_debug_speed.outer_left = CALC_MPS(friction_outer_left);
+        friction_debug.outer_left_mps = SpeedAps2Mps(friction_outer_left->measure.speed_aps);
     if (friction_outer_right)
-        shoot_debug_speed.outer_right = CALC_MPS(friction_outer_right);
+        friction_debug.outer_right_mps = SpeedAps2Mps(friction_outer_right->measure.speed_aps);
     if (friction_outer_down)
-        shoot_debug_speed.outer_down = CALC_MPS(friction_outer_down);
+        friction_debug.outer_down_mps = SpeedAps2Mps(friction_outer_down->measure.speed_aps);
 }
 
 /**
@@ -269,15 +297,39 @@ static float GetInnerFrictionAvgSpeed(void)
 }
 
 /**
+ * @brief 获取外圈摩擦轮平均速度 (deg/s)
+ * @return 三个外圈摩擦轮速度的平均绝对值
+ */
+static float GetOuterFrictionAvgSpeed(void)
+{
+    float avg = (fabsf(friction_outer_left->measure.speed_aps) +
+                 fabsf(friction_outer_right->measure.speed_aps) +
+                 fabsf(friction_outer_down->measure.speed_aps)) /
+                3.0f;
+    return avg;
+}
+
+/**
  * @brief 检测内圈摩擦轮是否发生掉速
  * @return 1 表示检测到掉速 (有弹丸通过), 0 表示正常
  * @note 通过与发射前记录的基准速度对比来判断是否掉速
  */
+/**
+ * @brief 检测摩擦轮是否发生掉速 (双重检测: 内圈 OR 外圈)
+ * @return 1 表示检测到掉速, 0 表示正常
+ */
 static uint8_t IsFrictionDipping(void)
 {
-    float current_speed = GetInnerFrictionAvgSpeed();
-    // 与基准速度对比, 下降超过阈值则认为掉速 (有弹丸正在通过)
-    return (single_fire.baseline_speed - current_speed) > FRICTION_SPEED_DIP_THRESHOLD;
+    float current_inner = GetInnerFrictionAvgSpeed();
+    float current_outer = GetOuterFrictionAvgSpeed();
+
+    // 内圈掉速判断
+    uint8_t inner_dip = (single_fire.baseline_speed - current_inner) > FRICTION_SPEED_DIP_THRESHOLD;
+    // 外圈掉速判断
+    uint8_t outer_dip = (single_fire.outer_baseline_speed - current_outer) > FRICTION_SPEED_DIP_THRESHOLD;
+
+    // 只要有任意一级出现明显掉速, 即认为弹丸正在通过
+    return inner_dip || outer_dip;
 }
 
 /**
@@ -391,11 +443,13 @@ static void HandleSingleFire(uint8_t trigger_active)
     // [新增] 更新全局调试变量
     sf_debug.state = single_fire.state;
     sf_debug.baseline_speed = single_fire.baseline_speed;
+    sf_debug.outer_baseline_speed = single_fire.outer_baseline_speed; // [新增]
     sf_debug.current_speed = GetInnerFrictionAvgSpeed();
+    sf_debug.current_outer_speed = GetOuterFrictionAvgSpeed(); // [新增]
     // sf_debug.speed_diff = single_fire.baseline_speed - sf_debug.current_speed; // 放在下面计算
     sf_debug.loader_speed = loader->measure.speed_aps;
-    sf_debug.is_dipping = IsFrictionDipping(); // 使用 single_fire.baseline_speed
-    sf_debug.speed_diff = single_fire.baseline_speed - sf_debug.current_speed;
+    sf_debug.is_dipping = IsFrictionDipping(); // 使用更新后的双重检测逻辑
+    sf_debug.speed_diff = single_fire.baseline_speed - sf_debug.current_speed; // 仅显示内圈差值作参考
     sf_debug.trigger_edge = trigger_active;
     sf_debug.fire_count = single_fire.fire_count;
     sf_debug.feed_timeout_count = single_fire.feed_timeout_count;
@@ -405,10 +459,14 @@ static void HandleSingleFire(uint8_t trigger_active)
     switch (single_fire.state) {
     case SF_IDLE:
         if (trigger_active) {
-            // 触发: 记录基准速度,进入送弹
+            // 触发: 记录双重基准速度,进入送弹
             single_fire.baseline_speed = GetInnerFrictionAvgSpeed();
+            single_fire.outer_baseline_speed = GetOuterFrictionAvgSpeed();
             single_fire.feed_start_time = current_time;
             single_fire.state = SF_FEEDING;
+
+            // 复位前馈 (以防万一)
+            friction_feedforward = 0.0f;
 
             // 速度环 - 中速送弹
             DJIMotorOuterLoop(loader, SPEED_LOOP);
@@ -421,11 +479,33 @@ static void HandleSingleFire(uint8_t trigger_active)
         break;
 
     case SF_FEEDING:
-        // 监测掉速
+        // [新增] 前馈控制逻辑
+        // 在送弹初期的短时间内, 注入额外电流
+        if ((current_time - single_fire.feed_start_time) < FRICTION_FEEDFORWARD_TIME) {
+            friction_feedforward = FRICTION_FEEDFORWARD_CURRENT;
+        } else {
+            friction_feedforward = 0.0f;
+        }
+
+        // [新增] 动态基准逻辑 (Peak Hold) - 双重
+        // 如果电机因为前馈加速了, 基准线也要跟着涨, 否则检测不到掉速
+        float current_inner = GetInnerFrictionAvgSpeed();
+        if (current_inner > single_fire.baseline_speed) {
+            single_fire.baseline_speed = current_inner;
+        }
+        float current_outer = GetOuterFrictionAvgSpeed();
+        if (current_outer > single_fire.outer_baseline_speed) {
+            single_fire.outer_baseline_speed = current_outer;
+        }
+
+        // 监测掉速 (IsFrictionDipping 已更新为双重检测)
         if (IsFrictionDipping()) {
             // 掉速 -> 立即反向制动
             single_fire.state = SF_BRAKING;
             single_fire.brake_start_time = current_time;
+
+            // 立即停止前馈
+            friction_feedforward = 0.0f;
 
             DJIMotorOuterLoop(loader, SPEED_LOOP);
             DJIMotorSetRef(loader, SF_BRAKE_SPEED); // 反向
@@ -433,6 +513,9 @@ static void HandleSingleFire(uint8_t trigger_active)
             // 超时 (缺弹或卡住) -> 回到空闲
             single_fire.state = SF_IDLE;
             single_fire.feed_timeout_count++;
+
+            // 停止前馈
+            friction_feedforward = 0.0f;
 
             DJIMotorOuterLoop(loader, SPEED_LOOP);
             DJIMotorSetRef(loader, 0);
@@ -574,9 +657,13 @@ void ShootTask()
     // [新增] 更新上一次的发射模式, 用于下一次边沿检测
     fire_trigger.last_mode = actual_load_mode;
 
-    // 确定是否开启摩擦轮,后续可能修改为键鼠模式下始终开启摩擦轮(上场时建议一直开启)
-    if (shoot_cmd_recv.friction_mode == FRICTION_ON) {
-        // 示例：根据不同的模式设置不同的分级速度
+    // [修改] 摩擦轮控制逻辑 (包含调试覆盖)
+    // 优先级: 调试覆盖 > 正常指令
+    if (friction_debug.override_enable) {
+        // 调试模式: 直接使用 debug 结构体中的目标速度
+        ShootSetSpeedDual(friction_debug.target_inner_mps, friction_debug.target_outer_mps);
+    } else if (shoot_cmd_recv.friction_mode == FRICTION_ON) {
+        // 正常模式: 根据不同的弹速等级设置不同的分级速度
         switch (shoot_cmd_recv.bullet_speed) {
         case BIG_AMU_12:
             // 目标12m/s：一级给11.5，二级给12.0
@@ -587,7 +674,7 @@ void ShootTask()
             ShootSetSpeedDual(16.0f, 16.5f);
             break;
         default:
-            // 调试默认值 (可以根据你的串口调试实时修改这两个值)
+            // 默认值
             ShootSetSpeedDual(15.5f, 15.8f);
             break;
         }
@@ -602,8 +689,8 @@ void ShootTask()
     } else if (shoot_cmd_recv.lid_mode == LID_OPEN) {
         //...
     }
-    // 更新调试信息
-    UpdateDebugSpeed();
+    // 更新调试反馈信息
+    UpdateFrictionDebugInfo();
 
     // [新增] 更新反馈数据, 供外部模块订阅
     shoot_feedback_data.fire_count = single_fire.fire_count;

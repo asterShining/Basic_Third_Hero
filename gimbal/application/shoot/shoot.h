@@ -6,22 +6,35 @@
 
 typedef struct
 {
-    float inner_left; // 内圈左 (m/s)
-    float inner_right; // 内圈右 (m/s)
-    float inner_down; // 内圈下 (m/s)
-    float outer_left; // 外圈左 (m/s)
-    float outer_right; // 外圈右 (m/s)
-    float outer_down; // 外圈下 (m/s)
-} ShootDebugSpeed_s;
+    // 控制部分 (Debug Control)
+    uint8_t override_enable; // [调试] 开启手动覆盖模式 (1=开启, 0=关闭)
+    float target_inner_mps; // [调试] 手动设置内圈目标线速度 (m/s)
+    float target_outer_mps; // [调试] 手动设置外圈目标线速度 (m/s)
+
+    // 反馈部分 (Feedback)
+    float inner_left_mps; // 内圈左实际线速度 (m/s)
+    float inner_right_mps; // 内圈右实际线速度 (m/s)
+    float inner_down_mps; // 内圈下实际线速度 (m/s)
+    float outer_left_mps; // 外圈左实际线速度 (m/s)
+    float outer_right_mps; // 外圈右实际线速度 (m/s)
+    float outer_down_mps; // 外圈下实际线速度 (m/s)
+} FrictionWheelDebug_s;
+
+// 全局摩擦轮调试变量 (可在调试器中观测和修改)
+extern FrictionWheelDebug_s friction_debug;
 // 摩擦轮半径 (单位: 米), 例如 30mm = 0.03m
 #define FRICTION_WHEEL_RADIUS 0.03f
 // 打滑补偿系数 (需要实测微调, 通常在 1.0 - 1.2 之间)
-#define SLIP_COMPENSATION 1.05f
+#define SLIP_COMPENSATION 1.03f
 
 // [新增] 摩擦轮软启动步长 (deg/loop)
 // 假设 200Hz 控制频率，15m/s (约28000dps)
 // 设为 150.0f 表示约 1秒 达到满速
 #define FRICTION_RAMP_STEP 150.0f
+
+// [新增] 摩擦轮前馈控制参数
+#define FRICTION_FEEDFORWARD_CURRENT 2000 // 前馈电流值
+#define FRICTION_FEEDFORWARD_TIME 100 // 前馈持续时间 (ms)
 
 // ==================== 堵转检测参数 ====================
 // 堵转检测电流阈值 (raw值, M3508满量程16384, 设为 ~80% 高阈值使堵转处理更激烈)
@@ -58,7 +71,7 @@ typedef struct
 // ==================== 发射确认检测参数 ====================
 // 掉速检测阈值 (deg/s), 内圈摩擦轮速度下降超过此值认为有弹丸通过
 // 使用内圈检测是因为弹丸先接触内圈, 信号更早, 能更有效防止多发
-#define FRICTION_SPEED_DIP_THRESHOLD 300.0f
+#define FRICTION_SPEED_DIP_THRESHOLD 800.0f
 // 回升检测阈值 (deg/s), 与目标速度差小于此值认为回升完成
 #define FRICTION_SPEED_RECOVER_THRESHOLD 100.0f
 
@@ -106,8 +119,10 @@ typedef enum {
 // 单发调试信息结构体 (全局可观测, 用于调试器实时监控)
 typedef struct {
     SingleFireState_e state; // 当前单发状态机状态
-    float baseline_speed; // 触发时记录的基准摩擦轮速度 (deg/s)
+    float baseline_speed; // 触发时记录的基准摩擦轮速度 (deg/s) (内圈)
+    float outer_baseline_speed; // 触发时记录的基准摩擦轮速度 (deg/s) (外圈)
     float current_speed; // 当前内圈摩擦轮平均速度 (deg/s)
+    float current_outer_speed; // [新增] 当前外圈摩擦轮平均速度 (deg/s)
     float speed_diff; // 速度差 (baseline - current), 正值表示掉速
     float loader_speed; // 拨盘当前速度 (deg/s)
     float feed_start_time; // 送弹开始时间 (ms)
@@ -124,7 +139,8 @@ extern SingleFireDebug_s sf_debug;
 // 单发控制状态结构体 (运行时数据)
 static struct {
     SingleFireState_e state; // 当前状态
-    float baseline_speed; // 触发时的基准摩擦轮速度
+    float baseline_speed; // 触发时的基准摩擦轮速度 (内圈)
+    float outer_baseline_speed; // [新增] 触发时的基准摩擦轮速度 (外圈)
     float feed_start_time; // 送弹开始时间戳 (ms)
     float brake_start_time; // 制动开始时间戳 (ms)
     float cooldown_start_time; // 冷却开始时间戳 (ms)
