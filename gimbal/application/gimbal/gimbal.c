@@ -54,7 +54,7 @@ void GimbalInit()
         },
         .controller_param_init_config = {
             .angle_PID = {
-                .Kp = 0.72, // 0.52
+                .Kp = 0.71, // 0.72
                 .Ki = 0,
                 .Kd = 0,
 
@@ -64,8 +64,8 @@ void GimbalInit()
                 .MaxOut = 20,
             },
             .speed_PID = {
-                .Kp = 2.1, // 1.2
-                .Ki = 0.1, // 0.1
+                .Kp = 2.1, // 2.1
+                .Ki = 0.23, // 0.1
                 .Kd = 0,
                 .Improve = PID_Trapezoid_Intergral | PID_Integral_Limit | PID_Derivative_On_Measurement,
                 .IntegralLimit = 3,
@@ -93,7 +93,7 @@ void GimbalInit()
         },
         .controller_param_init_config = {
             .angle_PID = {
-                .Kp = 0.68,
+                .Kp = 0.72,
                 .Ki = 0.0,
                 .Kd = 0.0,
                 .DeadBand = 0.0,
@@ -103,7 +103,7 @@ void GimbalInit()
             },
             .speed_PID = {
                 // 此处为速度环参数，均为负数
-                .Kp = -6.34,
+                .Kp = -6.54,
                 .Ki = -0.23,
                 .Kd = 0, // 0
                 .Improve = PID_Trapezoid_Intergral | PID_Integral_Limit | PID_Derivative_On_Measurement,

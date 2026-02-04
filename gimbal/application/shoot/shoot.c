@@ -8,7 +8,6 @@
 #include "bsp_dwt.h"
 #include "general_def.h"
 
-
 static float current_inner_deg = 0.0f;
 static float current_outer_deg = 0.0f;
 
@@ -25,6 +24,9 @@ static Shoot_Upload_Data_s shoot_feedback_data; // 来自cmd的发射控制信�
 
 ShootDebugSpeed_s shoot_debug_speed;
 
+// [新增] 全局堵转调试变量定义 (用于调试器实时观测堵转状态机状态)
+StallDebug_s stall_debug = { 0 };
+
 // dwt定时,计算冷却用
 static float hibernate_time = 0, dead_time = 0;
 
@@ -37,7 +39,7 @@ void ShootInit()
         },
         .controller_param_init_config = {
             .speed_PID = {
-                .Kp = 10, // 20
+                .Kp = 7.2, // 20
                 .Ki = 1, // 1
                 .Kd = 0,
                 .Improve = PID_Integral_Limit,
@@ -113,14 +115,16 @@ void ShootInit()
         .controller_param_init_config = {
             .angle_PID = {
                 // 如果启用位置环来控制发弹,需要较大的I值保证输出力矩的线性度否则出现接近拨出的力矩大幅下降
-                .Kp = 2.2, // 10
-                .Ki = 0,
+                // [修改] 提高MaxOut和IntegralLimit以避免卡弹时输出力矩不足 (原值400/200)
+                .Kp = 6.3, // 10
+                .Ki = 12.5,
                 .Kd = 0,
-                .MaxOut = 400,
+                .MaxOut = 5000, // 角度环输出限幅 (deg/s), 提高以允许更大力矩
+                .IntegralLimit = 2500, // 积分限幅, 相应提高避免积分饱和
             },
             .speed_PID = {
-                .Kp = 6.5, // 10
-                .Ki = 0.9, // 1
+                .Kp = 5.6, // 10
+                .Ki = 1.0, // 1
                 .Kd = 0.0,
                 .Improve = PID_Integral_Limit,
                 .IntegralLimit = 5000,
@@ -238,8 +242,13 @@ static uint8_t IsLoaderStalled(void)
                           loader->measure.speed_aps :
                           -loader->measure.speed_aps;
 
-    return (current_abs > STALL_CURRENT_THRESHOLD) &&
-           (speed_abs < STALL_SPEED_THRESHOLD);
+    // [新增] 更新全局调试变量的电流和速度信息 (供调试器实时观测)
+    stall_debug.current_abs = current_abs;
+    stall_debug.speed_abs = speed_abs;
+    stall_debug.is_stalled = (current_abs > STALL_CURRENT_THRESHOLD) &&
+                             (speed_abs < STALL_SPEED_THRESHOLD);
+
+    return stall_debug.is_stalled;
 }
 
 /**
@@ -320,6 +329,13 @@ static loader_mode_e HandleLoaderStall(loader_mode_e current_mode)
                           (current_mode == LOAD_3_BULLET) ||
                           (current_mode == LOAD_BURSTFIRE);
 
+// [新增] 宏定义: 返回前统一更新调试状态 (避免代码重复)
+#define RETURN_WITH_DEBUG(mode)                  \
+    do {                                         \
+        stall_debug.state = stall_handler.state; \
+        return (mode);                           \
+    } while (0)
+
     switch (stall_handler.state) {
     case STALL_NORMAL:
         // 正常状态: 检测是否进入堵转
@@ -333,14 +349,14 @@ static loader_mode_e HandleLoaderStall(loader_mode_e current_mode)
         if (current_mode == LOAD_REVERSE || current_mode == LOAD_STOP) {
             stall_handler.reverse_count = 0;
         }
-        return current_mode; // 正常模式不修改
+        RETURN_WITH_DEBUG(current_mode); // 正常模式不修改
 
     case STALL_DETECTING:
         // 消抖阶段: 持续检测堵转状态
         if (!IsLoaderStalled()) {
             // 堵转消失,恢复正常
             stall_handler.state = STALL_NORMAL;
-            return current_mode;
+            RETURN_WITH_DEBUG(current_mode);
         }
         // 检查是否超过消抖时间
         if ((current_time - stall_handler.detect_start_time) >= STALL_DETECT_TIME) {
@@ -350,11 +366,15 @@ static loader_mode_e HandleLoaderStall(loader_mode_e current_mode)
             stall_handler.reverse_target_angle = loader->measure.total_angle - REVERSE_ANGLE;
             stall_handler.reverse_count++;
 
+            // [新增] 更新全局调试变量的反转信息
+            stall_debug.reverse_count = stall_handler.reverse_count;
+            stall_debug.reverse_target_angle = stall_handler.reverse_target_angle;
+
             // 设定反转目标角度 (在 ShootTask 的 switch 之前生效)
             DJIMotorOuterLoop(loader, ANGLE_LOOP);
             DJIMotorSetRef(loader, stall_handler.reverse_target_angle);
         }
-        return current_mode; // 消抖中暂不修改
+        RETURN_WITH_DEBUG(current_mode); // 消抖中暂不修改
 
     case STALL_REVERSING:
         // 反转阶段: 等待反转完成
@@ -364,7 +384,7 @@ static loader_mode_e HandleLoaderStall(loader_mode_e current_mode)
             stall_handler.recovery_start_time = current_time;
         }
         // 返回 LOAD_STOP 跳过正常的发射逻辑,由状态机控制电机
-        return LOAD_STOP;
+        RETURN_WITH_DEBUG(LOAD_STOP);
 
     case STALL_RECOVERY:
         // 恢复阶段: 等待稳定后恢复发射
@@ -374,18 +394,21 @@ static loader_mode_e HandleLoaderStall(loader_mode_e current_mode)
                 // 连续反转达到上限,停止发射,需要人工干预
                 stall_handler.state = STALL_NORMAL;
                 stall_handler.reverse_count = 0;
-                return LOAD_STOP; // 返回停止,等待新指令
+                RETURN_WITH_DEBUG(LOAD_STOP); // 返回停止,等待新指令
             }
             // 恢复正常状态,继续之前的发射模式
             stall_handler.state = STALL_NORMAL;
-            return stall_handler.saved_mode;
+            RETURN_WITH_DEBUG(stall_handler.saved_mode);
         }
-        return LOAD_STOP; // 恢复期也返回 STOP
+        RETURN_WITH_DEBUG(LOAD_STOP); // 恢复期也返回 STOP
 
     default:
         stall_handler.state = STALL_NORMAL;
-        return current_mode;
+        RETURN_WITH_DEBUG(current_mode);
     }
+
+// 取消宏定义, 避免污染全局命名空间
+#undef RETURN_WITH_DEBUG
 }
 
 /**
@@ -463,14 +486,35 @@ static void HandleFireDetection(loader_mode_e load_mode)
         break;
 
     case FIRE_CONFIRMED:
+        // 发射成功确认: 立即复位状态机和触发标志, 等待下一次新触发
+        fire_detector.state = FIRE_IDLE;
+        fire_detector.bullet_fired_flag = 0;
+        fire_detector.loader_locked = 0;
+        // [新增] 复位触发标志, 允许用户下一次触发
+        fire_trigger.trigger_consumed = 0;
+        fire_trigger.pending_fire = 0;
+        break;
+
     case FIRE_EMPTY:
-        // 终态: 等待状态复位
-        // 当不再是单发模式时 (如切换到 LOAD_STOP), 复位状态机准备下一次检测
+        // 空仓/上弹状态: 加速拨盘继续推进, 直到检测到摩擦轮掉速
+        // [新增] 空仓加速逻辑: 继续推进拨盘, 尝试将弹丸推到摩擦轮
+        if (IsFrictionDipping()) {
+            // 检测到掉速, 说明弹丸已到达摩擦轮, 进入等待回升状态
+            fire_detector.state = FIRE_WAIT_RECOVER;
+            fire_detector.loader_locked = 1;
+            fire_detector.empty_flag = 0; // 清除空仓标志
+        } else {
+            // 继续加速推进拨盘 (使用速度环加速)
+            DJIMotorOuterLoop(loader, SPEED_LOOP);
+            // 使用较高速度推进, 加速弹丸上升
+            DJIMotorSetRef(loader, 300.0f * EMPTY_SPEEDUP_RATIO);
+        }
+        // 当模式不再是单发时, 复位状态机
         if (!is_single_fire) {
             fire_detector.state = FIRE_IDLE;
-            fire_detector.bullet_fired_flag = 0;
             fire_detector.loader_locked = 0;
-            // empty_flag 保持, 需要通过 ShootClearEmptyFlag() 手动复位
+            fire_trigger.trigger_consumed = 0;
+            fire_trigger.pending_fire = 0;
         }
         break;
 
@@ -525,13 +569,25 @@ void ShootTask()
     case LOAD_STOP:
         DJIMotorOuterLoop(loader, SPEED_LOOP); // 切换到速度环
         DJIMotorSetRef(loader, 0); // 同时设定参考值为0,这样停止的速度最快
+        // [新增] 当模式切换到STOP时, 复位触发状态, 允许下一次触发
+        fire_trigger.trigger_consumed = 0;
+        fire_trigger.pending_fire = 0;
         break;
     // 单发模式,根据鼠标按下的时间,触发一次之后需要进入不响应输入的状态(否则按下的时间内可能多次进入,导致多次发射)
     case LOAD_1_BULLET: // 激活能量机关/干扰对方用,英雄用.
-        DJIMotorOuterLoop(loader, ANGLE_LOOP); // 切换到角度环
-        DJIMotorSetRef(loader, loader->measure.total_angle + ONE_BULLET_DELTA_ANGLE); // 控制量增加一发弹丸的角度
-        hibernate_time = DWT_GetTimeline_ms(); // 记录触发指令的时间
-        dead_time = 150; // 完成1发弹丸发射的时间
+        // [新增] 边沿触发检测: 只有当上一次是LOAD_STOP时才响应
+        // 如果已经在单发状态,且触发已被消费,则不再重复响应
+        if (fire_trigger.last_mode != LOAD_1_BULLET && !fire_trigger.trigger_consumed) {
+            // 检测到上升沿 (LOAD_STOP -> LOAD_1_BULLET)，触发一次发射
+            DJIMotorOuterLoop(loader, ANGLE_LOOP); // 切换到角度环
+            DJIMotorSetRef(loader, loader->measure.total_angle + ONE_BULLET_DELTA_ANGLE);
+            fire_trigger.trigger_consumed = 1; // 标记触发已消费
+            fire_trigger.pending_fire = 1; // 标记有待处理的发射
+            hibernate_time = DWT_GetTimeline_ms();
+            dead_time = 150;
+        }
+        // 如果触发已被消费且发射已确认, 或者空仓, 都不再响应
+        // (拨盘控制由 fire_detector 状态机接管)
         break;
     // 三连发,如果不需要后续可能删除
     case LOAD_3_BULLET:
@@ -566,6 +622,9 @@ void ShootTask()
         while (1)
             ; // 未知模式,停止运行,检查指针越界,内存溢出等问题
     }
+
+    // [新增] 更新上一次的发射模式, 用于下一次边沿检测
+    fire_trigger.last_mode = actual_load_mode;
 
     // 确定是否开启摩擦轮,后续可能修改为键鼠模式下始终开启摩擦轮(上场时建议一直开启)
     if (shoot_cmd_recv.friction_mode == FRICTION_ON) {
@@ -609,43 +668,4 @@ void ShootTask()
 
     // 反馈数据,目前暂时没有要设定的反馈数据,后续可能增加应用离线监测以及卡弹反馈
     PubPushMessage(shoot_pub, (void *)&shoot_feedback_data);
-}
-
-/**
- * @brief 获取发射确认标志
- * @return 1 表示最近一次发射已确认, 0 表示未确认
- * @note 该标志在每次发射确认后置位, 在下一次发射开始时清除
- */
-uint8_t ShootGetFiredFlag(void)
-{
-    return fire_detector.bullet_fired_flag;
-}
-
-/**
- * @brief 获取缺弹标志
- * @return 1 表示检测到缺弹, 0 表示正常
- * @note 该标志需要通过 ShootClearEmptyFlag() 手动清除
- */
-uint8_t ShootGetEmptyFlag(void)
-{
-    return fire_detector.empty_flag;
-}
-
-/**
- * @brief 清除缺弹标志
- * @note 在补充弹药后调用此函数以复位缺弹状态
- */
-void ShootClearEmptyFlag(void)
-{
-    fire_detector.empty_flag = 0;
-}
-
-/**
- * @brief 获取已确认发射计数
- * @return 累计确认发射的弹丸数量
- * @note 该计数从开机后累加, 不会自动清零
- */
-uint16_t ShootGetFireCount(void)
-{
-    return fire_detector.fire_count;
 }

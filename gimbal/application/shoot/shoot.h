@@ -24,8 +24,8 @@ typedef struct
 #define FRICTION_RAMP_STEP 150.0f
 
 // ==================== 堵转检测参数 ====================
-// 堵转检测电流阈值 (raw值, M3508满量程16384, 设为 ~60% 为稳妥值)
-#define STALL_CURRENT_THRESHOLD 10000
+// 堵转检测电流阈值 (raw值, M3508满量程16384, 设为 ~80% 高阈值使堵转处理更激烈)
+#define STALL_CURRENT_THRESHOLD 13000
 // 堵转检测速度阈值 (deg/s), 低于此值且电流高则判定为堵转
 #define STALL_SPEED_THRESHOLD 100.0f
 // 堵转检测消抖时间 (ms), 持续满足条件才确认堵转
@@ -59,6 +59,19 @@ typedef enum {
     STALL_REVERSING, // 确认堵转,正在反转
     STALL_RECOVERY // 反转完成,恢复中
 } LoaderStallState_e;
+
+// 堵转调试信息结构体 (全局可观测)
+typedef struct {
+    LoaderStallState_e state; // 当前堵转状态机状态
+    int16_t current_abs; // 当前电流绝对值 (用于调试观察)
+    float speed_abs; // 当前速度绝对值 (用于调试观察)
+    uint8_t is_stalled; // 是否处于堵转状态 (1=堵转, 0=正常)
+    uint8_t reverse_count; // 连续反转次数
+    float reverse_target_angle; // 反转目标角度
+} StallDebug_s;
+
+// 全局堵转调试变量声明 (可在调试器中观测)
+extern StallDebug_s stall_debug;
 
 // 堵转检测状态结构体
 static struct {
@@ -95,6 +108,20 @@ static struct {
     uint8_t loader_locked; // 拨盘锁定标志 (防多发核心机制)
     uint16_t fire_count; // 已确认发射计数
 } fire_detector = { 0 };
+
+// ==================== 单发触发边沿检测 ====================
+// 用于确保每次触发只响应一次，防止持续按住导致多发
+typedef struct {
+    loader_mode_e last_mode; // 上一次的拨盘模式 (用于边沿检测)
+    uint8_t trigger_consumed; // 触发是否已被消费 (1=已消费,等待复位)
+    uint8_t pending_fire; // 是否有待处理的发射请求 (1=有)
+} FireTrigger_s;
+
+static FireTrigger_s fire_trigger = { .last_mode = LOAD_STOP, .trigger_consumed = 0, .pending_fire = 0 };
+
+// 空仓加速参数
+#define EMPTY_SPEEDUP_RATIO 1.5f // 空仓状态下加速倍率
+#define EMPTY_RETRY_ANGLE (ONE_BULLET_DELTA_ANGLE * 0.5f) // 空仓时继续推进的角度
 /**
  * @brief 发射初始化,会被RobotInit()调用
  *
@@ -106,41 +133,5 @@ void ShootInit();
  *
  */
 void ShootTask();
-
-/**
- * @brief 设置摩擦轮速度
- *
- * @param speed_mps 速度 m/s
- */
-void ShootSetSpeed(float speed_mps);
-
-/**
- * @brief 获取发射确认标志
- * @return 1 表示最近一次发射已确认, 0 表示未确认
- */
-uint8_t ShootGetFiredFlag(void);
-
-/**
- * @brief 获取缺弹标志
- * @return 1 表示检测到缺弹, 0 表示正常
- */
-uint8_t ShootGetEmptyFlag(void);
-
-/**
- * @brief 清除缺弹标志 (需要手动调用复位)
- */
-void ShootClearEmptyFlag(void);
-
-/**
- * @brief 获取已确认发射计数
- * @return 累计确认发射的弹丸数量
- */
-uint16_t ShootGetFireCount(void);
-
-/**
- * @brief 检查拨盘是否被锁定 (防多发机制)
- * @return 1 表示锁定中, 应拒绝新的发射指令
- */
-uint8_t ShootIsLoaderLocked(void);
 
 #endif // SHOOT_H

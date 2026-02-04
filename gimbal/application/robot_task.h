@@ -84,8 +84,8 @@ __attribute__((noreturn)) void StartMOTORTASK(void const *argument)
         motor_start = DWT_GetTimeline_ms();
         MotorControlTask();
         motor_dt = DWT_GetTimeline_ms() - motor_start;
-
-        // 修改点：移除 &，将 float 转为 int (微秒)，使用 %d 打印
+        // 控制频率改为500hz
+        //  修改点：移除 &，将 float 转为 int (微秒)，使用 %d 打印
         if (motor_dt > 1)
             LOGERROR("[freeRTOS] MOTOR Task DELAY! dt = %d us", (int)(motor_dt * 1000));
 

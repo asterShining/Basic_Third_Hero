@@ -325,42 +325,85 @@ static void RemoteControlSet()
         };
     }
 
-    static uint8_t friction_switch_state = 0; // 摩擦轮状态记录: 0-关, 1-开
-    static uint16_t last_switch_left = RC_SW_DOWN; // 记录左侧拨杆的上一次状态
+    static uint8_t friction_switch_state = 0; // 0-关, 1-开
+    static uint16_t last_switch_left = RC_SW_DOWN;
 
-    // /* 1. 摩擦轮状态切换逻辑 (保持原有逻辑: 中 -> 上 的上升沿切换开关状态) */
+    // 【修改点1】定义默认发射模式
+    // 0:单发, 1:二连发, 2:连发
+    // 您可以在这里修改初始值，或者通过键盘 Key_E 来修改它
+    static uint8_t fire_mode_state = 0;
+
+// [新增] 连发射频
+#define BURST_FIRE_RATE 8.0f // 连发每秒8发，可自行调整
+
+    // ==============================================================
+    // 逻辑 A: 摩擦轮开关控制 (左拨杆 中 -> 上)
+    // ==============================================================
+    // 检测从【中】拨到【上】的瞬间 (上升沿)
     if (switch_is_up(current_switch_left) && switch_is_mid(last_switch_left)) {
-        friction_switch_state = !friction_switch_state; // 状态取反
+        // 无论当前是什么模式，直接取反状态
+        friction_switch_state = !friction_switch_state;
+
+        // 可选：为了安全，每次关闭摩擦轮时，重置发射模式为单发
+        /*
+        if (friction_switch_state == 0) {
+            fire_mode_state = 0;
+        }
+        */
     }
 
-    // /* 2. 执行发射逻辑 (摩擦轮 + 拨盘) */
+    // ==============================================================
+    // 逻辑 B: 执行发射逻辑
+    // ==============================================================
     if (friction_switch_state == 1) {
-        // --- 摩擦轮开启状态 ---
+        // 1. 开启摩擦轮
         shoot_cmd_send.friction_mode = FRICTION_ON;
-        shoot_cmd_send.bullet_speed = BIG_AMU_12; // 设置射速
+        shoot_cmd_send.bullet_speed = BIG_AMU_12;
 
-        // --- 新增: 左侧拨杆向下触发拨盘 (开火) ---
-        // 逻辑: 只有在摩擦轮开启, 且拨杆处于[下]档位时, 才进行供弹
-        if (switch_is_down(current_switch_left)) {
-            // 这里使用 LOAD_BURSTFIRE (连发) 或 LOAD_1_BULLET (单发), 根据需求调整
-            // 通常拨杆拉下一直开火用 BURSTFIRE 配合射频控制比较顺手
-            shoot_cmd_send.load_mode = LOAD_BURSTFIRE;
-            shoot_cmd_send.shoot_rate = 8.0f; // 设置射频为8发/秒
-        } else {
-            // 拨杆在[中]或[上]时, 停止供弹
+        // 2. 处理开火指令 (左拨杆 -> 下)
+        // 只有在摩擦轮开启时，拨到下面才有效
+
+        switch (fire_mode_state) {
+        case 0: // 【单发模式】
+            if (switch_is_down(current_switch_left)) {
+                shoot_cmd_send.load_mode = LOAD_1_BULLET;
+            } else {
+                // 必须在非触发时刻归零，否则会一直发
+                shoot_cmd_send.load_mode = LOAD_STOP;
+                shoot_cmd_send.shoot_rate = 0.0f;
+            }
+            break;
+
+        case 1:
+            if (switch_is_down(current_switch_left)) {
+                shoot_cmd_send.load_mode = LOAD_2_BULLET;
+            } else {
+                shoot_cmd_send.load_mode = LOAD_STOP;
+            }
+            break;
+
+        case 2: // 【连发模式】
+            // 逻辑: 只要拨杆保持在 [下]，就持续开火 (电平触发)
+            if (switch_is_down(current_switch_left)) {
+                shoot_cmd_send.load_mode = LOAD_BURSTFIRE;
+                shoot_cmd_send.shoot_rate = BURST_FIRE_RATE;
+            } else {
+                shoot_cmd_send.load_mode = LOAD_STOP;
+            }
+            break;
+
+        default:
             shoot_cmd_send.load_mode = LOAD_STOP;
-            shoot_cmd_send.shoot_rate = 0.0f;
+            break;
         }
-
     } else {
         // --- 摩擦轮关闭状态 ---
         shoot_cmd_send.friction_mode = FRICTION_OFF;
-
-        // 安全保护: 摩擦轮没开, 强制停止拨盘, 防止堵弹或误触
         shoot_cmd_send.load_mode = LOAD_STOP;
+        shoot_cmd_send.shoot_rate = 0.0f;
     }
 
-    // 更新左侧拨杆历史状态
+    // 更新历史状态
     last_switch_left = current_switch_left;
     last_switch_right = current_switch_right;
 }
