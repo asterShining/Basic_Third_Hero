@@ -350,10 +350,10 @@ void ChassisTask()
         }
     }
 
-    // 2. 判断是否可以爆发 (电容模式开启 + 电容在线 + 电量充足 + DCDC已使能)
+    // 2. 判断是否可以爆发 (电容模式开启 或 坡道检测触发 + 电容在线 + 电量充足 + DCDC已使能)
     // 注意：一定要判断DCDC是否真的开了，不然电机要110W，电池只能给80W，电压会瞬间拉低导致重启
     if (cap && cap->is_online &&
-        chassis_cmd_recv.cap_mode == SUPER_CAP_ON &&
+        (chassis_cmd_recv.cap_mode == SUPER_CAP_ON || fabsf(Chassis_IMU_data->Pitch) > CHASSIS_SLOPE_THRESHOLD) && // [修改] 坡道自动开启超电
         cap->rx_msg.capEnergyPercent > 30 &&
         cap->tx_msg.enableDCDC == 1) // 确保我们已经请求开启DCDC
     {
@@ -407,6 +407,21 @@ void ChassisTask()
     if (chassis_cmd_recv.chassis_mode == CHASSIS_NO_FOLLOW) {
         // ChassisHeadLock();
     }
+
+    // [新增] 底盘平移速度合速度限制 (Kinematic Speed Limit)
+    // 逻辑变更: 仅在平地(Pitch < 20度)时限制速度, 上坡时允许全速冲坡
+    if (fabsf(Chassis_IMU_data->Pitch) < CHASSIS_SLOPE_THRESHOLD) {
+        // 计算当前的平移合速度 magnitude = sqrt(vx^2 + vy^2)
+        float speed_magnitude = sqrtf(chassis_vx * chassis_vx + chassis_vy * chassis_vy);
+
+        // 如果合速度超过设定的最大值, 则同比例缩小 vx 和 vy
+        if (speed_magnitude > MAX_CHASSIS_TRANSLATIONAL_SPEED) {
+            float ratio = MAX_CHASSIS_TRANSLATIONAL_SPEED / speed_magnitude;
+            chassis_vx *= ratio;
+            chassis_vy *= ratio;
+        }
+    }
+
     // 根据控制模式进行正运动学解算,计算底盘输出
     MecanumCalculate();
     // HybridCalculate();

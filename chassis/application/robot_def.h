@@ -80,6 +80,14 @@
 #define MAX_CHASSIS_VY_SPEED 6.0f // 最大左右平移速度 (m/s)
 #define MAX_CHASSIS_WZ_SPEED 360.0f // 最大旋转速度 (deg/s)
 
+// [新增] 底盘平移合速度上限 (m/s)
+// 限制 sqrt(vx^2 + vy^2) <= 3.0f, 防止功率满载
+#define MAX_CHASSIS_TRANSLATIONAL_SPEED 3.0f
+
+// [新增] 坡道判定阈值 (度)
+// 当 Pitch 轴角度绝对值 > 20.0f 时，认为是坡道，自动解除限速并开启超电爆发
+#define CHASSIS_SLOPE_THRESHOLD 20.0f
+
 // 自动计算单位转换系数 (m/s -> deg/s)
 // 公式推导: 线速度 v = 角速度(rad/s) * r -> 角速度 = v/r
 // 换算为角度: (v/r) * (180/PI)
