@@ -16,7 +16,9 @@
 #include "motor_def.h"
 #include "robot_def.h"
 #include "power_control.h"
-#include "super_cap.h"
+#ifdef USE_SUPER_CAP
+#include "super_cap.h" // [条件编译] 仅在启用超电时包含此头文件
+#endif
 #include "message_center.h"
 #include "referee_task.h"
 #include <arm_math.h> // for fabsf
@@ -31,7 +33,7 @@
 #define HALF_WHEEL_BASE (WHEEL_BASE / 2.0f) // 半轴距
 #define HALF_TRACK_WIDTH (TRACK_WIDTH / 2.0f) // 半轮距
 #define PERIMETER_WHEEL (RADIUS_WHEEL * 2 * PI) // 轮子周长
-#define DEFAULT_TEST_POWER 120.0f // 调试用的基础功率
+#define DEFAULT_TEST_POWER 80.0f // 调试用的基础功率
 
 /* 底盘应用包含的模块和信息存储,底盘是单例模式,因此不需要为底盘建立单独的结构体 */
 #ifdef CHASSIS_BOARD // 如果是底盘板,使用板载IMU获取底盘转动角速度
@@ -50,7 +52,9 @@ static Chassis_Upload_Data_s chassis_feedback_data; // 底盘回传的反馈数�
 static referee_info_t *referee_data = { NULL }; // 用于获取裁判系统的数据
 static Referee_Interactive_info_t ui_data; // UI数据，将底盘中的数据传入此结构体的对应变量中，UI会自动检测是否变化，对应显示UI
 
-static SuperCapInstance *cap = { NULL }; // 超级电容
+#ifdef USE_SUPER_CAP
+static SuperCapInstance *cap = { NULL }; // [条件编译] 超级电容实例指针
+#endif
 static DJIMotorInstance *motor_lf, *motor_rf, *motor_lb, *motor_rb; // left right forward back
 
 // 方案二，陀螺仪针对全麦纠偏PID
@@ -121,6 +125,9 @@ void ChassisInit()
 
     // referee_data = UITaskInit(&huart6, &ui_data); // 裁判系统初始化,会同时初始化UI
     PowerControl_EnableSlopeComp(1);
+
+#ifdef USE_SUPER_CAP
+    // [条件编译] 超级电容初始化配置
     SuperCap_Init_Config_s cap_conf = {
         .can_config = {
             .can_handle = &hcan1,
@@ -128,8 +135,8 @@ void ChassisInit()
             .rx_id = 0x051, // 超级电容默认发送id,注意tx和rx在其他人看来是反的
         }
     };
-
-    // cap = SuperCapInit(&cap_conf); // 超级电容初始化
+    cap = SuperCapInit(&cap_conf); // 初始化超级电容模块
+#endif // USE_SUPER_CAP
 
     // 底盘蜂鸣器初始化 [!code ++]
     Buzzer_config_s buzzer_config = {
@@ -222,7 +229,8 @@ static void HybridCalculate()
  */
 static void LimitChassisOutput()
 {
-    // 超级电容功率控制
+#ifdef USE_SUPER_CAP
+    // [条件编译] 超级电容功率控制逻辑
     if (cap) {
         // 1. 发送能量缓冲 (告诉超电当前裁判系统里还有多少缓冲能量)
         // 保持原样，发送实时buffer是正确的，超电板会根据这个决定是否全力充电
@@ -233,13 +241,12 @@ static void LimitChassisOutput()
 
         float safe_limit = referee_limit;
         if (safe_limit < 30.0f)
-            safe_limit = 30.0f; // 兜底防止过低
+            safe_limit = 30.0f; // 兆底防止过低
 
         // 无论是否开启爆发模式，给超电的永远是"合法的电池功率上限"
         cap->tx_msg.refereePowerLimit = (uint16_t)safe_limit;
 
         // 3. DCDC 开关逻辑 (保持你原有的逻辑，稍作优化)
-        // if (chassis_cmd_recv.cap_mode == SUPER_CAP_ON) {
         // 裁判系统允许底盘输出 && 超电在线 && 无关键错误
         if (referee_data->GameRobotState.power_management_chassis_output != 0 &&
             cap->is_online &&
@@ -249,8 +256,7 @@ static void LimitChassisOutput()
             if (cap->rx_msg.capEnergyPercent > 30) {
                 cap->tx_msg.enableDCDC = 1;
             } else {
-                // 低电量保护，可以不关DCDC但超电板内部要有限制，
-                // 这里为了保险可以选择关闭，或者相信超电板的低压保护
+                // 低电量保护
                 cap->tx_msg.enableDCDC = 0;
             }
         } else {
@@ -272,9 +278,9 @@ static void LimitChassisOutput()
         }
 
         /* 发送 CAN 消息 */
-
         SuperCapSend(cap);
     }
+#endif // USE_SUPER_CAP
 
     // 完成功率限制后进行电机参考输入设定
     DJIMotorSetRef(motor_lf, vt_lf);
@@ -283,39 +289,97 @@ static void LimitChassisOutput()
     DJIMotorSetRef(motor_rb, vt_rb);
 }
 /**
- * @brief 根据每个轮子的速度反馈,计算底盘的实际运动速度,逆运动解算
- * 对于双板的情况,考虑增加来自底盘板IMU的数据
+ * @brief 根据电机反馈和底盘IMU数据，融合计算底盘实际运动速度
+ *
+ * 融合策略：
+ * 1. 旋转速度(wz)：直接使用IMU陀螺仪数据，比电机逆解算更精确
+ * 2. 线速度(vx/vy)：电机编码器逆解算为主，IMU加速度积分为辅，互补滤波融合
+ *
+ * @note 此函数应以固定频率(如1kHz)被调用，以保证积分精度
  */
 static void EstimateSpeed()
 {
-    // 获取电机转速(度 / 秒)
-    float raw_lf = motor_lf->measure.speed_aps;
-    float raw_rf = motor_rf->measure.speed_aps;
-    float raw_lb = motor_lb->measure.speed_aps;
-    float raw_rb = motor_rb->measure.speed_aps;
+    // ===== 1. 获取时间间隔 (秒) =====
+    // 假设 ChassisTask 以固定 1ms 周期运行
+    const float dt = 0.001f; // 1ms，若实际周期不同可使用 DWT 获取
 
-    float v_lf = raw_lf; // LF 是 REVERSE，所以取反
-    float v_rf = -raw_rf; // RF 是 NORMAL，保持原样
-    float v_lb = -raw_lb; // LB 是 REVERSE，所以取反
-    float v_rb = raw_rb; // RB 是 NORMAL，保持原样
-    // 逆解算计算底盘真实的旋转角速度 (real_wz)(度 / 秒)
-    float avg_wz = (-v_lf + v_rf - v_lb + v_rb) / 4.0f;
+    // ===== 2. 从 IMU 直接获取旋转角速度 (更精确) =====
+    // Chassis_IMU_data->Gyro[2] 是 Z 轴角速度 (rad/s)
+    // 转换为 deg/s 以与其他变量统一
+    float imu_wz_dps = Chassis_IMU_data->Gyro[Z] * RAD_2_DEGREE; // Z 轴角速度 (deg/s)
 
-    // 单位转换(电机转速->底盘旋转角速度)
-    // 假设 speed_aps 是度/秒，这里算出来的就是度/秒
-    // 比例系数 = 轮子半径 / (半轮距 + 半轴距)
-    // 请确保 RADIUS_WHEEL 和 HALF_... 的单位统一 (例如都是 m 或 mm)
-    float geometry_sum = HALF_TRACK_WIDTH + HALF_WHEEL_BASE;
-    float wheel_chassis_ratio = RADIUS_WHEEL / geometry_sum;
+    // ===== 3. 电机编码器逆运动学解算 =====
+    // 获取电机转速 (度/秒)，并根据电机安装方向进行符号修正
+    float v_lf = motor_lf->measure.speed_aps; // LF: NORMAL，保持原样
+    float v_rf = -motor_rf->measure.speed_aps; // RF: REVERSE，取反
+    float v_lb = motor_lb->measure.speed_aps; // LB: NORMAL，保持原样
+    float v_rb = -motor_rb->measure.speed_aps; // RB: REVERSE，取反
 
-    // 得到底盘真实的旋转速度 (度/秒)
-    // 这里的 1.0f 是因为上面用的都是度/秒，不需要额外的弧度转换，除非你的 RADIUS 单位特殊
-    float raw_chassis_wz = avg_wz * wheel_chassis_ratio;
+    // 麦轮逆运动学公式 (由正解反推):
+    // vx = (v_lf + v_rf + v_lb + v_rb) / 4
+    // vy = (-v_lf + v_rf + v_lb - v_rb) / 4  (X型麦轮)
+    // wz = (-v_lf + v_rf - v_lb + v_rb) / 4 / (R_wheel / geometry_sum)
+    float avg_vx_raw = (v_lf + v_rf + v_lb + v_rb) / 4.0f; // 电机坐标系下的 vx (deg/s)
+    float avg_vy_raw = (-v_lf + v_rf + v_lb - v_rb) / 4.0f; // 电机坐标系下的 vy (deg/s)
+    float avg_wz_raw = (-v_lf + v_rf - v_lb + v_rb) / 4.0f; // 电机逆解算的 wz (deg/s)
 
-    // 5. 简单低通滤波 (防止编码器微分噪声过大)
-    static float last_wz = 0;
-    const float alpha = 0.2f; // 滤波系数 0~1，越小越平滑但滞后
-    real_wz = (1.0f - alpha) * last_wz + alpha * raw_chassis_wz;
+    // 几何参数：用于从电机转速转换到底盘速度
+    float geometry_sum = HALF_TRACK_WIDTH + HALF_WHEEL_BASE; // 半轮距 + 半轴距 (m)
+    float wheel_radius_ratio = RADIUS_WHEEL * DEGREE_2_RAD; // 轮子半径 (m) * (rad/deg)
+
+    // 电机编码器解算的线速度 (m/s)
+    float encoder_vx = avg_vx_raw * wheel_radius_ratio; // 前后方向速度 (m/s)
+    float encoder_vy = avg_vy_raw * wheel_radius_ratio; // 左右方向速度 (m/s)
+
+    // 电机编码器解算的旋转速度 (deg/s)
+    float encoder_wz = avg_wz_raw * (RADIUS_WHEEL / geometry_sum);
+
+    // ===== 4. IMU 加速度积分获取线速度 (辅助) =====
+    // Chassis_IMU_data->Accel[X/Y] 是机体系加速度 (m/s²)
+    // 需要去除重力分量影响，这里假设底盘基本水平
+    static float imu_vx = 0.0f; // IMU 积分得到的 vx
+    static float imu_vy = 0.0f; // IMU 积分得到的 vy
+
+    // 获取机体系加速度，并进行积分
+    // 注意：需要根据 IMU 安装方向调整坐标轴对应关系
+    float accel_x = Chassis_IMU_data->Accel[X]; // 前后方向加速度 (m/s²)
+    float accel_y = Chassis_IMU_data->Accel[Y]; // 左右方向加速度 (m/s²)
+
+    // 对加速度进行积分得到速度增量
+    imu_vx += accel_x * dt;
+    imu_vy += accel_y * dt;
+
+    // ===== 5. 互补滤波融合 =====
+    // 使用互补滤波融合编码器和 IMU 数据
+    // 编码器：低频准确（无漂移），高频噪声大
+    // IMU 积分：高频响应好，但有累积漂移
+    // 策略：以编码器为主，IMU 积分作为高频补偿，并持续向编码器值收敛
+    const float alpha_linear = 0.05f; // 线速度融合系数 (编码器权重较高)
+    const float alpha_wz = 0.8f; // 角速度融合系数 (IMU 权重较高，因为陀螺仪精度高)
+
+    // 让 IMU 积分值向编码器值收敛，防止累积漂移
+    const float drift_correction = 0.02f; // 漂移修正系数
+    imu_vx = imu_vx * (1.0f - drift_correction) + encoder_vx * drift_correction;
+    imu_vy = imu_vy * (1.0f - drift_correction) + encoder_vy * drift_correction;
+
+    // 融合线速度：编码器为主 + IMU 高频补偿
+    static float last_vx = 0.0f, last_vy = 0.0f;
+    float fused_vx = encoder_vx * (1.0f - alpha_linear) + imu_vx * alpha_linear;
+    float fused_vy = encoder_vy * (1.0f - alpha_linear) + imu_vy * alpha_linear;
+
+    // 融合角速度：IMU 陀螺仪为主，编码器为辅 (陀螺仪精度更高)
+    static float last_wz = 0.0f;
+    float fused_wz = imu_wz_dps * alpha_wz + encoder_wz * (1.0f - alpha_wz);
+
+    // ===== 6. 低通滤波 (平滑输出) =====
+    const float lpf_alpha = 0.3f; // 滤波系数，越小越平滑但滞后
+    real_vx = (1.0f - lpf_alpha) * last_vx + lpf_alpha * fused_vx;
+    real_vy = (1.0f - lpf_alpha) * last_vy + lpf_alpha * fused_vy;
+    real_wz = (1.0f - lpf_alpha) * last_wz + lpf_alpha * fused_wz;
+
+    // 保存上一次的值
+    last_vx = real_vx;
+    last_vy = real_vy;
     last_wz = real_wz;
 }
 
@@ -333,39 +397,51 @@ void ChassisTask()
     chassis_cmd_recv = *(Chassis_Ctrl_Cmd_s *)CANCommGet(chasiss_can_comm);
 #endif // CHASSIS_BOARD
 
-    /* 超级电容爆发功率策略 */
-    /* 超级电容爆发功率策略 */
-    float final_power_limit;
+    /* 功率控制策略 */
+    // 1. 获取裁判系统功率限制 (原始最大值)
+    float referee_power_limit;
 
     // 【修复】先判断指针是否为空
     // 如果没有初始化裁判系统（referee_data == NULL），直接使用测试功率
     if (referee_data == NULL) {
-        final_power_limit = DEFAULT_TEST_POWER; // 强制使用
+        referee_power_limit = DEFAULT_TEST_POWER; // 强制使用测试功率
     } else {
         // 只有指针有效时才去读取
-        final_power_limit = referee_data->GameRobotState.chassis_power_limit;
+        referee_power_limit = referee_data->GameRobotState.chassis_power_limit;
         // 即使有指针，如果读出来是0（裁判系统刚启动），也用测试功率兜底
-        if (final_power_limit < 1.0f) {
-            final_power_limit = DEFAULT_TEST_POWER;
+        if (referee_power_limit < 1.0f) {
+            referee_power_limit = DEFAULT_TEST_POWER;
         }
     }
 
-    // 2. 判断是否可以爆发 (电容模式开启 或 坡道检测触发 + 电容在线 + 电量充足 + DCDC已使能)
-    // 注意：一定要判断DCDC是否真的开了，不然电机要110W，电池只能给80W，电压会瞬间拉低导致重启
-    if (cap && cap->is_online &&
-        (chassis_cmd_recv.cap_mode == SUPER_CAP_ON || fabsf(Chassis_IMU_data->Pitch) > CHASSIS_SLOPE_THRESHOLD) && // [修改] 坡道自动开启超电
-        cap->rx_msg.capEnergyPercent > 30 &&
-        cap->tx_msg.enableDCDC == 1) // 确保我们已经请求开启DCDC
-    {
-        // 允许爆发，电机功率上限 = 裁判限制 + 电容贡献(30W-40W)
-        // 具体加多少取决于你的电容板最大输出能力
-        final_power_limit += 35.0f;
+    // 2. [新增] 平地/坡道功率缩放策略
+    // 平地：使用裁判系统限制的 75%，节省缓冲能量
+    // 坡道：使用裁判系统限制的 100%，全力冲坡
+    float final_power_limit;
+    if (fabsf(Chassis_IMU_data->Pitch) > CHASSIS_SLOPE_THRESHOLD) {
+        // 坡道模式：使用 100% 功率
+        final_power_limit = referee_power_limit * 1.00f;
+    } else {
+        // 平地模式：使用 75% 功率
+        final_power_limit = referee_power_limit * 0.75f;
     }
 
-    // 3. 最终限幅保护
+    // 3. [条件编译] 超电爆发功率策略
+    // 判断是否可以爆发 (电容模式开启 或 坡道检测触发 + 电容在线 + 电量充足 + DCDC已使能)
+#ifdef USE_SUPER_CAP
+    if (cap && cap->is_online &&
+        (chassis_cmd_recv.cap_mode == SUPER_CAP_ON || fabsf(Chassis_IMU_data->Pitch) > CHASSIS_SLOPE_THRESHOLD) &&
+        cap->rx_msg.capEnergyPercent > 30 &&
+        cap->tx_msg.enableDCDC == 1) {
+        // 允许爆发，电机功率上限 = 裁判限制 + 电容贡献(30W-40W)
+        final_power_limit += 35.0f;
+    }
+#endif // USE_SUPER_CAP
+
+    // 4. 最终限幅保护
     if (final_power_limit > 150.0f)
         final_power_limit = 150.0f; // 物理极限
-    // 4. 设置给底盘功率控制算法 (这个函数控制电机的电流)
+    // 5. 设置给底盘功率控制算法 (这个函数控制电机的电流)
     SetPowerLimit(final_power_limit);
 
     if (chassis_cmd_recv.chassis_mode == CHASSIS_ZERO_FORCE) { // 如果出现重要模块离线或遥控器设置为急停,让电机停止
@@ -406,20 +482,6 @@ void ChassisTask()
 
     if (chassis_cmd_recv.chassis_mode == CHASSIS_NO_FOLLOW) {
         // ChassisHeadLock();
-    }
-
-    // [新增] 底盘平移速度合速度限制 (Kinematic Speed Limit)
-    // 逻辑变更: 仅在平地(Pitch < 20度)时限制速度, 上坡时允许全速冲坡
-    if (fabsf(Chassis_IMU_data->Pitch) < CHASSIS_SLOPE_THRESHOLD) {
-        // 计算当前的平移合速度 magnitude = sqrt(vx^2 + vy^2)
-        float speed_magnitude = sqrtf(chassis_vx * chassis_vx + chassis_vy * chassis_vy);
-
-        // 如果合速度超过设定的最大值, 则同比例缩小 vx 和 vy
-        if (speed_magnitude > MAX_CHASSIS_TRANSLATIONAL_SPEED) {
-            float ratio = MAX_CHASSIS_TRANSLATIONAL_SPEED / speed_magnitude;
-            chassis_vx *= ratio;
-            chassis_vy *= ratio;
-        }
     }
 
     // 根据控制模式进行正运动学解算,计算底盘输出

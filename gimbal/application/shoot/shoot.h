@@ -33,8 +33,8 @@ extern FrictionWheelDebug_s friction_debug;
 #define FRICTION_RAMP_STEP 150.0f
 
 // [新增] 摩擦轮前馈控制参数
-#define FRICTION_FEEDFORWARD_CURRENT 2000 // 前馈电流值
-#define FRICTION_FEEDFORWARD_TIME 100 // 前馈持续时间 (ms)
+#define FRICTION_FEEDFORWARD_CURRENT 500 // 前馈电流值
+#define FRICTION_FEEDFORWARD_TIME 50 // 前馈持续时间 (ms)
 
 // ==================== 堵转检测参数 ====================
 // 堵转检测电流阈值 (raw值, M3508满量程16384, 设为 ~80% 高阈值使堵转处理更激烈)
@@ -74,6 +74,76 @@ extern FrictionWheelDebug_s friction_debug;
 #define FRICTION_SPEED_DIP_THRESHOLD 800.0f
 // 回升检测阈值 (deg/s), 与目标速度差小于此值认为回升完成
 #define FRICTION_SPEED_RECOVER_THRESHOLD 100.0f
+
+// ==================== 有效掉速识别参数 ====================
+// 正常电机速度波动范围 (deg/s), 低于此值视为噪声而非弹丸掉速
+#define DIP_NOISE_THRESHOLD 500.0f
+// 有效掉速的最小电机数量, 至少N个电机同时掉速才认为是真实弹丸
+#define DIP_MIN_MOTOR_COUNT 2
+// 内外圈掉速时间差上限 (ms), 超过此值认为是异常波动而非弹丸通过
+#define DIP_TIME_COHERENCE_MS 50.0f
+// 有效掉速持续时间窗口 (ms), 在此时间内持续低于基准才确认
+#define DIP_SUSTAIN_TIME_MS 10.0f
+
+// ==================== 弹丸掉速抓拍结构体 ====================
+// 用于记录弹丸经过瞬间6个电机各自的掉速情况
+typedef struct {
+    // --- 抓拍时间戳 ---
+    float snapshot_time_ms; // 抓拍时刻 (ms)
+    uint16_t shot_index; // 第几发弹丸 (累计计数)
+
+    // --- 基准速度 (发射前稳态, deg/s, 取绝对值) ---
+    float baseline_inner_left; // 内圈左基准
+    float baseline_inner_right; // 内圈右基准
+    float baseline_inner_down; // 内圈下基准
+    float baseline_outer_left; // 外圈左基准
+    float baseline_outer_right; // 外圈右基准
+    float baseline_outer_down; // 外圈下基准
+
+    // --- 掉速瞬间速度 (deg/s, 取绝对值) ---
+    float dip_inner_left; // 内圈左掉速时速度
+    float dip_inner_right; // 内圈右掉速时速度
+    float dip_inner_down; // 内圈下掉速时速度
+    float dip_outer_left; // 外圈左掉速时速度
+    float dip_outer_right; // 外圈右掉速时速度
+    float dip_outer_down; // 外圈下掉速时速度
+
+    // --- 掉速量 (baseline - dip, 正值表示掉速, deg/s) ---
+    float delta_inner_left; // 内圈左掉速量
+    float delta_inner_right; // 内圈右掉速量
+    float delta_inner_down; // 内圈下掉速量
+    float delta_outer_left; // 外圈左掉速量
+    float delta_outer_right; // 外圈右掉速量
+    float delta_outer_down; // 外圈下掉速量
+
+    // --- 统计分析 ---
+    float delta_inner_avg; // 内圈三电机掉速平均值 (deg/s)
+    float delta_outer_avg; // 外圈三电机掉速平均值 (deg/s)
+    float delta_left_right_diff; // 左侧与右侧掉速差异 (用于判断弹道偏移)
+    uint8_t valid_dip_count; // 有效掉速的电机数量 (超过阈值的)
+
+    // --- 有效性判定 ---
+    uint8_t is_valid_shot; // 是否为有效发射 (1=有效, 0=可能误触发)
+    uint8_t validity_reason; // 有效性判定原因代码 (见下方枚举)
+} BulletDipSnapshot_s;
+
+// 有效性判定原因枚举
+typedef enum {
+    DIP_VALID = 0, // 有效发射
+    DIP_INVALID_TOO_FEW_MOTORS, // 掉速电机数不足
+    DIP_INVALID_TOO_SMALL, // 掉速量太小 (噪声)
+    DIP_INVALID_INCOHERENT, // 内外圈掉速时间不一致
+    DIP_INVALID_TOO_SHORT, // 掉速持续时间太短
+} DipValidityReason_e;
+
+// 全局掉速抓拍变量声明 (最近一次发射的快照)
+extern BulletDipSnapshot_s dip_snapshot;
+
+// 历史记录缓冲区大小 (保存最近N发的数据用于分析)
+#define DIP_HISTORY_SIZE 10
+// 全局历史记录数组声明
+extern BulletDipSnapshot_s dip_history[DIP_HISTORY_SIZE];
+extern uint8_t dip_history_index;
 
 // 堵转检测状态枚举
 typedef enum {

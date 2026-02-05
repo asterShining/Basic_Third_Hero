@@ -313,6 +313,11 @@ static void RemoteControlSet()
     // 底盘参数
     // 右手系 x正向前进 y正向右移
     // 使用处理后的 rocker_rx 和 rocker_ry
+    // [修复] 将遥控器摇杆值(-660~+660)正确映射为底盘速度(m/s)单位
+    // 归一化公式: (rocker_value / 660.0f) * MAX_SPEED
+    // 最大平地速度由 robot_def.h 中的 MAX_CHASSIS_VX/VY_SPEED 定义 (默认 6.0 m/s)
+    // chassis_cmd_send.vx = (rocker_ry / 660.0f) * MAX_CHASSIS_VX_SPEED; // 前后速度 (m/s)
+    // chassis_cmd_send.vy = (rocker_rx / 660.0f) * MAX_CHASSIS_VY_SPEED; // 左右速度 (m/s)
     chassis_cmd_send.vx = 10.0f * rocker_ry; // 竖直方向,发送给vx
     chassis_cmd_send.vy = 10.0f * rocker_rx; // 水平方向
 
