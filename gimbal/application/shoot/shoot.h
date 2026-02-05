@@ -38,19 +38,19 @@ extern FrictionWheelDebug_s friction_debug;
 
 // ==================== 堵转检测参数 ====================
 // 堵转检测电流阈值 (raw值, M3508满量程16384, 设为 ~80% 高阈值使堵转处理更激烈)
-#define STALL_CURRENT_THRESHOLD 13000
+#define STALL_CURRENT_THRESHOLD 14500
 // 堵转检测速度阈值 (deg/s), 低于此值且电流高则判定为堵转
-#define STALL_SPEED_THRESHOLD 100.0f
+#define STALL_SPEED_THRESHOLD 500.0f
 // 堵转检测消抖时间 (ms), 持续满足条件才确认堵转
 #define STALL_DETECT_TIME 100
 // 反转角度 (deg), 约为1/2颗弹丸角度,足够解卡但用户无感
-#define REVERSE_ANGLE (ONE_BULLET_DELTA_ANGLE / 2.5f)
+#define REVERSE_ANGLE ONE_BULLET_DELTA_ANGLE
 // 反转持续时间 (ms)
-#define REVERSE_TIME 120
+#define REVERSE_TIME 200
 // 恢复等待时间 (ms), 反转后等待稳定再继续供弹
 #define RECOVERY_TIME 80
 // 连续反转次数上限, 超过则认为卡死,停止尝试
-#define MAX_REVERSE_COUNT 3
+#define MAX_REVERSE_COUNT 5
 
 // ==================== 预紧力矩参数 ====================
 // // 预紧目标弹丸数 (设置拨盘目标为2发距离, 让电流提前建立)
@@ -60,11 +60,11 @@ extern FrictionWheelDebug_s friction_debug;
 
 // ==================== 单发控制参数 ====================
 // 送弹速度 (deg/s), 中速稳定推弹, 给检测留足时间
-#define SF_FEED_SPEED 3200.0f
+#define SF_FEED_SPEED 5000.0f
 // 制动速度 (deg/s), 负值反向制动, 抵消惯性防止第二颗进入
-#define SF_BRAKE_SPEED -600.0f
+#define SF_BRAKE_SPEED -1000.0f
 // 制动持续时间 (ms), 反向制动的持续时长
-#define SF_BRAKE_TIME 50
+#define SF_BRAKE_TIME 1000
 // 送弹超时时间 (ms), 超时未检测到掉速则认为缺弹或卡弹
 #define SF_FEED_TIMEOUT 9500
 

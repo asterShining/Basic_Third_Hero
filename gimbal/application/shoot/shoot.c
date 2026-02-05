@@ -93,7 +93,7 @@ void ShootInit()
         },
         .controller_param_init_config = {
             .speed_PID = {
-                .Kp = 10.3, // 8
+                .Kp = 9.3, // 8
                 .Ki = 1.3, // 1
                 .Kd = 0,
                 .Improve = PID_Integral_Limit,
@@ -154,11 +154,11 @@ void ShootInit()
             },
             .speed_PID = {
                 .Kp = 4.9, // 10
-                .Ki = 0.0, // 1
+                .Ki = 0.05, // 1
                 .Kd = 0.0,
                 .Improve = PID_Integral_Limit,
                 .IntegralLimit = 1000,
-                .MaxOut = 15000,
+                .MaxOut = 16000,
             },
 
         },
@@ -473,9 +473,7 @@ static void ValidateDipSnapshot(void)
     // --- 检查2: 掉速量是否足够大 ---
     // 内圈和外圈的平均掉速都要超过噪声阈值
     // 只有其中一个超过也可能是有效的 (弹丸可能只经过一级就被发射)
-    float max_avg_dip = (dip_snapshot.delta_inner_avg > dip_snapshot.delta_outer_avg)
-                            ? dip_snapshot.delta_inner_avg
-                            : dip_snapshot.delta_outer_avg;
+    float max_avg_dip = (dip_snapshot.delta_inner_avg > dip_snapshot.delta_outer_avg) ? dip_snapshot.delta_inner_avg : dip_snapshot.delta_outer_avg;
     if (max_avg_dip < DIP_NOISE_THRESHOLD) {
         dip_snapshot.is_valid_shot = 0;
         dip_snapshot.validity_reason = DIP_INVALID_TOO_SMALL;
