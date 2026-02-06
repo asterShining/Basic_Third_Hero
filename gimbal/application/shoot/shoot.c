@@ -24,36 +24,11 @@ static Shoot_Ctrl_Cmd_s shoot_cmd_recv; // 来自cmd的发射控制信息
 static Subscriber_t *shoot_sub;
 static Shoot_Upload_Data_s shoot_feedback_data; // 来自cmd的发射控制信息
 
-// [新增] 全局堵转调试变量定义 (用于调试器实时观测堵转状态机状态)
-StallDebug_s stall_debug = { 0 };
-
-// [新增] 全局单发调试变量定义 (用于调试器实时观测单发状态机状态)
-SingleFireDebug_s sf_debug = { 0 };
-
-// [新增] 全局摩擦轮调试变量
-FrictionWheelDebug_s friction_debug = { 0 };
-
-// [新增] 全局掉速抓拍变量 (记录最近一次弹丸经过时6个电机的掉速情况)
-BulletDipSnapshot_s dip_snapshot = { 0 };
-
-// [新增] 掉速历史记录数组 (保存最近N发用于统计分析)
-BulletDipSnapshot_s dip_history[DIP_HISTORY_SIZE] = { 0 };
-uint8_t dip_history_index = 0;
-
-// [新增] 掉速检测内部状态 (用于记录基准速度和检测时序)
-static struct {
-    float baseline_inner_left; // 送弹开始时的内圈左基准速度 (deg/s)
-    float baseline_inner_right; // 送弹开始时的内圈右基准速度 (deg/s)
-    float baseline_inner_down; // 送弹开始时的内圈下基准速度 (deg/s)
-    float baseline_outer_left; // 送弹开始时的外圈左基准速度 (deg/s)
-    float baseline_outer_right; // 送弹开始时的外圈右基准速度 (deg/s)
-    float baseline_outer_down; // 送弹开始时的外圈下基准速度 (deg/s)
-    float inner_dip_time; // 内圈首次检测到掉速的时间 (ms)
-    float outer_dip_time; // 外圈首次检测到掉速的时间 (ms)
-    uint8_t inner_dipping; // 内圈是否正在掉速 (1=是)
-    uint8_t outer_dipping; // 外圈是否正在掉速 (1=是)
-    uint8_t snapshot_taken; // 本次发射是否已抓拍 (防止重复抓拍)
-} dip_detector = { 0 };
+// [调试] 结构体指针变量，便于调试器直接观测 (通过函数接口获取)
+static FrictionWheelDebug_s *p_friction_debug;
+static StallDebug_s *p_stall_debug;
+static SingleFireDebug_s *p_sf_debug;
+static BulletDipSnapshot_s *p_dip_snapshot;
 
 // dwt定时,计算冷却用
 static float hibernate_time = 0, dead_time = 0;
@@ -158,7 +133,7 @@ void ShootInit()
                 .Kd = 0.0,
                 .Improve = PID_Integral_Limit,
                 .IntegralLimit = 1000,
-                .MaxOut = 16000,
+                .MaxOut = 16100,
             },
 
         },
@@ -251,27 +226,19 @@ void ShootSetSpeedDual(float inner_mps, float outer_mps)
     DJIMotorSetRef(friction_outer_down, current_outer_deg);
 }
 /**
- * @brief 将电机反馈的角速度(deg/s)转换为线速度(m/s)用于调试
- * @note 不包含打滑补偿，反映的是摩擦轮表面的物理线速度
- */
-/**
  * @brief 更新调试数据 (将电机反馈的角速度转换为线速度)
+ * @note 调用调试模块的接口函数
  */
 static void UpdateFrictionDebugInfo(void)
 {
-    if (friction_inner_left)
-        friction_debug.inner_left_mps = SpeedAps2Mps(friction_inner_left->measure.speed_aps);
-    if (friction_inner_right)
-        friction_debug.inner_right_mps = SpeedAps2Mps(friction_inner_right->measure.speed_aps);
-    if (friction_inner_down)
-        friction_debug.inner_down_mps = SpeedAps2Mps(friction_inner_down->measure.speed_aps);
-
-    if (friction_outer_left)
-        friction_debug.outer_left_mps = SpeedAps2Mps(friction_outer_left->measure.speed_aps);
-    if (friction_outer_right)
-        friction_debug.outer_right_mps = SpeedAps2Mps(friction_outer_right->measure.speed_aps);
-    if (friction_outer_down)
-        friction_debug.outer_down_mps = SpeedAps2Mps(friction_outer_down->measure.speed_aps);
+    // 调用调试模块接口，传入6个电机的实时速度
+    ShootDebug_UpdateFrictionInfo(
+        friction_inner_left ? friction_inner_left->measure.speed_aps : 0,
+        friction_inner_right ? friction_inner_right->measure.speed_aps : 0,
+        friction_inner_down ? friction_inner_down->measure.speed_aps : 0,
+        friction_outer_left ? friction_outer_left->measure.speed_aps : 0,
+        friction_outer_right ? friction_outer_right->measure.speed_aps : 0,
+        friction_outer_down ? friction_outer_down->measure.speed_aps : 0);
 }
 
 /**
@@ -289,13 +256,18 @@ static uint8_t IsLoaderStalled(void)
                           loader->measure.speed_aps :
                           -loader->measure.speed_aps;
 
-    // [新增] 更新全局调试变量的电流和速度信息 (供调试器实时观测)
-    stall_debug.current_abs = current_abs;
-    stall_debug.speed_abs = speed_abs;
-    stall_debug.is_stalled = (current_abs > STALL_CURRENT_THRESHOLD) &&
-                             (speed_abs < STALL_SPEED_THRESHOLD);
+    // 计算是否堵转
+    uint8_t is_stalled = (current_abs > STALL_CURRENT_THRESHOLD) &&
+                         (speed_abs < STALL_SPEED_THRESHOLD);
 
-    return stall_debug.is_stalled;
+    // 更新调试模块的堵转信息 (通过接口函数)
+    // 注: 此处只更新电流/速度/is_stalled，状态机状态由 HandleLoaderStall 更新
+    StallDebug_s *p = ShootDebug_GetStallPtr();
+    p->current_abs = current_abs;
+    p->speed_abs = speed_abs;
+    p->is_stalled = is_stalled;
+
+    return is_stalled;
 }
 
 /**
@@ -352,157 +324,48 @@ static uint8_t IsFrictionDipping(void)
 
 /**
  * @brief 记录6个电机的基准速度 (在送弹开始时调用)
- * @note 基准速度用于后续计算掉速量, 取电机速度的绝对值
+ * @note 调用调试模块接口
  */
 static void RecordDipBaseline(void)
 {
-    // 记录6个电机的当前速度作为基准 (取绝对值)
-    dip_detector.baseline_inner_left = fabsf(friction_inner_left->measure.speed_aps);
-    dip_detector.baseline_inner_right = fabsf(friction_inner_right->measure.speed_aps);
-    dip_detector.baseline_inner_down = fabsf(friction_inner_down->measure.speed_aps);
-    dip_detector.baseline_outer_left = fabsf(friction_outer_left->measure.speed_aps);
-    dip_detector.baseline_outer_right = fabsf(friction_outer_right->measure.speed_aps);
-    dip_detector.baseline_outer_down = fabsf(friction_outer_down->measure.speed_aps);
-
-    // 复位检测状态
-    dip_detector.inner_dipping = 0;
-    dip_detector.outer_dipping = 0;
-    dip_detector.inner_dip_time = 0;
-    dip_detector.outer_dip_time = 0;
-    dip_detector.snapshot_taken = 0;
+    // 调用调试模块接口，传入6个电机的实时速度
+    ShootDebug_RecordDipBaseline(
+        friction_inner_left->measure.speed_aps,
+        friction_inner_right->measure.speed_aps,
+        friction_inner_down->measure.speed_aps,
+        friction_outer_left->measure.speed_aps,
+        friction_outer_right->measure.speed_aps,
+        friction_outer_down->measure.speed_aps);
 }
 
 /**
  * @brief 执行掉速抓拍 (当检测到掉速时调用)
- * @note 记录弹丸经过瞬间6个电机各自的掉速情况
- *       只在首次检测到掉速时抓拍一次, 避免重复
+ * @note 调用调试模块接口
  */
 static void TakeDipSnapshot(void)
 {
-    // 防止本次发射重复抓拍
-    if (dip_detector.snapshot_taken)
+    // 检查是否已抓拍，避免重复
+    if (ShootDebug_IsSnapshotTaken())
         return;
-    dip_detector.snapshot_taken = 1;
 
-    float current_time = DWT_GetTimeline_ms();
-
-    // --- 填充抓拍时间戳 ---
-    dip_snapshot.snapshot_time_ms = current_time;
-    dip_snapshot.shot_index = single_fire.fire_count + 1; // +1 因为还没累加
-
-    // --- 记录基准速度 ---
-    dip_snapshot.baseline_inner_left = dip_detector.baseline_inner_left;
-    dip_snapshot.baseline_inner_right = dip_detector.baseline_inner_right;
-    dip_snapshot.baseline_inner_down = dip_detector.baseline_inner_down;
-    dip_snapshot.baseline_outer_left = dip_detector.baseline_outer_left;
-    dip_snapshot.baseline_outer_right = dip_detector.baseline_outer_right;
-    dip_snapshot.baseline_outer_down = dip_detector.baseline_outer_down;
-
-    // --- 记录掉速瞬间速度 (当前速度, 取绝对值) ---
-    dip_snapshot.dip_inner_left = fabsf(friction_inner_left->measure.speed_aps);
-    dip_snapshot.dip_inner_right = fabsf(friction_inner_right->measure.speed_aps);
-    dip_snapshot.dip_inner_down = fabsf(friction_inner_down->measure.speed_aps);
-    dip_snapshot.dip_outer_left = fabsf(friction_outer_left->measure.speed_aps);
-    dip_snapshot.dip_outer_right = fabsf(friction_outer_right->measure.speed_aps);
-    dip_snapshot.dip_outer_down = fabsf(friction_outer_down->measure.speed_aps);
-
-    // --- 计算各电机掉速量 (baseline - dip, 正值表示掉速) ---
-    dip_snapshot.delta_inner_left = dip_snapshot.baseline_inner_left - dip_snapshot.dip_inner_left;
-    dip_snapshot.delta_inner_right = dip_snapshot.baseline_inner_right - dip_snapshot.dip_inner_right;
-    dip_snapshot.delta_inner_down = dip_snapshot.baseline_inner_down - dip_snapshot.dip_inner_down;
-    dip_snapshot.delta_outer_left = dip_snapshot.baseline_outer_left - dip_snapshot.dip_outer_left;
-    dip_snapshot.delta_outer_right = dip_snapshot.baseline_outer_right - dip_snapshot.dip_outer_right;
-    dip_snapshot.delta_outer_down = dip_snapshot.baseline_outer_down - dip_snapshot.dip_outer_down;
-
-    // --- 统计分析 ---
-    // 内圈平均掉速
-    dip_snapshot.delta_inner_avg = (dip_snapshot.delta_inner_left +
-                                    dip_snapshot.delta_inner_right +
-                                    dip_snapshot.delta_inner_down) /
-                                   3.0f;
-    // 外圈平均掉速
-    dip_snapshot.delta_outer_avg = (dip_snapshot.delta_outer_left +
-                                    dip_snapshot.delta_outer_right +
-                                    dip_snapshot.delta_outer_down) /
-                                   3.0f;
-    // 左右掉速差异: (左侧平均) - (右侧平均)
-    // 正值表示左侧掉速更多 (弹丸偏右), 负值表示右侧掉速更多 (弹丸偏左)
-    float left_avg = (dip_snapshot.delta_inner_left + dip_snapshot.delta_outer_left) / 2.0f;
-    float right_avg = (dip_snapshot.delta_inner_right + dip_snapshot.delta_outer_right) / 2.0f;
-    dip_snapshot.delta_left_right_diff = left_avg - right_avg;
-
-    // 统计有效掉速的电机数量 (掉速量超过噪声阈值)
-    dip_snapshot.valid_dip_count = 0;
-    if (dip_snapshot.delta_inner_left > DIP_NOISE_THRESHOLD)
-        dip_snapshot.valid_dip_count++;
-    if (dip_snapshot.delta_inner_right > DIP_NOISE_THRESHOLD)
-        dip_snapshot.valid_dip_count++;
-    if (dip_snapshot.delta_inner_down > DIP_NOISE_THRESHOLD)
-        dip_snapshot.valid_dip_count++;
-    if (dip_snapshot.delta_outer_left > DIP_NOISE_THRESHOLD)
-        dip_snapshot.valid_dip_count++;
-    if (dip_snapshot.delta_outer_right > DIP_NOISE_THRESHOLD)
-        dip_snapshot.valid_dip_count++;
-    if (dip_snapshot.delta_outer_down > DIP_NOISE_THRESHOLD)
-        dip_snapshot.valid_dip_count++;
+    // 调用调试模块接口，传入6个电机的实时速度和发射计数
+    ShootDebug_TakeDipSnapshot(
+        friction_inner_left->measure.speed_aps,
+        friction_inner_right->measure.speed_aps,
+        friction_inner_down->measure.speed_aps,
+        friction_outer_left->measure.speed_aps,
+        friction_outer_right->measure.speed_aps,
+        friction_outer_down->measure.speed_aps,
+        single_fire.fire_count);
 }
 
 /**
- * @brief 验证掉速快照的有效性 (区分真实弹丸掉速和电机噪声)
- * @note 该函数在抓拍完成后调用, 填充有效性判定字段
- *       有效判定条件:
- *       1. 有足够数量的电机同时掉速 (>= DIP_MIN_MOTOR_COUNT)
- *       2. 掉速量足够大 (超过噪声阈值)
- *       3. 内外圈掉速时间一致 (弹丸物理上连续通过)
+ * @brief 验证掉速快照的有效性并保存到历史记录
+ * @note 调用调试模块接口
  */
-static void ValidateDipSnapshot(void)
+static void ValidateAndSaveDipSnapshot(void)
 {
-    // 默认有效
-    dip_snapshot.is_valid_shot = 1;
-    dip_snapshot.validity_reason = DIP_VALID;
-
-    // --- 检查1: 有效掉速电机数量 ---
-    // 真实弹丸会同时挤压多个摩擦轮, 导致多个电机同时掉速
-    // 噪声通常只影响单个电机或不同步
-    if (dip_snapshot.valid_dip_count < DIP_MIN_MOTOR_COUNT) {
-        dip_snapshot.is_valid_shot = 0;
-        dip_snapshot.validity_reason = DIP_INVALID_TOO_FEW_MOTORS;
-        return;
-    }
-
-    // --- 检查2: 掉速量是否足够大 ---
-    // 内圈和外圈的平均掉速都要超过噪声阈值
-    // 只有其中一个超过也可能是有效的 (弹丸可能只经过一级就被发射)
-    float max_avg_dip = (dip_snapshot.delta_inner_avg > dip_snapshot.delta_outer_avg) ? dip_snapshot.delta_inner_avg : dip_snapshot.delta_outer_avg;
-    if (max_avg_dip < DIP_NOISE_THRESHOLD) {
-        dip_snapshot.is_valid_shot = 0;
-        dip_snapshot.validity_reason = DIP_INVALID_TOO_SMALL;
-        return;
-    }
-
-    // --- 检查3: 内外圈掉速时间一致性 ---
-    // 弹丸物理上是连续通过内圈再到外圈的, 时间差应该很小
-    // 如果时间差过大, 说明可能是随机噪声而非真实弹丸
-    if (dip_detector.inner_dip_time > 0 && dip_detector.outer_dip_time > 0) {
-        float time_diff = fabsf(dip_detector.outer_dip_time - dip_detector.inner_dip_time);
-        if (time_diff > DIP_TIME_COHERENCE_MS) {
-            dip_snapshot.is_valid_shot = 0;
-            dip_snapshot.validity_reason = DIP_INVALID_INCOHERENT;
-            return;
-        }
-    }
-
-    // 通过所有检查, 确认为有效发射
-}
-
-/**
- * @brief 将当前快照保存到历史记录中
- * @note 循环覆盖, 始终保留最近 DIP_HISTORY_SIZE 条记录
- */
-static void SaveDipToHistory(void)
-{
-    dip_history[dip_history_index] = dip_snapshot;
-    dip_history_index = (dip_history_index + 1) % DIP_HISTORY_SIZE;
+    ShootDebug_ValidateAndSave();
 }
 
 /**
@@ -524,11 +387,11 @@ static loader_mode_e HandleLoaderStall(loader_mode_e current_mode)
                           (current_mode == LOAD_3_BULLET) ||
                           (current_mode == LOAD_BURSTFIRE);
 
-// [新增] 宏定义: 返回前统一更新调试状态 (避免代码重复)
-#define RETURN_WITH_DEBUG(mode)                  \
-    do {                                         \
-        stall_debug.state = stall_handler.state; \
-        return (mode);                           \
+// [重构] 宏定义: 返回前统一更新调试状态 (通过接口获取指针)
+#define RETURN_WITH_DEBUG(mode)                          \
+    do {                                                 \
+        ShootDebug_GetStallPtr()->state = stall_handler.state; \
+        return (mode);                                   \
     } while (0)
 
     switch (stall_handler.state) {
@@ -561,9 +424,10 @@ static loader_mode_e HandleLoaderStall(loader_mode_e current_mode)
             stall_handler.reverse_target_angle = loader->measure.total_angle - REVERSE_ANGLE;
             stall_handler.reverse_count++;
 
-            // [新增] 更新全局调试变量的反转信息
-            stall_debug.reverse_count = stall_handler.reverse_count;
-            stall_debug.reverse_target_angle = stall_handler.reverse_target_angle;
+            // [重构] 更新调试模块的反转信息 (通过接口获取指针)
+            StallDebug_s *p_stall = ShootDebug_GetStallPtr();
+            p_stall->reverse_count = stall_handler.reverse_count;
+            p_stall->reverse_target_angle = stall_handler.reverse_target_angle;
 
             // 设定反转目标角度 (在 ShootTask 的 switch 之前生效)
             DJIMotorOuterLoop(loader, ANGLE_LOOP);
@@ -614,21 +478,24 @@ static void HandleSingleFire(uint8_t trigger_active)
 {
     float current_time = DWT_GetTimeline_ms();
 
-    // [新增] 更新全局调试变量
-    sf_debug.state = single_fire.state;
-    sf_debug.baseline_speed = single_fire.baseline_speed;
-    sf_debug.outer_baseline_speed = single_fire.outer_baseline_speed; // [新增]
-    sf_debug.current_speed = GetInnerFrictionAvgSpeed();
-    sf_debug.current_outer_speed = GetOuterFrictionAvgSpeed(); // [新增]
-    // sf_debug.speed_diff = single_fire.baseline_speed - sf_debug.current_speed; // 放在下面计算
-    sf_debug.loader_speed = loader->measure.speed_aps;
-    sf_debug.is_dipping = IsFrictionDipping(); // 使用更新后的双重检测逻辑
-    sf_debug.speed_diff = single_fire.baseline_speed - sf_debug.current_speed; // 仅显示内圈差值作参考
-    sf_debug.trigger_edge = trigger_active;
-    sf_debug.fire_count = single_fire.fire_count;
-    sf_debug.feed_timeout_count = single_fire.feed_timeout_count;
-    sf_debug.brake_start_time = single_fire.brake_start_time;
-    sf_debug.feed_start_time = single_fire.feed_start_time;
+    // [重构] 更新单发调试信息 (通过接口获取指针)
+    SingleFireDebug_s *p_sf = ShootDebug_GetSingleFirePtr();
+    float inner_speed = GetInnerFrictionAvgSpeed();
+    float outer_speed = GetOuterFrictionAvgSpeed();
+
+    p_sf->state = single_fire.state;
+    p_sf->baseline_speed = single_fire.baseline_speed;
+    p_sf->outer_baseline_speed = single_fire.outer_baseline_speed;
+    p_sf->current_speed = inner_speed;
+    p_sf->current_outer_speed = outer_speed;
+    p_sf->loader_speed = loader->measure.speed_aps;
+    p_sf->is_dipping = IsFrictionDipping();
+    p_sf->speed_diff = single_fire.baseline_speed - inner_speed;
+    p_sf->trigger_edge = trigger_active;
+    p_sf->fire_count = single_fire.fire_count;
+    p_sf->feed_timeout_count = single_fire.feed_timeout_count;
+    p_sf->brake_start_time = single_fire.brake_start_time;
+    p_sf->feed_start_time = single_fire.feed_start_time;
 
     switch (single_fire.state) {
     case SF_IDLE:
@@ -712,9 +579,8 @@ static void HandleSingleFire(uint8_t trigger_active)
             single_fire.state = SF_COOLDOWN;
             single_fire.cooldown_start_time = current_time;
 
-            // [抓拍] 验证掉速有效性并保存到历史
-            ValidateDipSnapshot();
-            SaveDipToHistory();
+            // [重构] 验证掉速有效性并保存到历史 (调用合并后的接口)
+            ValidateAndSaveDipSnapshot();
 
             // 停止电机
             DJIMotorOuterLoop(loader, SPEED_LOOP);
@@ -841,11 +707,12 @@ void ShootTask()
     // [新增] 更新上一次的发射模式, 用于下一次边沿检测
     fire_trigger.last_mode = actual_load_mode;
 
-    // [修改] 摩擦轮控制逻辑 (包含调试覆盖)
+    // [重构] 摩擦轮控制逻辑 (包含调试覆盖)
     // 优先级: 调试覆盖 > 正常指令
-    if (friction_debug.override_enable) {
+    FrictionWheelDebug_s *p_fric = ShootDebug_GetFrictionPtr();
+    if (p_fric->override_enable) {
         // 调试模式: 直接使用 debug 结构体中的目标速度
-        ShootSetSpeedDual(friction_debug.target_inner_mps, friction_debug.target_outer_mps);
+        ShootSetSpeedDual(p_fric->target_inner_mps, p_fric->target_outer_mps);
     } else if (shoot_cmd_recv.friction_mode == FRICTION_ON) {
         // 正常模式: 根据不同的弹速等级设置不同的分级速度
         switch (shoot_cmd_recv.bullet_speed) {
