@@ -11,8 +11,13 @@
 static float current_inner_deg = 0.0f;
 static float current_outer_deg = 0.0f;
 
-// [新增] 摩擦轮前馈电流变量 (供所有摩擦轮电机共用)
-static float friction_feedforward = 0.0f;
+// [新增] 6个摩擦轮单独的前馈变量
+static float ff_inner_left = 0.0f;
+static float ff_inner_right = 0.0f;
+static float ff_inner_down = 0.0f;
+static float ff_outer_left = 0.0f;
+static float ff_outer_right = 0.0f;
+static float ff_outer_down = 0.0f;
 
 static DJIMotorInstance *loader; // 拨盘电机
 static DJIMotorInstance *friction_inner_down, *friction_inner_left, *friction_inner_right; // 内部摩擦轮电机
@@ -35,22 +40,22 @@ static float hibernate_time = 0, dead_time = 0;
 
 void ShootInit()
 {
-    // 内摩擦轮
+    // 内摩擦轮配置模板
     Motor_Init_Config_s friction_config_inner = {
         .can_init_config = {
             .can_handle = &hcan2,
         },
         .controller_param_init_config = {
             .speed_PID = {
-                .Kp = 9.3, // 9.3
+                .Kp = 9.7, // 9.3
                 .Ki = 0.9, // 1.3
                 .Kd = 0,
                 .Improve = PID_Integral_Limit,
                 .IntegralLimit = 10000,
                 .MaxOut = 16000,
             },
-            // [新增] 关联前馈变量指针
-            .current_feedforward_ptr = &friction_feedforward,
+            // [修改] 下面会针对每个电机单独赋值
+            .current_feedforward_ptr = NULL,
         },
         .controller_setting_init_config = {
             .angle_feedback_source = MOTOR_FEED,
@@ -58,25 +63,25 @@ void ShootInit()
 
             .outer_loop_type = SPEED_LOOP,
             .close_loop_type = SPEED_LOOP,
+            .feedforward_flag = CURRENT_FEEDFORWARD, // [新增] 开启电流前馈
         },
         .motor_type = M3508
     };
-    // 外摩擦轮
+    // 外摩擦轮配置模板
     Motor_Init_Config_s friction_config_outer = {
         .can_init_config = {
             .can_handle = &hcan2,
         },
         .controller_param_init_config = {
             .speed_PID = {
-                .Kp = 9.3, // 8
+                .Kp = 8.3, // 8
                 .Ki = 1.3, // 1
                 .Kd = 0,
                 .Improve = PID_Integral_Limit,
                 .IntegralLimit = 10000,
                 .MaxOut = 16000,
             },
-            // [新增] 关联前馈变量指针
-            .current_feedforward_ptr = &friction_feedforward,
+            .current_feedforward_ptr = NULL,
         },
         .controller_setting_init_config = {
             .angle_feedback_source = MOTOR_FEED,
@@ -84,34 +89,50 @@ void ShootInit()
 
             .outer_loop_type = SPEED_LOOP,
             .close_loop_type = SPEED_LOOP,
+            .feedforward_flag = CURRENT_FEEDFORWARD, // [新增] 开启电流前馈
         },
+
         .motor_type = M3508
     };
+
     // 第一级，内摩擦轮初始化
-    friction_config_inner.can_init_config.tx_id = 1; // 上摩擦轮,改txid和方向就行
+    // 1. 下
+    friction_config_inner.can_init_config.tx_id = 1;
     friction_config_inner.controller_setting_init_config.motor_reverse_flag = MOTOR_DIRECTION_NORMAL;
+    friction_config_inner.controller_param_init_config.current_feedforward_ptr = &ff_inner_down; // 绑定独立前馈
     friction_inner_down = DJIMotorInit(&friction_config_inner);
 
-    friction_config_inner.can_init_config.tx_id = 2; // 左摩擦轮,改txid和方向就行
+    // 2. 左 (反转)
+    friction_config_inner.can_init_config.tx_id = 2;
     friction_config_inner.controller_setting_init_config.motor_reverse_flag = MOTOR_DIRECTION_REVERSE;
+    friction_config_inner.controller_param_init_config.current_feedforward_ptr = &ff_inner_left; // 绑定独立前馈
     friction_inner_left = DJIMotorInit(&friction_config_inner);
 
-    friction_config_inner.can_init_config.tx_id = 3; // 右摩擦轮,改txid和方向就行
+    // 3. 右
+    friction_config_inner.can_init_config.tx_id = 3;
     friction_config_inner.controller_setting_init_config.motor_reverse_flag = MOTOR_DIRECTION_NORMAL;
+    friction_config_inner.controller_param_init_config.current_feedforward_ptr = &ff_inner_right; // 绑定独立前馈
     friction_inner_right = DJIMotorInit(&friction_config_inner);
 
-    // // 第二级，外摩擦轮初始化
-    friction_config_outer.can_init_config.tx_id = 4; // 上摩擦轮,改txid和方向就行
+    // 第二级，外摩擦轮初始化
+    // 1. 下
+    friction_config_outer.can_init_config.tx_id = 4;
     friction_config_outer.controller_setting_init_config.motor_reverse_flag = MOTOR_DIRECTION_NORMAL;
+    friction_config_outer.controller_param_init_config.current_feedforward_ptr = &ff_outer_down; // 绑定独立前馈
     friction_outer_down = DJIMotorInit(&friction_config_outer);
 
-    friction_config_outer.can_init_config.tx_id = 5; // 左摩擦轮,改txid和方向就行
+    // 2. 左 (反转)
+    friction_config_outer.can_init_config.tx_id = 5;
     friction_config_outer.controller_setting_init_config.motor_reverse_flag = MOTOR_DIRECTION_REVERSE;
+    friction_config_outer.controller_param_init_config.current_feedforward_ptr = &ff_outer_left; // 绑定独立前馈
     friction_outer_left = DJIMotorInit(&friction_config_outer);
 
-    friction_config_outer.can_init_config.tx_id = 6; // 右摩擦轮,改txid和方向就行
+    // 3. 右
+    friction_config_outer.can_init_config.tx_id = 6;
     friction_config_outer.controller_setting_init_config.motor_reverse_flag = MOTOR_DIRECTION_NORMAL;
+    friction_config_outer.controller_param_init_config.current_feedforward_ptr = &ff_outer_right; // 绑定独立前馈
     friction_outer_right = DJIMotorInit(&friction_config_outer);
+
     // 拨盘电机
     Motor_Init_Config_s loader_config = {
         .can_init_config = {
@@ -128,7 +149,7 @@ void ShootInit()
 
             },
             .speed_PID = {
-                .Kp = 4.9, // 10
+                .Kp = 3.9, // 10
                 .Ki = 0.05, // 1
                 .Kd = 0.0,
                 .Improve = PID_Integral_Limit,
@@ -150,6 +171,13 @@ void ShootInit()
 
     shoot_pub = PubRegister("shoot_feed", sizeof(Shoot_Upload_Data_s));
     shoot_sub = SubRegister("shoot_cmd", sizeof(Shoot_Ctrl_Cmd_s));
+
+    // [调试] 初始化调试指针 (获取 shoot_debug.c 中的实际结构体地址)
+    // 原因: 这些指针必须在初始化时赋值，否则 Ozone 调试器读到的是 NULL
+    p_friction_debug = ShootDebug_GetFrictionPtr();
+    p_stall_debug = ShootDebug_GetStallPtr();
+    p_sf_debug = ShootDebug_GetSingleFirePtr();
+    p_dip_snapshot = ShootDebug_GetDipSnapshotPtr();
 }
 /**
  * @brief 辅助函数：将线速度转换为角速度
@@ -388,10 +416,10 @@ static loader_mode_e HandleLoaderStall(loader_mode_e current_mode)
                           (current_mode == LOAD_BURSTFIRE);
 
 // [重构] 宏定义: 返回前统一更新调试状态 (通过接口获取指针)
-#define RETURN_WITH_DEBUG(mode)                          \
-    do {                                                 \
+#define RETURN_WITH_DEBUG(mode)                                \
+    do {                                                       \
         ShootDebug_GetStallPtr()->state = stall_handler.state; \
-        return (mode);                                   \
+        return (mode);                                         \
     } while (0)
 
     switch (stall_handler.state) {
@@ -509,8 +537,13 @@ static void HandleSingleFire(uint8_t trigger_active)
             // [抓拍] 记录6电机基准速度 (用于后续计算掉速量)
             RecordDipBaseline();
 
-            // 复位前馈 (以防万一)
-            friction_feedforward = 0.0f;
+            // 复位所有前馈变量
+            ff_inner_left = 0.0f;
+            ff_inner_right = 0.0f;
+            ff_inner_down = 0.0f;
+            ff_outer_left = 0.0f;
+            ff_outer_right = 0.0f;
+            ff_outer_down = 0.0f;
 
             // 速度环 - 中速送弹
             DJIMotorOuterLoop(loader, SPEED_LOOP);
@@ -523,12 +556,24 @@ static void HandleSingleFire(uint8_t trigger_active)
         break;
 
     case SF_FEEDING:
-        // [新增] 前馈控制逻辑
+        // [新增] 前馈控制逻辑 (Updated to 6 individual variables)
         // 在送弹初期的短时间内, 注入额外电流
         if ((current_time - single_fire.feed_start_time) < FRICTION_FEEDFORWARD_TIME) {
-            friction_feedforward = FRICTION_FEEDFORWARD_CURRENT;
+            // 这里可以针对每个电机单独设置方向 +/-
+            // 目前假设底层电机模块处理了 MOTOR_DIRECTION_REVERSE, 所以这里都给正值 (Forward Current)
+            ff_inner_left = 300.0f;
+            ff_inner_right = 700.0f;
+            ff_inner_down = 800;
+            ff_outer_left = 0.0f;
+            ff_outer_right = 0.0f;
+            ff_outer_down = 0.0f;
         } else {
-            friction_feedforward = 0.0f;
+            ff_inner_left = 0.0f;
+            ff_inner_right = 0.0f;
+            ff_inner_down = 0.0f;
+            ff_outer_left = 0.0f;
+            ff_outer_right = 0.0f;
+            ff_outer_down = 0.0f;
         }
 
         // [新增] 动态基准逻辑 (Peak Hold) - 双重
@@ -542,6 +587,15 @@ static void HandleSingleFire(uint8_t trigger_active)
             single_fire.outer_baseline_speed = current_outer;
         }
 
+        // [调试] 同时更新调试模块的基准速度 (Peak Hold), 确保调试数据准确
+        ShootDebug_UpdatePeakBaseline(
+            friction_inner_left->measure.speed_aps,
+            friction_inner_right->measure.speed_aps,
+            friction_inner_down->measure.speed_aps,
+            friction_outer_left->measure.speed_aps,
+            friction_outer_right->measure.speed_aps,
+            friction_outer_down->measure.speed_aps);
+
         // 监测掉速 (IsFrictionDipping 已更新为双重检测)
         if (IsFrictionDipping()) {
             // [抓拍] 检测到掉速, 立即抓拍6电机掉速数据
@@ -551,8 +605,13 @@ static void HandleSingleFire(uint8_t trigger_active)
             single_fire.state = SF_BRAKING;
             single_fire.brake_start_time = current_time;
 
-            // 立即停止前馈
-            friction_feedforward = 0.0f;
+            // 立即停止所有前馈
+            ff_inner_left = 0.0f;
+            ff_inner_right = 0.0f;
+            ff_inner_down = 0.0f;
+            ff_outer_left = 0.0f;
+            ff_outer_right = 0.0f;
+            ff_outer_down = 0.0f;
 
             DJIMotorOuterLoop(loader, SPEED_LOOP);
             DJIMotorSetRef(loader, SF_BRAKE_SPEED); // 反向
@@ -561,8 +620,13 @@ static void HandleSingleFire(uint8_t trigger_active)
             single_fire.state = SF_IDLE;
             single_fire.feed_timeout_count++;
 
-            // 停止前馈
-            friction_feedforward = 0.0f;
+            // 停止所有前馈
+            ff_inner_left = 0.0f;
+            ff_inner_right = 0.0f;
+            ff_inner_down = 0.0f;
+            ff_outer_left = 0.0f;
+            ff_outer_right = 0.0f;
+            ff_outer_down = 0.0f;
 
             DJIMotorOuterLoop(loader, SPEED_LOOP);
             DJIMotorSetRef(loader, 0);

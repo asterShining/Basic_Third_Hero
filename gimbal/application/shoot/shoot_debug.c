@@ -26,6 +26,13 @@ static BulletDipSnapshot_s dip_snapshot = { 0 };
 static BulletDipSnapshot_s dip_history[DIP_HISTORY_SIZE] = { 0 };
 static uint8_t dip_history_index = 0;
 
+// ==================== 简化掉速矩阵 (供 Ozone 直观观测) ====================
+// 5x6 二维数组: 5 行 = 最近 5 次发射, 6 列 = 6 个电机的掉速量 (deg/s)
+// 列顺序: [内左, 内右, 内下, 外左, 外右, 外下]
+float dip_delta_matrix[5][6] = { 0 };
+// 当前写入行索引 (0~4 循环)
+uint8_t dip_matrix_index = 0;
+
 // 摩擦轮半径 (单位: 米), 例如 30mm = 0.03m (与 shoot.h 保持一致)
 #define FRICTION_WHEEL_RADIUS_LOCAL 0.03f
 // 弧度转角度系数
@@ -142,12 +149,46 @@ void ShootDebug_RecordDipBaseline(float inner_left_aps, float inner_right_aps, f
     dip_detector.baseline_outer_right = fabsf(outer_right_aps);
     dip_detector.baseline_outer_down = fabsf(outer_down_aps);
 
-    // 复位检测状态
-    dip_detector.inner_dipping = 0;
-    dip_detector.outer_dipping = 0;
-    dip_detector.inner_dip_time = 0;
-    dip_detector.outer_dip_time = 0;
     dip_detector.snapshot_taken = 0;
+}
+
+/**
+ * @brief 更新基准速度 (Peak Hold)
+ */
+void ShootDebug_UpdatePeakBaseline(float inner_left_aps, float inner_right_aps, float inner_down_aps,
+                                   float outer_left_aps, float outer_right_aps, float outer_down_aps)
+{
+    float val;
+
+    // 内圈左
+    val = fabsf(inner_left_aps);
+    if (val > dip_detector.baseline_inner_left)
+        dip_detector.baseline_inner_left = val;
+
+    // 内圈右
+    val = fabsf(inner_right_aps);
+    if (val > dip_detector.baseline_inner_right)
+        dip_detector.baseline_inner_right = val;
+
+    // 内圈下
+    val = fabsf(inner_down_aps);
+    if (val > dip_detector.baseline_inner_down)
+        dip_detector.baseline_inner_down = val;
+
+    // 外圈左
+    val = fabsf(outer_left_aps);
+    if (val > dip_detector.baseline_outer_left)
+        dip_detector.baseline_outer_left = val;
+
+    // 外圈右
+    val = fabsf(outer_right_aps);
+    if (val > dip_detector.baseline_outer_right)
+        dip_detector.baseline_outer_right = val;
+
+    // 外圈下
+    val = fabsf(outer_down_aps);
+    if (val > dip_detector.baseline_outer_down)
+        dip_detector.baseline_outer_down = val;
 }
 
 /**
@@ -234,6 +275,17 @@ void ShootDebug_TakeDipSnapshot(float inner_left_aps, float inner_right_aps, flo
         dip_snapshot.valid_dip_count++;
     if (dip_snapshot.delta_outer_down > DIP_NOISE_THRESHOLD)
         dip_snapshot.valid_dip_count++;
+
+    // --- 写入简化掉速矩阵 (5x6) ---
+    // 将本次 6 个电机的掉速量写入当前行, 列顺序: [内左, 内右, 内下, 外左, 外右, 外下]
+    dip_delta_matrix[dip_matrix_index][0] = dip_snapshot.delta_inner_left;
+    dip_delta_matrix[dip_matrix_index][1] = dip_snapshot.delta_inner_right;
+    dip_delta_matrix[dip_matrix_index][2] = dip_snapshot.delta_inner_down;
+    dip_delta_matrix[dip_matrix_index][3] = dip_snapshot.delta_outer_left;
+    dip_delta_matrix[dip_matrix_index][4] = dip_snapshot.delta_outer_right;
+    dip_delta_matrix[dip_matrix_index][5] = dip_snapshot.delta_outer_down;
+    // 索引递增, 0~4 循环覆盖
+    dip_matrix_index = (dip_matrix_index + 1) % 5;
 }
 
 /**

@@ -198,6 +198,13 @@ void ShootDebug_RecordDipBaseline(float inner_left_aps, float inner_right_aps, f
                                   float outer_left_aps, float outer_right_aps, float outer_down_aps);
 
 /**
+ * @brief 更新基准速度 (Peak Hold) - 用于应对前馈导致的转速升高
+ * @note 如果当前速度 > 记录的基准速度, 则更新基准速度
+ */
+void ShootDebug_UpdatePeakBaseline(float inner_left_aps, float inner_right_aps, float inner_down_aps,
+                                   float outer_left_aps, float outer_right_aps, float outer_down_aps);
+
+/**
  * @brief 执行掉速抓拍 (当检测到掉速时调用)
  * @param inner_left_aps 内圈左当前速度 (deg/s)
  * @param inner_right_aps 内圈右当前速度 (deg/s)

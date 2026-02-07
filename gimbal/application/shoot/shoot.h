@@ -21,11 +21,11 @@
 
 // ==================== 堵转检测参数 ====================
 // 堵转检测电流阈值 (raw值, M3508满量程16384, 设为 ~80% 高阈值使堵转处理更激烈)
-#define STALL_CURRENT_THRESHOLD 14500
+#define STALL_CURRENT_THRESHOLD 15500
 // 堵转检测速度阈值 (deg/s), 低于此值且电流高则判定为堵转
 #define STALL_SPEED_THRESHOLD 500.0f
 // 堵转检测消抖时间 (ms), 持续满足条件才确认堵转
-#define STALL_DETECT_TIME 100
+#define STALL_DETECT_TIME 500
 // 反转角度 (deg), 约为1/2颗弹丸角度,足够解卡但用户无感
 #define REVERSE_ANGLE ONE_BULLET_DELTA_ANGLE
 // 反转持续时间 (ms)
