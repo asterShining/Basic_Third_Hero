@@ -17,7 +17,7 @@
 
 // [新增] 摩擦轮前馈控制参数
 #define FRICTION_FEEDFORWARD_CURRENT 500 // 前馈电流值
-#define FRICTION_FEEDFORWARD_TIME 50 // 前馈持续时间 (ms)
+#define FRICTION_FEEDFORWARD_TIME 300 // 前馈持续时间 (ms)
 
 // ==================== 堵转检测参数 ====================
 // 堵转检测电流阈值 (raw值, M3508满量程16384, 设为 ~80% 高阈值使堵转处理更激烈)

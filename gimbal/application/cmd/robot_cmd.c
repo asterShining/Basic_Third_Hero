@@ -363,7 +363,7 @@ static void RemoteControlSet()
     if (friction_switch_state == 1) {
         // 1. 开启摩擦轮
         shoot_cmd_send.friction_mode = FRICTION_ON;
-        shoot_cmd_send.bullet_speed = BIG_AMU_12;
+        shoot_cmd_send.bullet_speed = BIG_AMU_16;
 
         // 2. 处理开火指令 (左拨杆 -> 下)
         // 只有在摩擦轮开启时，拨到下面才有效

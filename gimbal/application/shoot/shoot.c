@@ -142,14 +142,14 @@ void ShootInit()
         .controller_param_init_config = {
             .angle_PID = {
                 // 如果启用位置环来控制发弹,需要较大的I值保证输出力矩的线性度否则出现接近拨出的力矩大幅下降
-                .Kp = 2.3, // 10
+                .Kp = 1.3, // 10
                 .Ki = 0.0,
                 .Kd = 0.01,
                 .MaxOut = 9000, // 角度环输出限幅 (deg/s), 提高以允许更大力矩
 
             },
             .speed_PID = {
-                .Kp = 3.9, // 10
+                .Kp = 2.9, // 10S
                 .Ki = 0.05, // 1
                 .Kd = 0.0,
                 .Improve = PID_Integral_Limit,
@@ -562,8 +562,8 @@ static void HandleSingleFire(uint8_t trigger_active)
             // 这里可以针对每个电机单独设置方向 +/-
             // 目前假设底层电机模块处理了 MOTOR_DIRECTION_REVERSE, 所以这里都给正值 (Forward Current)
             ff_inner_left = 300.0f;
-            ff_inner_right = 700.0f;
-            ff_inner_down = 800;
+            ff_inner_right = 200.0f;
+            ff_inner_down = 500;
             ff_outer_left = 0.0f;
             ff_outer_right = 0.0f;
             ff_outer_down = 0.0f;
@@ -785,8 +785,8 @@ void ShootTask()
             ShootSetSpeedDual(11.5f, 12.0f);
             break;
         case BIG_AMU_16:
-            // 目标16.5m/s：一级给16.0，二级给16.5
-            ShootSetSpeedDual(16.0f, 16.5f);
+            // 目标16.5m/s：一级给16.0，二级给16.8
+            ShootSetSpeedDual(16.0f, 16.8f);
             break;
         default:
             // 默认值

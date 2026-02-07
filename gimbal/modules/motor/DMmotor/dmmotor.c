@@ -184,6 +184,22 @@ void DMMotorTask(void const *argument)
     // uint16_t tmp;
     DMMotor_Send_s motor_send_mailbox;
     while (1) {
+        // ================= [新增] 自动监测与快速复位逻辑 =================
+        if (motor->stop_flag == MOTOR_ENALBED) {
+            // 2. 扭矩过低时的保活策略 (防止意外失能)
+            // 如果扭矩绝对值小于 1.0f，认为可能处于"软失能"或低负载状态
+            // 以 200Hz 频率 (每5ms一次) 发送使能指令，确保电机保持在线
+            if (fabs(motor->measure.torque) < 1.0f) {
+                motor->enable_cmd_cnt++;
+                if (motor->enable_cmd_cnt >= 5) { // 1000HzLoop / 5 = 200Hz
+                    DMMotorSetMode(DM_CMD_MOTOR_MODE, motor);
+                    motor->enable_cmd_cnt = 0;
+                }
+            } else {
+                motor->enable_cmd_cnt = 0;
+            }
+        }
+        // ===============================================================
         // ================= 1. 反馈源选择与处理 =================
         // 角度反馈
         if (setting->angle_feedback_source == OTHER_FEED && motor->other_angle_feedback_ptr)
