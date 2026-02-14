@@ -36,7 +36,6 @@ void VisionSetQuaternion(const float *q)
     memcpy(send_data.q, q, sizeof(float) * 4);
 }
 
-/* ==================== 离线回调函数 ==================== */
 /**
  * @brief 设置发送数据的云台姿态
  */
@@ -207,9 +206,6 @@ static void DecodeVision(void)
     }
 }
 
-/**
- * @brief 初始化视觉通信 (UART模式)
- */
 Vision_Recv_s *VisionInit(UART_HandleTypeDef *_handle)
 {
     USART_Init_Config_s conf;
@@ -224,9 +220,8 @@ Vision_Recv_s *VisionInit(UART_HandleTypeDef *_handle)
         .owner_id = vision_usart_instance,
         .reload_count = 10,
     };
-    vision_daemon = DaemonRegister(&daemon_conf);
+    vision_daemon_instance = DaemonRegister(&daemon_conf);
 
-    LOGINFO("[Vision] SP协议初始化完成 (UART模式)");
     return &recv_data;
 }
 
@@ -334,61 +329,4 @@ void VisionSend(void)
     USBTransmit((uint8_t *)&tx_frame, sizeof(tx_frame));
 }
 
-/**
- * @brief 设置弹道信息
- */
-void VisionSetBulletInfo(float bullet_speed, uint16_t bullet_count)
-{
-    send_data.bullet_speed = bullet_speed;
-    send_data.bullet_count = bullet_count;
-}
-
-/**
- * @brief 获取上位机控制模式
- */
-uint8_t VisionGetMode(void)
-{
-    return recv_data.mode;
-}
-
-/**
- * @brief 检查视觉是否在线
- */
-uint8_t VisionIsReady(void)
-{
-    return DaemonIsOnline(vision_daemon);
-}
-
-/**
- * @brief 启用测试模式
- */
-void VisionTestMode(void)
-{
-    test_mode_enabled = 1;
-    test_counter = 0;
-    LOGINFO("[Vision] 测试模式已启用");
-}
-
-/**
- * @brief 获取测试统计
- */
-uint32_t VisionGetTestStats(void)
-{
-    return rx_frame_count;
-}
-
-/**
- * @brief 设置云台姿态 (兼容旧接口)
- *
- * 功能: 通过欧拉角设置云台姿态 (简化版)
- * 原因: 兼容ins_task.c中的调用, 暂时注释掉不使用
- */
-void VisionSetAltitude(float yaw, float pitch, float roll)
-{
-    // 暂时仅更新角度, 不计算四元数
-    // 实际使用时应调用 VisionSetGimbalState 和 VisionSetQuaternion
-    send_data.yaw = yaw;
-    send_data.pitch = pitch;
-    // roll 暂不使用
-    (void)roll;
-}
+#endif // VISION_USE_VCP

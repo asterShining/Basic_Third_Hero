@@ -18,53 +18,23 @@
 
 /* ======================== 缓冲区大小定义 ======================== */
 /* 串口/VCP模式: 接收大小为 VisionToGimbal 结构体大小, 发送大小为 GimbalToVision 结构体大小 */
-#define VISION_RECV_SIZE  sizeof(SP_VisionToGimbal_t)
-#define VISION_SEND_SIZE  sizeof(SP_GimbalToVision_t)
+#define VISION_RECV_SIZE sizeof(SP_VisionToGimbal_t)
+#define VISION_SEND_SIZE sizeof(SP_GimbalToVision_t)
 
 /* ======================== 兼容性类型定义 ======================== */
 /* 以下类型由 robot_def.h 中的 Shoot_Ctrl_Cmd_s / Chassis_Upload_Data_s 使用 */
 
-/* ==================== 发送数据结构 (发送到上位机) ==================== */
-/**
- * @brief 视觉发送数据结构
- *
- * 发送给上位机的云台状态, 用于视觉解算
- */
-typedef struct {
-    uint8_t mode; // 工作模式: 0-空闲, 1-自瞄
-
-    float quaternion[4]; // 姿态四元数 (wxyz)
-    float yaw; // 当前Yaw角度 (度)
-    float yaw_vel; // 当前Yaw角速度 (度/秒)
-    float pitch; // 当前Pitch角度 (度)
-    float pitch_vel; // 当前Pitch角速度 (度/秒)
-
-    float bullet_speed; // 弹速 (m/s)
-    uint16_t bullet_count; // 累计发弹数
-} Vision_Send_s;
-
-/* ==================== 工作模式枚举 ==================== */
-typedef enum {
-    VISION_MODE_IDLE = 0, // 空闲模式
-    VISION_MODE_AUTO_AIM = 1, // 自动瞄准模式
-} Vision_Work_Mode_e;
-
-/* ==================== 兼容旧代码的类型定义 ==================== */
-
-/**
- * @brief 敌方颜色枚举 (兼容旧接口)
- */
 typedef enum {
     COLOR_NONE = 0,
     COLOR_BLUE = 1,
-    COLOR_RED  = 2,
+    COLOR_RED = 2,
 } Enemy_Color_e;
 
 typedef enum {
     BULLET_SPEED_NONE = 0,
-    BIG_AMU_12   = 12,
+    BIG_AMU_12 = 12,
     SMALL_AMU_15 = 15,
-    BIG_AMU_16   = 16,
+    BIG_AMU_16 = 16,
     SMALL_AMU_20 = 20,
     SMALL_AMU_30 = 30,
 } Bullet_Speed_e;
@@ -81,18 +51,18 @@ typedef struct
     /* 控制模式 (由上位机决定)
      * CAN模式:  control=data[0], shoot=data[1]
      * 串口模式: mode 字段 (0=不控制, 1=控制不开火, 2=控制且开火) */
-    uint8_t control;        // 是否启用自瞄控制 (1=启用)
-    uint8_t shoot;          // 是否开火 (1=开火)
+    uint8_t control; // 是否启用自瞄控制 (1=启用)
+    uint8_t shoot; // 是否开火 (1=开火)
 
     /* 视觉解算的目标角度 (弧度) */
-    float yaw;              // yaw 轴目标角度或偏移 (rad)
-    float pitch;            // pitch 轴目标角度或偏移 (rad)
+    float yaw; // yaw 轴目标角度或偏移 (rad)
+    float pitch; // pitch 轴目标角度或偏移 (rad)
 
     /* 串口模式额外数据 (CAN模式下为0) */
-    float yaw_vel;          // yaw 角速度前馈 (rad/s)
-    float yaw_acc;          // yaw 角加速度前馈 (rad/s²)
-    float pitch_vel;        // pitch 角速度前馈 (rad/s)
-    float pitch_acc;        // pitch 角加速度前馈 (rad/s²)
+    float yaw_vel; // yaw 角速度前馈 (rad/s)
+    float yaw_acc; // yaw 角加速度前馈 (rad/s²)
+    float pitch_vel; // pitch 角速度前馈 (rad/s)
+    float pitch_acc; // pitch 角加速度前馈 (rad/s²)
 
     /* CAN模式额外数据 */
     float horizon_distance; // 水平距离 (m), 用于弹道补偿
@@ -109,19 +79,19 @@ typedef struct
 typedef struct
 {
     /* IMU 四元数 (wxyz 顺序, 与上位机 GimbalToVision.q 一致) */
-    float q[4];             // q[0]=w, q[1]=x, q[2]=y, q[3]=z
+    float q[4]; // q[0]=w, q[1]=x, q[2]=y, q[3]=z
 
     /* 云台角度和角速度 (串口模式需要) */
-    float yaw;              // yaw 角度 (rad)
-    float yaw_vel;          // yaw 角速度 (rad/s)
-    float pitch;            // pitch 角度 (rad)
-    float pitch_vel;        // pitch 角速度 (rad/s)
+    float yaw; // yaw 角度 (rad)
+    float yaw_vel; // yaw 角速度 (rad/s)
+    float pitch; // pitch 角度 (rad)
+    float pitch_vel; // pitch 角速度 (rad/s)
 
     /* 机器人状态 */
-    float bullet_speed;     // 实时弹速 (m/s)
-    uint16_t bullet_count;  // 累计发弹计数
-    uint8_t mode;           // 当前模式 (SP_Vision_Mode_e)
-    uint8_t shoot_mode;     // 射击模式 (SP_Shoot_Mode_e), CAN模式使用
+    float bullet_speed; // 实时弹速 (m/s)
+    uint16_t bullet_count; // 累计发弹计数
+    uint8_t mode; // 当前模式 (SP_Vision_Mode_e)
+    uint8_t shoot_mode; // 射击模式 (SP_Shoot_Mode_e), CAN模式使用
 } Vision_Send_s;
 #pragma pack()
 
@@ -170,4 +140,4 @@ void VisionSetStatus(uint8_t mode, float bullet_speed, uint16_t bullet_count);
  */
 uint8_t VisionIsOnline(void);
 
-#endif // MASTER_PROCESS_H
+#endif // !MASTER_PROCESS_H
