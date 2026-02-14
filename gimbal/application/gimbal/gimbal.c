@@ -9,11 +9,17 @@
 #include "bmi088.h"
 #include "gimbal_pitch_cali.h"
 
-// 顶部宏定义区域
-#define PITCH_GRAVITY_COEFFICIENT_K1 -15.2383f
-#define PITCH_GRAVITY_COEFFICIENT_K2 -0.2070f
+// // 顶部宏定义区域
+// #define PITCH_GRAVITY_COEFFICIENT_K1 -15.2383f
+// #define PITCH_GRAVITY_COEFFICIENT_K2 -0.2070f
+// // 新增 Offset 宏 (注意保留负号)
+// #define PITCH_GRAVITY_OFFSET -16.1574f
+
+// 更新为拟合结果
+#define PITCH_GRAVITY_COEFFICIENT_K1 -1.406f
+#define PITCH_GRAVITY_COEFFICIENT_K2 -0.6058f
 // 新增 Offset 宏 (注意保留负号)
-#define PITCH_GRAVITY_OFFSET -16.1574f
+#define PITCH_GRAVITY_OFFSET -5.0816f
 
 #define PITCH_MECH_LIMIT_MAX 0.08f // 上极限
 #define PITCH_MECH_LIMIT_MIN -0.967f // 下极限
@@ -54,7 +60,7 @@ void GimbalInit()
         },
         .controller_param_init_config = {
             .angle_PID = {
-                .Kp = 0.71, // 0.72
+                .Kp = 0.61, // 0.72
                 .Ki = 0,
                 .Kd = 0,
 
@@ -65,7 +71,7 @@ void GimbalInit()
             },
             .speed_PID = {
                 .Kp = 2.1, // 2.1
-                .Ki = 0.23, // 0.1
+                .Ki = 0.1, // 0.1
                 .Kd = 0,
                 .Improve = PID_Trapezoid_Intergral | PID_Integral_Limit | PID_Derivative_On_Measurement,
                 .IntegralLimit = 3,

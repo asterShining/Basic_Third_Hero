@@ -254,8 +254,16 @@ static void RemoteControlSet()
         }
 
         robot_state = ROBOT_READY;
-        chassis_cmd_send.chassis_mode = CHASSIS_NO_FOLLOW;
-        gimbal_cmd_send.gimbal_mode = GIMBAL_FREE_MODE;
+        // [用户要求] 注释掉原有逻辑 (User request: Comment out original logic)
+        // chassis_cmd_send.chassis_mode = CHASSIS_NO_FOLLOW;
+        // gimbal_cmd_send.gimbal_mode = GIMBAL_FREE_MODE;
+
+        // [新增] 小陀螺模式配置 (New Configuration: Little Top Mode)
+        // 底盘进入自旋模式 (wz=4000，由chassis.c控制)
+        chassis_cmd_send.chassis_mode = CHASSIS_ROTATE;
+        // 云台切换至陀螺仪模式以保持世界坐标系下的稳定瞄准
+        gimbal_cmd_send.gimbal_mode = GIMBAL_GYRO_MODE;
+
         shoot_cmd_send.shoot_mode = SHOOT_ON;
 
     }
