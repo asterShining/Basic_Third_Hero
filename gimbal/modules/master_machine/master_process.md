@@ -1,133 +1,130 @@
-# master_process
+# master_process — 视觉上位机通信模块
 
+> 适配同济大学 sp_vision_25 上位机通信协议
 
+## 概述
 
-<p align='right'>neozng1@hnu.edu.cn</p>
+本模块负责下位机与视觉上位机 (`sp_vision_25`) 的双向通信，支持三种通信方式：
 
-> TODO:
->
-> 1. 补全标志位解析和发送设置的代码
-> 2. 增加发送给视觉数据的时间戳用于数据对齐
+| 宏定义              | 通信方式        | 对应上位机模块         |
+|:------------------|:-------------|:----------------|
+| `VISION_USE_VCP`  | USB 虚拟串口（默认） | `io/gimbal`     |
+| `VISION_USE_UART` | 硬件串口         | `io/gimbal`     |
+| `VISION_USE_CAN`  | CAN 总线       | `io/cboard`     |
 
+在 `robot_def.h` 中选择启用哪个宏。
 
+---
 
-## 总览和封装说明
+## 串口/VCP 协议 (SP协议)
 
-模块包含了和视觉通信的初始化、向上位机发送信息的接口和模块的串口的回调处理。接口的定义统一，可以方便的替换成其他通信方式，如CAN。
+### 帧格式
 
-## 代码结构
+**下位机→上位机 (`SP_GimbalToVision_t`, 38字节):**
 
-.h文件内包括了外部接口和与**视觉上位机通信的数据结构定义**，以及模块对应的宏。c文件内为私有函数和外部接口的定义。
+| 偏移 | 长度 | 字段 | 类型 | 说明 |
+|:--|:--|:--|:--|:--|
+| 0 | 2 | head | u8[2] | 帧头 `'S','P'` |
+| 2 | 1 | mode | u8 | 机器人模式 (0=空闲, 1=自瞄, 2=小符, 3=大符) |
+| 3 | 16 | q[4] | float×4 | IMU 四元数 (w,x,y,z) |
+| 19 | 4 | yaw | float | yaw 角度 (rad) |
+| 23 | 4 | yaw_vel | float | yaw 角速度 (rad/s) |
+| 27 | 4 | pitch | float | pitch 角度 (rad) |
+| 31 | 4 | pitch_vel | float | pitch 角速度 (rad/s) |
+| 35 | 4 | bullet_speed | float | 弹速 (m/s) |
+| 39 | 2 | bullet_count | u16 | 累计发弹数 |
+| 41 | 2 | crc16 | u16 | CRC16-CCITT (小端) |
 
-本模块主要是对协议解析的处理和协议发送的封装，实际内容不多。协议相关内容都在`seasky_protocol.h`中。
+**上位机→下位机 (`SP_VisionToGimbal_t`, 29字节):**
 
-## 类型定义
+| 偏移 | 长度 | 字段 | 类型 | 说明 |
+|:--|:--|:--|:--|:--|
+| 0 | 2 | head | u8[2] | 帧头 `'S','P'` |
+| 2 | 1 | mode | u8 | 0=不控制, 1=控制不开火, 2=控制+开火 |
+| 3 | 4 | yaw | float | 目标 yaw (rad) |
+| 7 | 4 | yaw_vel | float | yaw 角速度前馈 (rad/s) |
+| 11 | 4 | yaw_acc | float | yaw 角加速度前馈 (rad/s²) |
+| 15 | 4 | pitch | float | 目标 pitch (rad) |
+| 19 | 4 | pitch_vel | float | pitch 角速度前馈 (rad/s) |
+| 23 | 4 | pitch_acc | float | pitch 角加速度前馈 (rad/s²) |
+| 27 | 2 | crc16 | u16 | CRC16-CCITT (小端) |
 
-和视觉通信所必须的标志位和数据。包括开火模式，目标状态，目标类型，接收/发送数据结构体。
+### CRC16 校验
 
-```c
-typedef enum
-{
-	NO_FIRE = 0,
-	AUTO_FIRE = 1,
-	AUTO_AIM = 2
-} Fire_Mode_e;
+- **多项式**: CRC16-CCITT (反转形式, 0x8408)
+- **初始值**: 0xFFFF
+- **校验范围**: 从 `head[0]` 到 CRC16 字段之前的所有字节
+- **存储方式**: 小端序 (低字节在前)
+- **与上位机 `tools/crc.cpp` 完全相同的查表实现**
 
-typedef enum
-{
-	NO_TARGET = 0,
-	TARGET_CONVERGING = 1,
-	READY_TO_FIRE = 2
-} Target_State_e;
+---
 
-typedef enum
-{
-	NO_TARGET_NUM = 0,
-	HERO1 = 1,
-	ENGINEER2 = 2,
-	INFANTRY3 = 3,
-	INFANTRY4 = 4,
-	INFANTRY5 = 5,
-	OUTPOST = 6,
-	SENTRY = 7,
-	BASE = 8
-} Target_Type_e;
+## CAN 协议
 
-typedef struct
-{
-	Fire_Mode_e fire_mode;
-	Target_State_e target_state;
-	Target_Type_e target_type;
+### CAN ID 定义
 
-	float pitch;
-	float yaw;
-} Vision_Recv_s;
+| CAN ID | 方向 | 内容 |
+|:--|:--|:--|
+| `0x100` | 下位机→上位机 | IMU 四元数 |
+| `0x101` | 下位机→上位机 | 弹速/模式/射击模式 |
+| `0xFF`  | 上位机→下位机 | 控制命令 |
 
-typedef enum
-{
-	BLUE = 0,
-	RED = 1
-} Enemy_Color_e;
+### 数据编码
 
-typedef enum
-{
-	MODE_AIM = 0,
-	MODE_SMALL_BUFF = 1,
-	MODE_BIG_BUFF = 2
-} Work_Mode_e;
+所有数据均使用 **int16 缩放编码**，大端序 (高字节在前):
 
-typedef enum
-{
-	BIG_AMU_10 = 10,
-	SMALL_AMU_15 = 15,
-	BIG_AMU_16 = 16,
-	SMALL_AMU_18 = 18,
-	SMALL_AMU_30 = 30,
-} Bullet_Speed_e;
+| 数据类型 | 缩放因子 | 精度 |
+|:--|:--|:--|
+| 四元数分量 | ×10000 | 0.0001 |
+| yaw/pitch角度 | ×10000 | 0.0001 rad |
+| 弹速 | ×100 | 0.01 m/s |
 
-typedef struct
-{
-	Enemy_Color_e enemy_color;
-	Work_Mode_e work_mode;
-	Bullet_Speed_e bullet_speed;
+### CAN 帧格式
 
-	float yaw;
-	float pitch;
-	float roll;
-} Vision_Send_s;
+**四元数帧 (0x100):**
 ```
+[x_h, x_l, y_h, y_l, z_h, z_l, w_h, w_l]
+```
+
+**状态帧 (0x101):**
+```
+[bs_h, bs_l, mode, shoot_mode, 0, 0, 0, 0]
+```
+
+**命令帧 (0xFF, 上位机→下位机):**
+```
+[control, shoot, yaw_h, yaw_l, pitch_h, pitch_l, dist_h, dist_l]
+```
+
+---
 
 ## 外部接口
 
 ```c
+// 初始化 (UART 模式传串口句柄, VCP/CAN 模式传 NULL)
 Vision_Recv_s *VisionInit(UART_HandleTypeDef *_handle);
 
-void VisionSend(Vision_Send_s *send);
+// 发送数据 (在主循环/定时任务中调用)
+void VisionSend(void);
+
+// 设置 IMU 四元数
+void VisionSetQuaternion(const float *q);
+
+// 设置云台姿态
+void VisionSetAltitude(float yaw, float pitch, float yaw_vel, float pitch_vel);
+
+// 设置机器人状态
+void VisionSetStatus(uint8_t mode, float bullet_speed, uint16_t bullet_count);
+
+// 检查是否在线
+uint8_t VisionIsOnline(void);
 ```
 
-给`VisionInit()`传入串口handle，将初始化一个视觉通信模块，返回值是接收数据的结构体指针。拥有视觉模块的应用应该在初始化中调用此函数，并保存返回值的指针。
+## 文件结构
 
-调用`VisionSend`并传入填好发送数据的结构体，会通过底层的通信模块向视觉发送一帧报文。
-
-## 私有函数和变量
-
-```c
-static Vision_Recv_s recv_data;
-
-static usart_instance *vision_usart_instance;
-
-static void DecodeVision()
-{
-    static uint16_t flag_register;
-    get_protocol_info(vision_usart_instance->recv_buff, &flag_register, (uint8_t*)&recv_data.pitch);
-    // TODO: code to resolve flag_register;
-}
-```
-
-第一个是保存接收数据的结构体，其指针将会在初始化的时候返回给拥有者。目前最多只能配置一个视觉模块。
-
-第二个是该模块拥有的串口实例指针，用于调度其底层的发送和接收。如果要换成CAN/SPI等，替换成对应实例，并修改初始化和发送的实现即可。
-
-`DecodeVision()`是解析视觉接收数据的回调函数，会在串口接收回调中被调用。如果修改通信协议，只需要更改
-
-`get_protocol_info()`。
+| 文件 | 说明 |
+|:--|:--|
+| `master_process.h` | 模块头文件，定义收发结构体和外部接口 |
+| `master_process.c` | 模块实现，三种通信模式的初始化/收发逻辑 |
+| `sp_vision_protocol.h` | 协议定义，与上位机完全匹配的数据包结构体 |
+| `sp_vision_protocol.c` | 协议实现，CRC16-CCITT + 串口打包/解包 + CAN编解码 |
