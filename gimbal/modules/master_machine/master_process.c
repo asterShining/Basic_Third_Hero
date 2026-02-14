@@ -1,172 +1,209 @@
 /**
- * @file master_process.c
- * @brief 视觉通信模块实现 (SP协议版本)
+ * @file    master_process.c
+ * @brief   视觉上位机 (sp_vision_25) 通信模块 — 实现
+ * @details 适配同济大学 sp_vision 上位机通信协议。
+ *          根据 robot_def.h 中的宏定义, 选择以下通信方式之一:
+ *          - VISION_USE_VCP:  USB 虚拟串口 (默认)
+ *          - VISION_USE_UART: 硬件串口
+ *          - VISION_USE_CAN:  CAN 总线
  *
- * 实现与 sp_vision_25 上位机的通信
- * 支持 VCP (USB虚拟串口) 模式
+ *          CAN 协议: 使用 int16 缩放编码, 与 io/cboard.cpp 对应
+ *          串口协议: 使用 SP 帧头 + CRC16-CCITT, 与 io/gimbal 对应
+ * @version 2.0
+ * @date    2026-02-15
  */
 
 #include "master_process.h"
-#include "sp_protocol.h"
+#include "sp_vision_protocol.h"
 #include "daemon.h"
 #include "bsp_log.h"
 #include "robot_def.h"
+#include "memory.h"
 
-/* ==================== 静态变量 ==================== */
-static Vision_Recv_s recv_data; // 接收数据缓存
-static Vision_Send_s send_data; // 发送数据缓存
-static SP_GimbalToVision_t tx_frame; // SP协议发送帧
-static SP_VisionToGimbal_t rx_frame; // SP协议接收帧
-static DaemonInstance *vision_daemon; // 离线检测守护进程
+/* ======================== 模块私有变量 ======================== */
+static Vision_Recv_s recv_data; // 接收数据 (解析后)
+static Vision_Send_s send_data; // 发送数据 (由应用层填充)
+static DaemonInstance *vision_daemon_instance; // 通信看门狗
 
-/* ==================== 测试模式变量 ==================== */
-static uint8_t test_mode_enabled = 0; // 测试模式标志
-static uint32_t test_counter = 0; // 测试计数器
-static uint32_t rx_frame_count = 0; // 接收帧计数
+/* ======================== 公共接口实现 ======================== */
+
+/**
+ * @brief 设置发送数据的 IMU 四元数
+ * @note  四元数顺序为 [w, x, y, z], 与上位机 GimbalToVision.q 一致
+ */
+void VisionSetQuaternion(const float *q)
+{
+    memcpy(send_data.q, q, sizeof(float) * 4);
+}
 
 /* ==================== 离线回调函数 ==================== */
 /**
- * @brief 视觉离线回调
- *
- * 功能: 当视觉通信超时时被 daemon 调用
- * 原因: 检测通信异常并尝试恢复
+ * @brief 设置发送数据的云台姿态
+ */
+void VisionSetAltitude(float yaw, float pitch, float yaw_vel, float pitch_vel)
+{
+    send_data.yaw = yaw;
+    send_data.pitch = pitch;
+    send_data.yaw_vel = yaw_vel;
+    send_data.pitch_vel = pitch_vel;
+}
+
+/**
+ * @brief 设置发送数据的机器人状态标志位
+ */
+void VisionSetStatus(uint8_t mode, float bullet_speed, uint16_t bullet_count)
+{
+    send_data.mode = mode;
+    send_data.bullet_speed = bullet_speed;
+    send_data.bullet_count = bullet_count;
+}
+
+/**
+ * @brief 通信离线回调函数, 由 daemon 模块在检测到超时时调用
  */
 static void VisionOfflineCallback(void *id)
 {
-    LOGWARNING("[Vision] SP通信离线, 尝试恢复...");
-    // VCP模式下无需重启, 等待上位机重新发送即可
+#ifdef VISION_USE_UART
+    extern USARTInstance *vision_usart_instance;
+    USARTServiceInit(vision_usart_instance);
+#endif
+    LOGWARNING("[vision] offline, restarting communication.");
 }
 
-/* ==================== VCP 模式实现 ==================== */
-#ifdef VISION_USE_VCP
-
-#include "bsp_usb.h"
-static uint8_t *vis_recv_buff; // USB接收缓冲区指针
-
 /**
- * @brief USB接收回调 (解析上位机数据)
- *
- * 功能: 解析上位机发来的 VisionToGimbal 帧
- * 原因: 提取控制指令供云台应用使用
+ * @brief 检查视觉通信是否在线
  */
-static void DecodeVision(uint16_t recv_len)
+uint8_t VisionIsOnline(void)
 {
-    // 尝试解析SP协议帧
-    if (SP_ParseRxFrame(vis_recv_buff, recv_len, &rx_frame)) {
-        // 解析成功, 更新接收数据
-        recv_data.mode = rx_frame.mode;
-        recv_data.fire_command = (rx_frame.mode == SP_CTRL_FIRE) ? 1 : 0;
-        recv_data.yaw = rx_frame.yaw;
-        recv_data.yaw_vel = rx_frame.yaw_vel;
-        recv_data.yaw_acc = rx_frame.yaw_acc;
-        recv_data.pitch = rx_frame.pitch;
-        recv_data.pitch_vel = rx_frame.pitch_vel;
-        recv_data.pitch_acc = rx_frame.pitch_acc;
-
-        // 喂狗
-        DaemonReload(vision_daemon);
-        rx_frame_count++;
-
-        // 测试模式下输出日志
-        if (test_mode_enabled) {
-            LOGINFO("[Vision Test] Recv mode=%d, yaw=%.2f, pitch=%.2f",
-                    rx_frame.mode, rx_frame.yaw, rx_frame.pitch);
-        }
-    }
+    return DaemonIsOnline(vision_daemon_instance);
 }
 
+/* ======================== CAN 模式实现 ======================== */
+#ifdef VISION_USE_CAN
+
+#include "bsp_can.h"
+
+static CANInstance *vision_can_recv_instance; // CAN 接收实例 (接收视觉命令)
+static CANInstance *vision_can_send_quat; // CAN 发送实例 (发送四元数)
+static CANInstance *vision_can_send_status; // CAN 发送实例 (发送弹速/模式)
+
 /**
- * @brief 初始化视觉通信 (VCP模式)
+ * @brief CAN 接收回调: 解析上位机发来的控制命令
+ * @note  数据格式与 io/cboard.cpp 中的 send() 函数一致:
+ *        data[0] = control, data[1] = shoot
+ *        data[2..3] = yaw (int16×1e4), data[4..5] = pitch (int16×1e4)
+ *        data[6..7] = horizon_distance (int16×1e4)
  */
+static void VisionCANCallback(CANInstance *instance)
+{
+    DaemonReload(vision_daemon_instance); // 喂狗
+
+    uint8_t *data = instance->rx_buff;
+    recv_data.control = data[0];
+    recv_data.shoot = data[1];
+    recv_data.yaw = SP_CAN_DecodeInt16(&data[2], SP_CAN_ANGLE_SCALE);
+    recv_data.pitch = SP_CAN_DecodeInt16(&data[4], SP_CAN_ANGLE_SCALE);
+    recv_data.horizon_distance = SP_CAN_DecodeInt16(&data[6], SP_CAN_ANGLE_SCALE);
+}
+
 Vision_Recv_s *VisionInit(UART_HandleTypeDef *_handle)
 {
-    UNUSED(_handle); // VCP模式不使用UART句柄
+    (void)_handle; // CAN模式不使用串口
 
-    // 初始化USB VCP
-    USB_Init_Config_s conf = { .rx_cbk = DecodeVision };
-    vis_recv_buff = USBInit(conf);
+    // 注册 CAN 接收实例 (接收上位机命令, CAN ID = 0xFF)
+    CAN_Init_Config_s recv_conf = {
+        .can_handle = &hcan1,
+        .tx_id = SP_CAN_ID_QUATERNION,
+        .rx_id = SP_CAN_ID_VISION_CMD,
+        .can_module_callback = VisionCANCallback,
+    };
+    vision_can_recv_instance = CANRegister(&recv_conf);
 
-    // 初始化发送帧
-    SP_InitTxFrame(&tx_frame);
+    // 注册 CAN 发送实例 (发送四元数, CAN ID = 0x100)
+    CAN_Init_Config_s quat_conf = {
+        .can_handle = &hcan1,
+        .tx_id = SP_CAN_ID_QUATERNION,
+        .rx_id = 0, // 只发送, 不接收
+    };
+    vision_can_send_quat = CANRegister(&quat_conf);
 
-    // 注册离线检测守护进程
+    // 注册 CAN 发送实例 (发送弹速/模式, CAN ID = 0x101)
+    CAN_Init_Config_s status_conf = {
+        .can_handle = &hcan1,
+        .tx_id = SP_CAN_ID_BULLET_SPEED,
+        .rx_id = 0, // 只发送, 不接收
+    };
+    vision_can_send_status = CANRegister(&status_conf);
+
+    // 注册 daemon (通信看门狗)
     Daemon_Init_Config_s daemon_conf = {
         .callback = VisionOfflineCallback,
-        .owner_id = NULL,
-        .reload_count = 10, // 100ms超时
+        .owner_id = vision_can_recv_instance,
+        .reload_count = 10,
     };
-    vision_daemon = DaemonRegister(&daemon_conf);
+    vision_daemon_instance = DaemonRegister(&daemon_conf);
 
-    LOGINFO("[Vision] SP协议初始化完成 (VCP模式)");
     return &recv_data;
 }
 
 /**
- * @brief 发送视觉数据帧 (VCP模式)
+ * @brief CAN模式发送: 发送四元数和机器人状态给上位机
+ * @note  四元数使用 int16×1e4 编码, 与 io/cboard.cpp callback() 中的解码一致
+ *        弹速使用 int16×1e2 编码
  */
 void VisionSend(void)
 {
-    // 测试模式: 发送规律数据
-    if (test_mode_enabled) {
-        tx_frame.mode = SP_MODE_AUTO_AIM;
-        tx_frame.q[0] = 1.0f;
-        tx_frame.q[1] = 0.0f;
-        tx_frame.q[2] = 0.0f;
-        tx_frame.q[3] = 0.0f;
-        tx_frame.yaw = (float)(test_counter % 360);
-        tx_frame.yaw_vel = 10.0f;
-        tx_frame.pitch = 0.0f;
-        tx_frame.pitch_vel = 0.0f;
-        tx_frame.bullet_speed = 16.0f;
-        tx_frame.bullet_count = (uint16_t)(test_counter & 0xFFFF);
-        test_counter++;
-    } else {
-        // 正常模式: 使用设置的发送数据
-        tx_frame.mode = send_data.mode;
-        SP_SetQuaternion(&tx_frame,
-                         send_data.quaternion[0], send_data.quaternion[1],
-                         send_data.quaternion[2], send_data.quaternion[3]);
-        SP_SetGimbalState(&tx_frame,
-                          send_data.yaw, send_data.yaw_vel,
-                          send_data.pitch, send_data.pitch_vel);
-        SP_SetBulletInfo(&tx_frame, send_data.bullet_speed, send_data.bullet_count);
-    }
+    // 发送四元数 (CAN ID = 0x100)
+    // 编码顺序: x, y, z, w (与上位机 callback 中的解码顺序一致)
+    SP_CAN_EncodeInt16(&vision_can_send_quat->tx_buff[0], send_data.q[1], SP_CAN_QUAT_SCALE); // x
+    SP_CAN_EncodeInt16(&vision_can_send_quat->tx_buff[2], send_data.q[2], SP_CAN_QUAT_SCALE); // y
+    SP_CAN_EncodeInt16(&vision_can_send_quat->tx_buff[4], send_data.q[3], SP_CAN_QUAT_SCALE); // z
+    SP_CAN_EncodeInt16(&vision_can_send_quat->tx_buff[6], send_data.q[0], SP_CAN_QUAT_SCALE); // w
+    CANTransmit(vision_can_send_quat, 1);
 
-    // 计算CRC并发送
-    SP_CalcTxCRC(&tx_frame);
-    USBTransmit((uint8_t *)&tx_frame, sizeof(tx_frame));
+    // 发送弹速/模式 (CAN ID = 0x101)
+    SP_CAN_EncodeInt16(&vision_can_send_status->tx_buff[0], send_data.bullet_speed, SP_CAN_BULLET_SCALE);
+    vision_can_send_status->tx_buff[2] = send_data.mode;
+    vision_can_send_status->tx_buff[3] = send_data.shoot_mode;
+    // 预留 data[4..7] (可扩展, 例如 ft_angle)
+    vision_can_send_status->tx_buff[4] = 0;
+    vision_can_send_status->tx_buff[5] = 0;
+    vision_can_send_status->tx_buff[6] = 0;
+    vision_can_send_status->tx_buff[7] = 0;
+    CANTransmit(vision_can_send_status, 1);
 }
 
-#endif // VISION_USE_VCP
+#endif // VISION_USE_CAN
 
-/* ==================== UART 模式实现 ==================== */
+/* ======================== 串口 (UART) 模式实现 ======================== */
 #ifdef VISION_USE_UART
 
-#include "bsp_usart.h"
 static USARTInstance *vision_usart_instance;
 
 /**
- * @brief UART接收回调 (解析上位机数据)
+ * @brief 串口接收回调: 解析上位机发来的 VisionToGimbal 数据帧
+ * @note  帧格式: ['S', 'P', mode, yaw(f), yaw_vel(f), yaw_acc(f),
+ *                 pitch(f), pitch_vel(f), pitch_acc(f), crc16(u16)]
  */
 static void DecodeVision(void)
 {
-    DaemonReload(vision_daemon);
+    SP_VisionToGimbal_t rx_frame;
 
-    if (SP_ParseRxFrame(vision_usart_instance->recv_buff, VISION_RECV_SIZE, &rx_frame)) {
-        recv_data.mode = rx_frame.mode;
-        recv_data.fire_command = (rx_frame.mode == SP_CTRL_FIRE) ? 1 : 0;
+    // 使用协议层解包 (验证帧头 + CRC16)
+    if (SP_Serial_Unpack(vision_usart_instance->recv_buff, &rx_frame)) {
+        DaemonReload(vision_daemon_instance); // 喂狗
+
+        // 解析模式: 0=不控制, 1=控制不开火, 2=控制且开火
+        recv_data.control = (rx_frame.mode >= 1) ? 1 : 0;
+        recv_data.shoot = (rx_frame.mode == 2) ? 1 : 0;
+
+        // 解析控制数据
         recv_data.yaw = rx_frame.yaw;
         recv_data.yaw_vel = rx_frame.yaw_vel;
         recv_data.yaw_acc = rx_frame.yaw_acc;
         recv_data.pitch = rx_frame.pitch;
         recv_data.pitch_vel = rx_frame.pitch_vel;
         recv_data.pitch_acc = rx_frame.pitch_acc;
-        rx_frame_count++;
-
-        if (test_mode_enabled) {
-            LOGINFO("[Vision Test] Recv mode=%d, yaw=%.2f, pitch=%.2f",
-                    rx_frame.mode, rx_frame.yaw, rx_frame.pitch);
-        }
     }
 }
 
@@ -181,8 +218,7 @@ Vision_Recv_s *VisionInit(UART_HandleTypeDef *_handle)
     conf.usart_handle = _handle;
     vision_usart_instance = USARTRegister(&conf);
 
-    SP_InitTxFrame(&tx_frame);
-
+    // 注册 daemon (通信看门狗)
     Daemon_Init_Config_s daemon_conf = {
         .callback = VisionOfflineCallback,
         .owner_id = vision_usart_instance,
@@ -195,70 +231,107 @@ Vision_Recv_s *VisionInit(UART_HandleTypeDef *_handle)
 }
 
 /**
- * @brief 发送视觉数据帧 (UART模式)
+ * @brief 串口模式发送: 打包 GimbalToVision 帧并通过 UART DMA 发送
  */
 void VisionSend(void)
 {
-    if (test_mode_enabled) {
-        tx_frame.mode = SP_MODE_AUTO_AIM;
-        tx_frame.q[0] = 1.0f;
-        tx_frame.q[1] = 0.0f;
-        tx_frame.q[2] = 0.0f;
-        tx_frame.q[3] = 0.0f;
-        tx_frame.yaw = (float)(test_counter % 360);
-        tx_frame.yaw_vel = 10.0f;
-        tx_frame.pitch = 0.0f;
-        tx_frame.pitch_vel = 0.0f;
-        tx_frame.bullet_speed = 16.0f;
-        tx_frame.bullet_count = (uint16_t)(test_counter & 0xFFFF);
-        test_counter++;
-    } else {
-        tx_frame.mode = send_data.mode;
-        SP_SetQuaternion(&tx_frame,
-                         send_data.quaternion[0], send_data.quaternion[1],
-                         send_data.quaternion[2], send_data.quaternion[3]);
-        SP_SetGimbalState(&tx_frame,
-                          send_data.yaw, send_data.yaw_vel,
-                          send_data.pitch, send_data.pitch_vel);
-        SP_SetBulletInfo(&tx_frame, send_data.bullet_speed, send_data.bullet_count);
-    }
+    static SP_GimbalToVision_t tx_frame;
 
-    SP_CalcTxCRC(&tx_frame);
+    // 填充数据
+    tx_frame.mode = send_data.mode;
+    memcpy(tx_frame.q, send_data.q, sizeof(float) * 4);
+    tx_frame.yaw = send_data.yaw;
+    tx_frame.yaw_vel = send_data.yaw_vel;
+    tx_frame.pitch = send_data.pitch;
+    tx_frame.pitch_vel = send_data.pitch_vel;
+    tx_frame.bullet_speed = send_data.bullet_speed;
+    tx_frame.bullet_count = send_data.bullet_count;
+
+    // 打包 (自动填充帧头和 CRC16)
+    SP_Serial_Pack(&tx_frame);
+
+    // 发送
     USARTSend(vision_usart_instance, (uint8_t *)&tx_frame, sizeof(tx_frame), USART_TRANSFER_DMA);
 }
 
 #endif // VISION_USE_UART
 
-/* ==================== 公共接口实现 ==================== */
+/* ======================== USB 虚拟串口 (VCP) 模式实现 ======================== */
+#ifdef VISION_USE_VCP
+
+#include "bsp_usb.h"
+static uint8_t *vis_recv_buff; // USB 接收缓冲区指针
 
 /**
- * @brief 设置工作模式
+ * @brief VCP 接收回调: 解析上位机发来的 VisionToGimbal 数据帧
+ * @param recv_len 接收到的数据长度
  */
-void VisionSetMode(Vision_Work_Mode_e mode)
+static void DecodeVision(uint16_t recv_len)
 {
-    send_data.mode = (uint8_t)mode;
+    // 长度校验 (必须等于 VisionToGimbal 结构体大小)
+    if (recv_len != sizeof(SP_VisionToGimbal_t)) {
+        return;
+    }
+
+    SP_VisionToGimbal_t rx_frame;
+
+    // 使用协议层解包 (验证帧头 + CRC16)
+    if (SP_Serial_Unpack(vis_recv_buff, &rx_frame)) {
+        DaemonReload(vision_daemon_instance); // 喂狗
+
+        // 解析模式: 0=不控制, 1=控制不开火, 2=控制且开火
+        recv_data.control = (rx_frame.mode >= 1) ? 1 : 0;
+        recv_data.shoot = (rx_frame.mode == 2) ? 1 : 0;
+
+        // 解析控制数据
+        recv_data.yaw = rx_frame.yaw;
+        recv_data.yaw_vel = rx_frame.yaw_vel;
+        recv_data.yaw_acc = rx_frame.yaw_acc;
+        recv_data.pitch = rx_frame.pitch;
+        recv_data.pitch_vel = rx_frame.pitch_vel;
+        recv_data.pitch_acc = rx_frame.pitch_acc;
+    }
+}
+
+Vision_Recv_s *VisionInit(UART_HandleTypeDef *_handle)
+{
+    (void)_handle; // VCP模式不使用串口句柄
+    USB_Init_Config_s conf = { .rx_cbk = DecodeVision };
+    vis_recv_buff = USBInit(conf);
+
+    // 注册 daemon (通信看门狗)
+    Daemon_Init_Config_s daemon_conf = {
+        .callback = VisionOfflineCallback,
+        .owner_id = NULL,
+        .reload_count = 5, // 50ms (VCP通信频率较高)
+    };
+    vision_daemon_instance = DaemonRegister(&daemon_conf);
+
+    return &recv_data;
 }
 
 /**
- * @brief 设置姿态四元数
+ * @brief VCP模式发送: 打包 GimbalToVision 帧并通过 USB 发送
  */
-void VisionSetQuaternion(float w, float x, float y, float z)
+void VisionSend(void)
 {
-    send_data.quaternion[0] = w;
-    send_data.quaternion[1] = x;
-    send_data.quaternion[2] = y;
-    send_data.quaternion[3] = z;
-}
+    static SP_GimbalToVision_t tx_frame;
 
-/**
- * @brief 设置云台状态
- */
-void VisionSetGimbalState(float yaw, float yaw_vel, float pitch, float pitch_vel)
-{
-    send_data.yaw = yaw;
-    send_data.yaw_vel = yaw_vel;
-    send_data.pitch = pitch;
-    send_data.pitch_vel = pitch_vel;
+    // 填充数据
+    tx_frame.mode = send_data.mode;
+    memcpy(tx_frame.q, send_data.q, sizeof(float) * 4);
+    tx_frame.yaw = send_data.yaw;
+    tx_frame.yaw_vel = send_data.yaw_vel;
+    tx_frame.pitch = send_data.pitch;
+    tx_frame.pitch_vel = send_data.pitch_vel;
+    tx_frame.bullet_speed = send_data.bullet_speed;
+    tx_frame.bullet_count = send_data.bullet_count;
+
+    // 打包 (自动填充帧头和 CRC16)
+    SP_Serial_Pack(&tx_frame);
+
+    // 通过 USB 虚拟串口发送
+    USBTransmit((uint8_t *)&tx_frame, sizeof(tx_frame));
 }
 
 /**

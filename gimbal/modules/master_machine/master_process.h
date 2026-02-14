@@ -1,39 +1,28 @@
 /**
- * @file master_process.h
- * @brief 视觉通信模块接口定义 (SP协议版本)
- *
- * 提供与 sp_vision_25 上位机通信的接口
- * 支持 VCP (USB虚拟串口) 模式
+ * @file    master_process.h
+ * @brief   视觉上位机 (sp_vision_25) 通信模块 — 头文件
+ * @details 适配同济大学 sp_vision 上位机通信协议,支持以下通信方式:
+ *          - VISION_USE_VCP:  USB 虚拟串口 (默认, 推荐)
+ *          - VISION_USE_UART: 硬件串口
+ *          - VISION_USE_CAN:  CAN 总线
+ *          在 robot_def.h 中通过宏定义切换。
+ * @version 2.0
+ * @date    2026-02-15
  */
 
 #ifndef MASTER_PROCESS_H
 #define MASTER_PROCESS_H
 
 #include "bsp_usart.h"
-#include "sp_protocol.h"
+#include "sp_vision_protocol.h"
 
-/* ==================== 接收数据缓冲区大小 ==================== */
-#define VISION_RECV_SIZE SP_RX_FRAME_SIZE // 30字节
-#define VISION_SEND_SIZE SP_TX_FRAME_SIZE // 43字节
+/* ======================== 缓冲区大小定义 ======================== */
+/* 串口/VCP模式: 接收大小为 VisionToGimbal 结构体大小, 发送大小为 GimbalToVision 结构体大小 */
+#define VISION_RECV_SIZE  sizeof(SP_VisionToGimbal_t)
+#define VISION_SEND_SIZE  sizeof(SP_GimbalToVision_t)
 
-/* ==================== 接收数据结构 (从上位机) ==================== */
-/**
- * @brief 视觉接收数据结构
- *
- * 从上位机接收的控制指令, 用于云台自瞄控制
- */
-typedef struct {
-    uint8_t mode; // 控制模式: 0-不控制, 1-控制不开火, 2-控制并开火
-    uint8_t fire_command; // 开火指令 (mode==2时为1)
-
-    float yaw; // 目标Yaw角度 (度)
-    float yaw_vel; // Yaw角速度前馈 (度/秒)
-    float yaw_acc; // Yaw角加速度前馈 (度/秒²)
-
-    float pitch; // 目标Pitch角度 (度)
-    float pitch_vel; // Pitch角速度前馈 (度/秒)
-    float pitch_acc; // Pitch角加速度前馈 (度/秒²)
-} Vision_Recv_s;
+/* ======================== 兼容性类型定义 ======================== */
+/* 以下类型由 robot_def.h 中的 Shoot_Ctrl_Cmd_s / Chassis_Upload_Data_s 使用 */
 
 /* ==================== 发送数据结构 (发送到上位机) ==================== */
 /**
@@ -68,110 +57,117 @@ typedef enum {
 typedef enum {
     COLOR_NONE = 0,
     COLOR_BLUE = 1,
-    COLOR_RED = 2,
+    COLOR_RED  = 2,
 } Enemy_Color_e;
 
-/**
- * @brief 弹速枚举 (兼容旧接口)
- */
 typedef enum {
     BULLET_SPEED_NONE = 0,
-    BIG_AMU_12 = 12, // 42mm 12m/s
-    SMALL_AMU_15 = 15, // 17mm 15m/s
-    BIG_AMU_16 = 16, // 42mm 16m/s
-    SMALL_AMU_20 = 20, // 17mm 20m/s (默认)
-    SMALL_AMU_30 = 30, // 17mm 30m/s
+    BIG_AMU_12   = 12,
+    SMALL_AMU_15 = 15,
+    BIG_AMU_16   = 16,
+    SMALL_AMU_20 = 20,
+    SMALL_AMU_30 = 30,
 } Bullet_Speed_e;
 
-/* ==================== 公开接口函数 ==================== */
+/* ======================== 接收数据结构 ======================== */
 
 /**
- * @brief 初始化视觉通信模块
- *
- * @param _handle 用于通信的串口handle (VCP模式传NULL)
- * @return 接收数据结构体指针
+ * @brief 从视觉上位机接收的控制数据 (解析后)
+ * @note  CAN模式和串口模式解析后的数据统一存储在此结构体中
+ */
+#pragma pack(1)
+typedef struct
+{
+    /* 控制模式 (由上位机决定)
+     * CAN模式:  control=data[0], shoot=data[1]
+     * 串口模式: mode 字段 (0=不控制, 1=控制不开火, 2=控制且开火) */
+    uint8_t control;        // 是否启用自瞄控制 (1=启用)
+    uint8_t shoot;          // 是否开火 (1=开火)
+
+    /* 视觉解算的目标角度 (弧度) */
+    float yaw;              // yaw 轴目标角度或偏移 (rad)
+    float pitch;            // pitch 轴目标角度或偏移 (rad)
+
+    /* 串口模式额外数据 (CAN模式下为0) */
+    float yaw_vel;          // yaw 角速度前馈 (rad/s)
+    float yaw_acc;          // yaw 角加速度前馈 (rad/s²)
+    float pitch_vel;        // pitch 角速度前馈 (rad/s)
+    float pitch_acc;        // pitch 角加速度前馈 (rad/s²)
+
+    /* CAN模式额外数据 */
+    float horizon_distance; // 水平距离 (m), 用于弹道补偿
+} Vision_Recv_s;
+#pragma pack()
+
+/* ======================== 发送数据结构 ======================== */
+
+/**
+ * @brief 发送给视觉上位机的机器人状态数据
+ * @note  应用层 (gimbal_task, cmd_task) 负责填充此结构体
+ */
+#pragma pack(1)
+typedef struct
+{
+    /* IMU 四元数 (wxyz 顺序, 与上位机 GimbalToVision.q 一致) */
+    float q[4];             // q[0]=w, q[1]=x, q[2]=y, q[3]=z
+
+    /* 云台角度和角速度 (串口模式需要) */
+    float yaw;              // yaw 角度 (rad)
+    float yaw_vel;          // yaw 角速度 (rad/s)
+    float pitch;            // pitch 角度 (rad)
+    float pitch_vel;        // pitch 角速度 (rad/s)
+
+    /* 机器人状态 */
+    float bullet_speed;     // 实时弹速 (m/s)
+    uint16_t bullet_count;  // 累计发弹计数
+    uint8_t mode;           // 当前模式 (SP_Vision_Mode_e)
+    uint8_t shoot_mode;     // 射击模式 (SP_Shoot_Mode_e), CAN模式使用
+} Vision_Send_s;
+#pragma pack()
+
+/* ======================== 外部接口 ======================== */
+
+/**
+ * @brief  初始化视觉通信模块
+ * @param  _handle 串口句柄 (仅 VISION_USE_UART 模式使用, 其他模式传 NULL)
+ * @return 接收数据结构体指针, 应用层保存此指针以读取视觉数据
  */
 Vision_Recv_s *VisionInit(UART_HandleTypeDef *_handle);
 
 /**
- * @brief 发送视觉数据帧
- *
- * 将当前设置的云台状态打包并发送给上位机
+ * @brief  发送数据给视觉上位机
+ * @note   应在主循环或定时任务中定期调用
+ *         调用前需确保 send_data 中的数据已更新
  */
 void VisionSend(void);
 
 /**
- * @brief 设置工作模式
- *
- * @param mode 工作模式 (空闲/自瞄)
+ * @brief  设置发送数据的 IMU 四元数
+ * @param  q 四元数数组 [w, x, y, z]
  */
-void VisionSetMode(Vision_Work_Mode_e mode);
+void VisionSetQuaternion(const float *q);
 
 /**
- * @brief 设置姿态四元数
- *
- * @param w 标量部分
- * @param x 向量x
- * @param y 向量y
- * @param z 向量z
+ * @brief  设置发送数据的云台姿态 (用于串口模式的额外数据)
+ * @param  yaw       yaw 角度 (rad)
+ * @param  yaw_vel   yaw 角速度 (rad/s)
+ * @param  pitch     pitch 角度 (rad)
+ * @param  pitch_vel pitch 角速度 (rad/s)
  */
-void VisionSetQuaternion(float w, float x, float y, float z);
+void VisionSetAltitude(float yaw, float pitch, float yaw_vel, float pitch_vel);
 
 /**
- * @brief 设置云台状态
- *
- * @param yaw       Yaw角度 (度)
- * @param yaw_vel   Yaw角速度 (度/秒)
- * @param pitch     Pitch角度 (度)
- * @param pitch_vel Pitch角速度 (度/秒)
+ * @brief  设置发送数据的机器人状态标志位
+ * @param  mode         当前模式 (SP_Vision_Mode_e)
+ * @param  bullet_speed 实时弹速 (m/s)
+ * @param  bullet_count 累计发弹计数
  */
-void VisionSetGimbalState(float yaw, float yaw_vel, float pitch, float pitch_vel);
+void VisionSetStatus(uint8_t mode, float bullet_speed, uint16_t bullet_count);
 
 /**
- * @brief 设置弹道信息
- *
- * @param bullet_speed 弹速 (m/s)
- * @param bullet_count 累计发弹数
+ * @brief  检查视觉通信是否在线
+ * @return 1=在线, 0=离线
  */
-void VisionSetBulletInfo(float bullet_speed, uint16_t bullet_count);
-
-/**
- * @brief 获取上位机控制模式
- *
- * @return 控制模式: 0-不控制, 1-控制不开火, 2-控制并开火
- */
-uint8_t VisionGetMode(void);
-
-/**
- * @brief 检查视觉通信是否在线
- *
- * @return 1-在线, 0-离线
- */
-uint8_t VisionIsReady(void);
-
-/**
- * @brief 启用通信测试模式
- *
- * 测试模式下:
- * - 下位机发送规律递增的测试数据
- * - 下位机将上位机发来的数据通过日志输出
- */
-void VisionTestMode(void);
-
-/**
- * @brief 获取测试统计信息
- *
- * @return 接收到的有效帧数量
- */
-uint32_t VisionGetTestStats(void);
-
-/**
- * @brief 设置云台姿态 (兼容旧接口)
- *
- * @param yaw   Yaw角度 (度)
- * @param pitch Pitch角度 (度)
- * @param roll  Roll角度 (度)
- */
-void VisionSetAltitude(float yaw, float pitch, float roll);
+uint8_t VisionIsOnline(void);
 
 #endif // MASTER_PROCESS_H

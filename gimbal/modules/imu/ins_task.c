@@ -171,7 +171,9 @@ void INS_Task(void)
         INS.Roll = QEKF_INS.Roll;
         INS.YawTotalAngle = QEKF_INS.YawTotalAngle;
 
-        VisionSetAltitude(INS.Yaw, INS.Pitch, INS.Roll);
+        // 同步 IMU 数据到视觉通信模块 (四元数 + 姿态角 + 角速度)
+        VisionSetQuaternion(INS.q);
+        VisionSetAltitude(INS.Yaw, INS.Pitch, INS.Gyro[Z], INS.Gyro[Y]);
     }
 
     // temperature control
