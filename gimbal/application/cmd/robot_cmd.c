@@ -72,8 +72,8 @@ static uint32_t outer_eight_cnt = 0; // 外八计时器
 static uint8_t cali_triggered = 0; // 触发状态：0-无，1-内八触发，2-外八触发
 void RobotCMDInit()
 {
-    rc_data = RemoteControlInit(&huart3); // 修改为对应串口,注意如果是自研板dbus协议串口需选用添加了反相器的那个
-    // vision_recv_data = VisionInit(&huart1); // 视觉通信串口
+    // rc_data = RemoteControlInit(&huart3); // 修改为对应串口,注意如果是自研板dbus协议串口需选用添加了反相器的那个
+    vision_recv_data = VisionInit(&huart1); // 视觉通信串口
     Buzzer_config_s hint_config = {
         .alarm_level = ALARM_LEVEL_MEDIUM, // 优先级
         .octave = OCTAVE_5, // 音调 (SoFreq)
