@@ -24,6 +24,8 @@
 static Vision_Recv_s recv_data; // 接收数据 (解析后)
 static Vision_Send_s send_data; // 发送数据 (由应用层填充)
 static DaemonInstance *vision_daemon_instance; // 通信看门狗
+static uint32_t vision_log_cnt = 0; // 日志降频计数器 (避免高频刷屏)
+#define VISION_LOG_INTERVAL 200 // 每200次打印一次日志 (200Hz调用时≈1Hz输出)
 
 /* ======================== 公共接口实现 ======================== */
 
@@ -103,6 +105,14 @@ static void VisionCANCallback(CANInstance *instance)
     recv_data.yaw = SP_CAN_DecodeInt16(&data[2], SP_CAN_ANGLE_SCALE);
     recv_data.pitch = SP_CAN_DecodeInt16(&data[4], SP_CAN_ANGLE_SCALE);
     recv_data.horizon_distance = SP_CAN_DecodeInt16(&data[6], SP_CAN_ANGLE_SCALE);
+
+    // 日志: CAN 接收成功, 输出控制指令
+    char y_s[16], p_s[16], d_s[16];
+    Float2Str(y_s, recv_data.yaw);
+    Float2Str(p_s, recv_data.pitch);
+    Float2Str(d_s, recv_data.horizon_distance);
+    LOGINFO("[vision] CAN_RX ctrl=%d shoot=%d yaw=%s pitch=%s dist=%s",
+            recv_data.control, recv_data.shoot, y_s, p_s, d_s);
 }
 
 Vision_Recv_s *VisionInit(UART_HandleTypeDef *_handle)
@@ -142,6 +152,10 @@ Vision_Recv_s *VisionInit(UART_HandleTypeDef *_handle)
     };
     vision_daemon_instance = DaemonRegister(&daemon_conf);
 
+    // 日志: CAN 模式初始化完成
+    LOGINFO("[vision] Init OK (CAN mode) tx_quat=0x%X tx_status=0x%X rx_cmd=0x%X",
+            SP_CAN_ID_QUATERNION, SP_CAN_ID_BULLET_SPEED, SP_CAN_ID_VISION_CMD);
+
     return &recv_data;
 }
 
@@ -170,6 +184,9 @@ void VisionSend(void)
     vision_can_send_status->tx_buff[6] = 0;
     vision_can_send_status->tx_buff[7] = 0;
     CANTransmit(vision_can_send_status, 1);
+
+    // 日志: CAN 发送完成
+    LOGINFO("[vision] CAN_TX sent quat+status, mode=%d", send_data.mode);
 }
 
 #endif // VISION_USE_CAN
@@ -203,6 +220,16 @@ static void DecodeVision(void)
         recv_data.pitch = rx_frame.pitch;
         recv_data.pitch_vel = rx_frame.pitch_vel;
         recv_data.pitch_acc = rx_frame.pitch_acc;
+
+        // 日志: UART 接收解析成功
+        char y_s[16], p_s[16];
+        Float2Str(y_s, recv_data.yaw);
+        Float2Str(p_s, recv_data.pitch);
+        LOGINFO("[vision] UART_RX OK ctrl=%d shoot=%d yaw=%s pitch=%s",
+                recv_data.control, recv_data.shoot, y_s, p_s);
+    } else {
+        // 日志: UART 接收解析失败 (帧头或CRC错误, 具体原因由SP_Serial_Unpack输出)
+        LOGWARNING("[vision] UART_RX decode failed");
     }
 }
 
@@ -221,6 +248,9 @@ Vision_Recv_s *VisionInit(UART_HandleTypeDef *_handle)
         .reload_count = 10,
     };
     vision_daemon_instance = DaemonRegister(&daemon_conf);
+
+    // 日志: UART 模式初始化完成
+    LOGINFO("[vision] Init OK (UART mode) recv_size=%d", VISION_RECV_SIZE);
 
     return &recv_data;
 }
@@ -247,6 +277,13 @@ void VisionSend(void)
 
     // 发送
     USARTSend(vision_usart_instance, (uint8_t *)&tx_frame, sizeof(tx_frame), USART_TRANSFER_DMA);
+
+    // 日志: UART 发送完成
+    char y_s[16], p_s[16];
+    Float2Str(y_s, send_data.yaw);
+    Float2Str(p_s, send_data.pitch);
+    LOGINFO("[vision] UART_TX mode=%d yaw=%s pitch=%s crc=0x%04X",
+            tx_frame.mode, y_s, p_s, tx_frame.crc16);
 }
 
 #endif // VISION_USE_UART
@@ -264,9 +301,12 @@ static uint8_t *vis_recv_buff; // USB 接收缓冲区指针
 static void DecodeVision(uint16_t recv_len)
 {
     // 长度校验 (必须等于 VisionToGimbal 结构体大小)
-    if (recv_len != sizeof(SP_VisionToGimbal_t)) {
-        return;
-    }
+    // if (recv_len != sizeof(SP_VisionToGimbal_t)) {
+    //     // 日志: 长度不匹配
+    //     LOGWARNING("[vision] VCP_RX len mismatch: got %d, expect %d",
+    //                recv_len, sizeof(SP_VisionToGimbal_t));
+    //     return;
+    // }
 
     SP_VisionToGimbal_t rx_frame;
 
@@ -285,6 +325,23 @@ static void DecodeVision(uint16_t recv_len)
         recv_data.pitch = rx_frame.pitch;
         recv_data.pitch_vel = rx_frame.pitch_vel;
         recv_data.pitch_acc = rx_frame.pitch_acc;
+
+        // 日志: 当识别到目标(control=1)时打印关键跟踪数据
+        if (recv_data.control > 0) {
+            char y_s[16], p_s[16];
+            // 打印弧度值 (上位机发送的是绝对弧度)
+            Float2Str(y_s, recv_data.yaw);
+            Float2Str(p_s, recv_data.pitch);
+
+            if (recv_data.shoot) {
+                LOGINFO("[vision] FIRE! yaw=%s pitch=%s", y_s, p_s);
+            } else {
+                LOGINFO("[vision] TRACK yaw=%s pitch=%s", y_s, p_s);
+            }
+        }
+    } else {
+        // 日志: VCP 解析失败 (具体原因由SP_Serial_Unpack输出)
+        LOGWARNING("[vision] VCP_RX decode failed (len=%d)", recv_len);
     }
 }
 
@@ -301,6 +358,10 @@ Vision_Recv_s *VisionInit(UART_HandleTypeDef *_handle)
         .reload_count = 5, // 50ms (VCP通信频率较高)
     };
     vision_daemon_instance = DaemonRegister(&daemon_conf);
+
+    // // 日志: VCP 模式初始化完成
+    // LOGINFO("[vision] Init OK (VCP mode) recv_size=%d, expect_struct_size=%d",
+    //         VISION_RECV_SIZE, sizeof(SP_VisionToGimbal_t));
 
     return &recv_data;
 }
@@ -327,6 +388,17 @@ void VisionSend(void)
 
     // 通过 USB 虚拟串口发送
     USBTransmit((uint8_t *)&tx_frame, sizeof(tx_frame));
+
+    // // 日志: 降频输出 (每 VISION_LOG_INTERVAL 次打印一次, ≈1Hz)
+    // if ((vision_log_cnt++ % VISION_LOG_INTERVAL) == 0) {
+    //     char y_s[16], p_s[16], w_s[16];
+    //     Float2Str(y_s, send_data.yaw);
+    //     Float2Str(p_s, send_data.pitch);
+    //     Float2Str(w_s, send_data.q[0]);
+    //     LOGINFO("[vision] TX mode=%d yaw=%s pitch=%s qw=%s crc=0x%04X",
+    //             tx_frame.mode, y_s, p_s, w_s, tx_frame.crc16);
+    //     LOGINFO("[vision] online=%d", VisionIsOnline());
+    // }
 }
 
 #endif // VISION_USE_VCP

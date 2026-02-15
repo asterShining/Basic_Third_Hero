@@ -9,6 +9,7 @@
 
 #include "sp_vision_protocol.h"
 #include "memory.h"
+#include "bsp_log.h"
 
 /* ======================== CRC16-CCITT 查表 ======================== */
 /* 与上位机 sp_vision_25/tools/crc.cpp 中的 CRC16_TABLE 完全一致 */
@@ -330,11 +331,20 @@ uint8_t SP_Serial_Unpack(const uint8_t *rx_buf, SP_VisionToGimbal_t *rx_data)
 {
     // 1. 检查帧头
     if (rx_buf[0] != SP_SERIAL_HEADER_0 || rx_buf[1] != SP_SERIAL_HEADER_1) {
+        // 日志: 帧头不匹配, 输出收到的实际字节
+        LOGWARNING("[SP_Unpack] header fail: got 0x%02X 0x%02X, expect 'S' 'P'",
+                   rx_buf[0], rx_buf[1]);
         return 0;
     }
 
     // 2. CRC16 校验 (整个结构体, 含末尾的CRC16字段)
     if (!SP_CRC16_Verify(rx_buf, sizeof(SP_VisionToGimbal_t))) {
+        // 日志: CRC 校验失败, 输出收到的CRC和计算的CRC
+        uint16_t crc_recv = (uint16_t)(rx_buf[sizeof(SP_VisionToGimbal_t) - 1] << 8) | rx_buf[sizeof(SP_VisionToGimbal_t) - 2];
+        uint16_t crc_calc = SP_CRC16_CCITT(rx_buf,
+                                           sizeof(SP_VisionToGimbal_t) - 2);
+        LOGWARNING("[SP_Unpack] CRC fail: recv=0x%04X, calc=0x%04X, len=%d",
+                   crc_recv, crc_calc, sizeof(SP_VisionToGimbal_t));
         return 0;
     }
 

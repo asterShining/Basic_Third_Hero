@@ -533,8 +533,16 @@ void RobotCMDTask()
 
     // EmergencyHandler(); // 处理模块离线和遥控器急停等紧急情况
 
-    // 设置视觉发送数据,还需增加加速度和角速度数据
-    // VisionSetFlag(chassis_fetch_data.enemy_color,,chassis_fetch_data.bullet_speed)
+    // ======================== 视觉通信发送 ========================
+    // 注: 四元数和姿态由 ins_task.c 的 INS_Task() 以 1kHz 频率直接设置
+    //     (VisionSetQuaternion + VisionSetAltitude), 使用 EKF 解算的真实四元数
+    // 此处只需补充机器人状态并触发发送
+    VisionSetStatus(
+        (uint8_t)gimbal_cmd_send.gimbal_mode, // 当前模式
+        (float)shoot_cmd_send.bullet_speed, // 弹速
+        shoot_fetch_data.fire_count // 累计发弹数
+    );
+    VisionSend(); // 通过 USB VCP 发送给上位机
 
     // 推送消息,双板通信,视觉通信等
     // 其他应用所需的控制数据在remotecontrolsetmode和mousekeysetmode中完成设置
