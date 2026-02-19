@@ -12,6 +12,7 @@
 #include "dji_motor.h"
 #include "bmi088.h"
 #include "buzzer.h"
+#include "auto_gimbal.h"
 #include "remote_control.h"
 
 // bsp
@@ -69,7 +70,11 @@ static uint16_t last_switch_right = RC_SW_DOWN;
 // --- 新增的静态变量，用于长按计时 ---
 static uint32_t inner_eight_cnt = 0; // 内八计时器
 static uint32_t outer_eight_cnt = 0; // 外八计时器
+
 static uint8_t cali_triggered = 0; // 触发状态：0-无，1-内八触发，2-外八触发
+// [新增] 自瞄状态变量
+static AutoAim_State_e auto_aim_state = AUTO_AIM_IDLE;
+
 void RobotCMDInit()
 {
     // rc_data = RemoteControlInit(&huart3); // 修改为对应串口,注意如果是自研板dbus协议串口需选用添加了反相器的那个
@@ -304,9 +309,19 @@ static void RemoteControlSet()
 
     // 云台控制量计算 (仅在非急停状态下累加)
     if (!switch_is_down(current_switch_right)) {
+        float yaw_sensitivity = 0.001f;
+        float pitch_sensitivity = 0.0003f;
+
+        // [新增] 拨轮微调模式
+        // 当左侧拨轮向下拨动超过 100 时，进入微调模式 (灵敏度降低)
+        if (rc_data[TEMP].rc.dial > 100) {
+            yaw_sensitivity *= 0.3f; // 降低 YAW 灵敏度至 30%
+            pitch_sensitivity *= 0.3f; // 降低 PITCH 灵敏度至 30%
+        }
+
         // 使用处理后的 rocker_lx 和 rocker_ly
-        gimbal_cmd_send.yaw -= 0.001f * rocker_lx;
-        gimbal_cmd_send.pitch += 0.0003f * rocker_ly;
+        gimbal_cmd_send.yaw -= yaw_sensitivity * rocker_lx;
+        gimbal_cmd_send.pitch += pitch_sensitivity * rocker_ly;
 
         // ==================== [新增] 软件限幅逻辑 ====================
 
@@ -316,6 +331,45 @@ static void RemoteControlSet()
         } else if (gimbal_cmd_send.pitch < PITCH_MIN_ANGLE) {
             gimbal_cmd_send.pitch = PITCH_MIN_ANGLE;
         }
+    }
+
+    // ==========================================
+    // [新增] 自瞄逻辑集成
+    // ==========================================
+    // 触发条件: 右拨杆为[上] (GIMBAL_GYRO_MODE)
+    // 且 用户按下了自瞄按键 (这里假设是 PC端的鼠标右键 或者 遥控器的某个组合键，目前默认在 GYRO_MODE 下常开自瞄检测)
+    // 或者，我们可以定义一个特定的开关逻辑
+
+    // 修正: 只有在 GIMBAL_GYRO_MODE 下才允许自瞄介入
+    if (gimbal_cmd_send.gimbal_mode == GIMBAL_GYRO_MODE) {
+        // 1. 获取当前云台反馈
+        // 注意: 我们在 robot_def.h 中定义了 VISION_YAW_AXIS 和 VISION_PITCH_AXIS
+        // 确保使用宏定义的轴向, 保持逻辑统一
+        float current_yaw_total = gimbal_fetch_data.gimbal_imu_data.VISION_YAW_AXIS * VISION_YAW_SIGN;
+
+        // Pitch 轴需要根据宏定义来获取，如果是 Roll 轴，则取 gimbal_imu_data.Roll
+        // 但 C 语言中结构体成员名不能直接用宏替换 (除非宏是成员名本身)
+        // 在 robot_def.h 中: #define VISION_PITCH_AXIS Roll
+        // 所以 gimbal_fetch_data.gimbal_imu_data.VISION_PITCH_AXIS 展开后为 gimbal_fetch_data.gimbal_imu_data.Roll
+        float current_pitch = gimbal_fetch_data.gimbal_imu_data.VISION_PITCH_AXIS * VISION_PITCH_SIGN;
+
+        // 2. 运行自瞄逻辑
+        // 如果识别到目标，cmd_yaw/pitch 会被更新为目标值
+        // 如果未识别到，cmd_yaw/pitch 保持 RemoteControl 计算出的手动值
+        auto_aim_state = AutoGimbalRun(
+            vision_recv_data,
+            current_yaw_total,
+            current_pitch,
+            &gimbal_cmd_send.yaw,
+            &gimbal_cmd_send.pitch);
+
+        // 如果进入自瞄跟踪状态，可以覆盖底盘模式为跟随云台 (可选)
+        if (auto_aim_state == AUTO_AIM_TRACKING) {
+            // chassis_cmd_send.chassis_mode = CHASSIS_FOLLOW_GIMBAL_YAW;
+            // (保持小陀螺或跟随，视 tactical 需求而定，暂不强制修改底盘模式)
+        }
+    } else {
+        auto_aim_state = AUTO_AIM_IDLE;
     }
 
     // 底盘参数
@@ -350,67 +404,78 @@ static void RemoteControlSet()
 #define BURST_FIRE_RATE 8.0f // 连发每秒8发，可自行调整
 
     // ==============================================================
-    // 逻辑 A: 摩擦轮开关控制 (左拨杆 中 -> 上)
+    // [新增] 安全逻辑: 仅在非急停状态下允许开启摩擦轮和射击
     // ==============================================================
-    // 检测从【中】拨到【上】的瞬间 (上升沿)
-    if (switch_is_up(current_switch_left) && switch_is_mid(last_switch_left)) {
-        // 无论当前是什么模式，直接取反状态
-        friction_switch_state = !friction_switch_state;
+    if (!switch_is_down(current_switch_right)) {
+        // ==============================================================
+        // 逻辑 A: 摩擦轮开关控制 (左拨杆 中 -> 上)
+        // ==============================================================
+        // 检测从【中】拨到【上】的瞬间 (上升沿)
+        if (switch_is_up(current_switch_left) && switch_is_mid(last_switch_left)) {
+            // 无论当前是什么模式，直接取反状态
+            friction_switch_state = !friction_switch_state;
 
-        // 可选：为了安全，每次关闭摩擦轮时，重置发射模式为单发
-        /*
-        if (friction_switch_state == 0) {
-            fire_mode_state = 0;
+            // 可选：为了安全，每次关闭摩擦轮时，重置发射模式为单发
+            /*
+            if (friction_switch_state == 0) {
+                fire_mode_state = 0;
+            }
+            */
         }
-        */
-    }
 
-    // ==============================================================
-    // 逻辑 B: 执行发射逻辑
-    // ==============================================================
-    if (friction_switch_state == 1) {
-        // 1. 开启摩擦轮
-        shoot_cmd_send.friction_mode = FRICTION_ON;
-        shoot_cmd_send.bullet_speed = BIG_AMU_16;
+        // ==============================================================
+        // 逻辑 B: 执行发射逻辑
+        // ==============================================================
+        if (friction_switch_state == 1) {
+            // 1. 开启摩擦轮
+            shoot_cmd_send.friction_mode = FRICTION_ON;
+            shoot_cmd_send.bullet_speed = BIG_AMU_16;
 
-        // 2. 处理开火指令 (左拨杆 -> 下)
-        // 只有在摩擦轮开启时，拨到下面才有效
+            // 2. 处理开火指令 (左拨杆 -> 下)
+            // 只有在摩擦轮开启时，拨到下面才有效
 
-        switch (fire_mode_state) {
-        case 0: // 【单发模式】
-            if (switch_is_down(current_switch_left)) {
-                shoot_cmd_send.load_mode = LOAD_1_BULLET;
-            } else {
-                // 必须在非触发时刻归零，否则会一直发
+            switch (fire_mode_state) {
+            case 0: // 【单发模式】
+                if (switch_is_down(current_switch_left)) {
+                    shoot_cmd_send.load_mode = LOAD_1_BULLET;
+                } else {
+                    shoot_cmd_send.load_mode = LOAD_STOP;
+                    shoot_cmd_send.shoot_rate = 0.0f;
+                }
+                break;
+
+            case 1:
+                if (switch_is_down(current_switch_left)) {
+                    shoot_cmd_send.load_mode = LOAD_2_BULLET;
+                } else {
+                    shoot_cmd_send.load_mode = LOAD_STOP;
+                }
+                break;
+
+            case 2: // 【连发模式】
+                // 逻辑: 只要拨杆保持在 [下]，就持续开火 (电平触发)
+                if (switch_is_down(current_switch_left)) {
+                    shoot_cmd_send.load_mode = LOAD_BURSTFIRE;
+                    shoot_cmd_send.shoot_rate = BURST_FIRE_RATE;
+                } else {
+                    shoot_cmd_send.load_mode = LOAD_STOP;
+                }
+                break;
+
+            default:
                 shoot_cmd_send.load_mode = LOAD_STOP;
-                shoot_cmd_send.shoot_rate = 0.0f;
+                break;
             }
-            break;
-
-        case 1:
-            if (switch_is_down(current_switch_left)) {
-                shoot_cmd_send.load_mode = LOAD_2_BULLET;
-            } else {
-                shoot_cmd_send.load_mode = LOAD_STOP;
-            }
-            break;
-
-        case 2: // 【连发模式】
-            // 逻辑: 只要拨杆保持在 [下]，就持续开火 (电平触发)
-            if (switch_is_down(current_switch_left)) {
-                shoot_cmd_send.load_mode = LOAD_BURSTFIRE;
-                shoot_cmd_send.shoot_rate = BURST_FIRE_RATE;
-            } else {
-                shoot_cmd_send.load_mode = LOAD_STOP;
-            }
-            break;
-
-        default:
+        } else {
+            // --- 摩擦轮关闭状态 ---
+            shoot_cmd_send.friction_mode = FRICTION_OFF;
             shoot_cmd_send.load_mode = LOAD_STOP;
-            break;
+            shoot_cmd_send.shoot_rate = 0.0f;
         }
+
     } else {
-        // --- 摩擦轮关闭状态 ---
+        // [新增] 急停状态下的强制关闭
+        friction_switch_state = 0; // 强制关闭摩擦轮开关状态
         shoot_cmd_send.friction_mode = FRICTION_OFF;
         shoot_cmd_send.load_mode = LOAD_STOP;
         shoot_cmd_send.shoot_rate = 0.0f;

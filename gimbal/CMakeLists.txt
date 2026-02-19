@@ -50,6 +50,7 @@ file(GLOB_RECURSE SOURCES
     "application/shoot/*.c"
     "application/gimbal/*.c"
     "application/cmd/*.c"
+    "application/auto_gimbal.c"
     "bsp/*.c"
     "bsp/can/*.c"
     "bsp/usart/*.c"
