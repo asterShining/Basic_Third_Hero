@@ -530,7 +530,7 @@ void ChassisTask()
         break;
     case CHASSIS_FOLLOW_GIMBAL_YAW:
 
-        chassis_cmd_recv.wz = -3.1f * chassis_cmd_recv.offset_angle * abs(chassis_cmd_recv.offset_angle) - 1.0 * gimbal_wz;
+        chassis_cmd_recv.wz = -3.1f * chassis_cmd_recv.offset_angle * abs(chassis_cmd_recv.offset_angle) - 1.0 * gimbal_wz; // 考虑加入pid闭环会更好
         // chassis_cmd_recv.wz = -1.0 * gimbal_wz;
         break;
     case CHASSIS_ROTATE: // 自旋,同时保持全向机动

@@ -307,10 +307,11 @@ static float GetInnerFrictionAvgSpeed(void)
 {
     // 计算三个内圈摩擦轮的平均绝对速度
     // 取绝对值是因为电机方向可能不同, 我们只关心速度大小
+    // [优化] 使用乘法代替除法: / 3.0f -> * 0.3333333f
     float avg = (fabsf(friction_inner_left->measure.speed_aps) +
                  fabsf(friction_inner_right->measure.speed_aps) +
-                 fabsf(friction_inner_down->measure.speed_aps)) /
-                3.0f;
+                 fabsf(friction_inner_down->measure.speed_aps)) *
+                0.3333333f;
     return avg;
 }
 
@@ -320,10 +321,11 @@ static float GetInnerFrictionAvgSpeed(void)
  */
 static float GetOuterFrictionAvgSpeed(void)
 {
+    // [优化] 使用乘法代替除法
     float avg = (fabsf(friction_outer_left->measure.speed_aps) +
                  fabsf(friction_outer_right->measure.speed_aps) +
-                 fabsf(friction_outer_down->measure.speed_aps)) /
-                3.0f;
+                 fabsf(friction_outer_down->measure.speed_aps)) *
+                0.3333333f;
     return avg;
 }
 
@@ -852,8 +854,14 @@ void ShootTask()
     } else if (shoot_cmd_recv.lid_mode == LID_OPEN) {
         //...
     }
-    // 更新调试反馈信息
-    UpdateFrictionDebugInfo();
+
+    // [优化] 降低调试信息更新频率 (Downsampling)
+    // 只有每10ms更新一次调试数据, 避免每次循环(1ms)都进行浮点除法运算导致任务超时
+    // E:[freeRTOS] MOTOR Task DELAY! dt = 1084 us
+    static uint32_t debug_update_count = 0;
+    if (debug_update_count++ % 10 == 0) {
+        UpdateFrictionDebugInfo();
+    }
 
     // [新增] 更新反馈数据, 供外部模块订阅
     shoot_feedback_data.fire_count = single_fire.fire_count;
