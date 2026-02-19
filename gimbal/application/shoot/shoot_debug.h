@@ -51,6 +51,7 @@ typedef struct {
 // 简化的单发状态枚举 (基于机械限位 + 掉速检测)
 typedef enum {
     SF_IDLE = 0, // 空闲, 等待触发
+    SF_WAIT_SPEED, // [新增] 等待摩擦轮转速稳定
     SF_FEEDING, // 速度环送弹中, 监测摩擦轮掉速
     SF_BRAKING, // 检测到掉速, 反向制动中
     SF_COOLDOWN, // 制动完成, 冷却等待

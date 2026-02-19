@@ -499,6 +499,35 @@ static loader_mode_e HandleLoaderStall(loader_mode_e current_mode)
 }
 
 /**
+ * @brief 检测摩擦轮转速是否就绪 (均在误差范围内)
+ * @return 1=就绪, 0=未就绪
+ */
+static uint8_t ShootIsSpeedReady(void)
+{
+    // 如果目标速度为0, 直接认为就绪 (避免无法停止)
+    if (current_inner_deg == 0.0f && current_outer_deg == 0.0f)
+        return 1;
+
+    // 检查内圈3个电机
+    if (fabsf(friction_inner_left->measure.speed_aps - current_inner_deg) > SHOOT_SPEED_READY_THRESHOLD)
+        return 0;
+    if (fabsf(friction_inner_right->measure.speed_aps - current_inner_deg) > SHOOT_SPEED_READY_THRESHOLD)
+        return 0;
+    if (fabsf(friction_inner_down->measure.speed_aps - current_inner_deg) > SHOOT_SPEED_READY_THRESHOLD)
+        return 0;
+
+    // 检查外圈3个电机
+    if (fabsf(friction_outer_left->measure.speed_aps - current_outer_deg) > SHOOT_SPEED_READY_THRESHOLD)
+        return 0;
+    if (fabsf(friction_outer_right->measure.speed_aps - current_outer_deg) > SHOOT_SPEED_READY_THRESHOLD)
+        return 0;
+    if (fabsf(friction_outer_down->measure.speed_aps - current_outer_deg) > SHOOT_SPEED_READY_THRESHOLD)
+        return 0;
+
+    return 1;
+}
+
+/**
  * @brief 单发处理逻辑 (基于摩擦轮入口限位 + 速度环 + 反向制动)
  * @param trigger_active 是否触发 (边沿信号)
  */
@@ -528,16 +557,33 @@ static void HandleSingleFire(uint8_t trigger_active)
     switch (single_fire.state) {
     case SF_IDLE:
         if (trigger_active) {
-            // 触发: 记录双重基准速度,进入送弹
+            // [修改] 触发后先进入等待状态，确保转速稳定
+            single_fire.state = SF_WAIT_SPEED;
+            // 记录触发时间作为等待起始(可选，用于超时判断，这里暂复用 feed_start_time)
+            single_fire.feed_start_time = current_time;
+        } else {
+            // 确保停止
+            DJIMotorOuterLoop(loader, SPEED_LOOP);
+            DJIMotorSetRef(loader, 0);
+        }
+        break;
+
+    case SF_WAIT_SPEED:
+        // [新增] 等待转速就绪
+        // 如果转速达标 OR 等待超时(500ms防止死锁) -> 开始推弹
+        if (ShootIsSpeedReady() || (current_time - single_fire.feed_start_time > 500)) {
+            // 转入正式推弹
+            single_fire.state = SF_FEEDING;
+            single_fire.feed_start_time = current_time; // 重置推弹开始时间
+
+            // 记录双重基准速度
             single_fire.baseline_speed = GetInnerFrictionAvgSpeed();
             single_fire.outer_baseline_speed = GetOuterFrictionAvgSpeed();
-            single_fire.feed_start_time = current_time;
-            single_fire.state = SF_FEEDING;
 
-            // [抓拍] 记录6电机基准速度 (用于后续计算掉速量)
+            // [抓拍] 记录6电机基准速度
             RecordDipBaseline();
 
-            // 复位所有前馈变量
+            // 复位前馈
             ff_inner_left = 0.0f;
             ff_inner_right = 0.0f;
             ff_inner_down = 0.0f;
@@ -545,11 +591,11 @@ static void HandleSingleFire(uint8_t trigger_active)
             ff_outer_right = 0.0f;
             ff_outer_down = 0.0f;
 
-            // 速度环 - 中速送弹
+            // 启动推弹
             DJIMotorOuterLoop(loader, SPEED_LOOP);
             DJIMotorSetRef(loader, SF_FEED_SPEED);
         } else {
-            // 确保停止
+            // 继续等待, 保持停止
             DJIMotorOuterLoop(loader, SPEED_LOOP);
             DJIMotorSetRef(loader, 0);
         }
@@ -561,9 +607,9 @@ static void HandleSingleFire(uint8_t trigger_active)
         if ((current_time - single_fire.feed_start_time) < FRICTION_FEEDFORWARD_TIME) {
             // 这里可以针对每个电机单独设置方向 +/-
             // 目前假设底层电机模块处理了 MOTOR_DIRECTION_REVERSE, 所以这里都给正值 (Forward Current)
-            ff_inner_left = 300.0f;
-            ff_inner_right = 200.0f;
-            ff_inner_down = 500;
+            ff_inner_left = FRICTION_FEEDFORWARD_CURRENT; // 使用宏定义
+            ff_inner_right = FRICTION_FEEDFORWARD_CURRENT; // 200 -> 宏
+            ff_inner_down = FRICTION_FEEDFORWARD_CURRENT; // 500 -> 宏
             ff_outer_left = 0.0f;
             ff_outer_right = 0.0f;
             ff_outer_down = 0.0f;
@@ -578,13 +624,15 @@ static void HandleSingleFire(uint8_t trigger_active)
 
         // [新增] 动态基准逻辑 (Peak Hold) - 双重
         // 如果电机因为前馈加速了, 基准线也要跟着涨, 否则检测不到掉速
-        float current_inner = GetInnerFrictionAvgSpeed();
-        if (current_inner > single_fire.baseline_speed) {
-            single_fire.baseline_speed = current_inner;
-        }
-        float current_outer = GetOuterFrictionAvgSpeed();
-        if (current_outer > single_fire.outer_baseline_speed) {
-            single_fire.outer_baseline_speed = current_outer;
+        { // 增加大括号限制作用域
+            float current_inner = GetInnerFrictionAvgSpeed();
+            if (current_inner > single_fire.baseline_speed) {
+                single_fire.baseline_speed = current_inner;
+            }
+            float current_outer = GetOuterFrictionAvgSpeed();
+            if (current_outer > single_fire.outer_baseline_speed) {
+                single_fire.outer_baseline_speed = current_outer;
+            }
         }
 
         // [调试] 同时更新调试模块的基准速度 (Peak Hold), 确保调试数据准确

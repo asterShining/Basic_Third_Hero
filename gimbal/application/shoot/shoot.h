@@ -51,6 +51,8 @@
 #define FRICTION_SPEED_DIP_THRESHOLD 800.0f
 // 回升检测阈值 (deg/s), 与目标速度差小于此值认为回升完成
 #define FRICTION_SPEED_RECOVER_THRESHOLD 100.0f
+// [新增] 射速就绪阈值 (deg/s), 实际速度与目标速度误差小于此值才允许发射
+#define SHOOT_SPEED_READY_THRESHOLD 500.0f
 
 // 堵转检测状态结构体 (运行时数据, 仅供 shoot.c 内部使用)
 static struct {
