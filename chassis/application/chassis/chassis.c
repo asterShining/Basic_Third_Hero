@@ -77,6 +77,74 @@ static float real_vx = 0.0f; // 真实前进速度 m/s
 static float real_vy = 0.0f; // 真实横移速度 m/s
 static float real_wz = 0.0f; // 真实旋转速度 deg/s
 
+// [!code ++]
+// ==========================================
+// [新增] 小陀螺模式配置
+// ==========================================
+#define VARIABLE_SPIN_ENABLED 1 // 1: 启用变速小陀螺; 0: 启用优化后的匀速小陀螺
+#define SPIN_TOP_MAX_SPEED 4000.0f // 小陀螺最大旋转速度 (deg/s)
+#define TRANSLATION_PRIORITY_RATIO 0.6f // 平移优先系数 (0~1)，越大则平移时旋转降速越明显
+
+/**
+ * @brief 计算小陀螺的旋转目标速度 (核心优化逻辑：平移优先)
+ *
+ * @param base_target_wz 基础目标旋转速度 (如果是变速模式，这里输入的是随时间变化的值)
+ * @param vx_cmd 当前的前进指令 (m/s)
+ * @param vy_cmd 当前的横移指令 (m/s)
+ * @return float 最终的旋转速度 target_wz
+ */
+static float OptimizedSpinSpeed(float base_target_wz, float vx_cmd, float vy_cmd)
+{
+    // 1. 计算当前的平移需求幅度 (0 ~ MAX_SPEED)
+    // 简单近似：取 vx 和 vy 中的较大值，或者向量模长
+    float trans_speed = sqrtf(vx_cmd * vx_cmd + vy_cmd * vy_cmd);
+
+    // 2. 归一化平移强度 (0.0 ~ 1.0)
+    // 假设 MAX_CHASSIS_VX_SPEED 为 6.0f (需与 robot_def.h 一致，这里暂时硬编码保护)
+    const float MAX_TRANS_SPEED_REF = 6.0f;
+    float trans_ratio = trans_speed / MAX_TRANS_SPEED_REF;
+    if (trans_ratio > 1.0f)
+        trans_ratio = 1.0f;
+
+    // 3. 计算旋转缩放系数
+    // 当 trans_ratio = 0 (静止) -> scale = 1.0 (全速旋转)
+    // 当 trans_ratio = 1 (全速平移) -> scale = (1 - TRANSLATION_PRIORITY_RATIO) (例如 0.4)
+    // 这样保证了全速移动时，旋转速度不会完全降为0（保留一点小陀螺效果），但主要功率留给平移
+    float spin_scale = 1.0f - (trans_ratio * TRANSLATION_PRIORITY_RATIO);
+
+    // 4. 应用缩放
+    return base_target_wz * spin_scale;
+}
+
+/**
+ * @brief 生成变速小陀螺的波形
+ *
+ * @return float 当前时刻的基础旋转速度
+ */
+static float GetVariableSpinBase()
+{
+    // 使用 HAL_GetTick() 获取时间 (ms)
+    uint32_t current_time = HAL_GetTick();
+
+    // 周期设计：
+    // 正弦波: A * sin(2*pi*f*t) + Offset
+    // 设周期 T = 2秒 (f=0.5Hz)，幅度 Amp = 2000，偏置 = 3000
+    // 结果范围: 1000 ~ 5000 deg/s
+
+    float time_sec = current_time / 1000.0f;
+    const float SPIN_PERIOD = 2.0f; // 周期 2秒
+    const float SPIN_AMP = 1500.0f; // 波动幅度
+    const float SPIN_OFFSET = 3500.0f; // 基础均值
+
+    // 2 * PI * f * t = 2 * PI * (1/T) * t
+    float phase = 2.0f * PI * (1.0f / SPIN_PERIOD) * time_sec;
+
+    // 生成波形
+    float wave = arm_sin_f32(phase) * SPIN_AMP + SPIN_OFFSET;
+
+    return wave;
+}
+
 void ChassisInit()
 {
     Chassis_IMU_data = INS_Init();
@@ -465,9 +533,22 @@ void ChassisTask()
         chassis_cmd_recv.wz = -3.1f * chassis_cmd_recv.offset_angle * abs(chassis_cmd_recv.offset_angle) - 1.0 * gimbal_wz;
         // chassis_cmd_recv.wz = -1.0 * gimbal_wz;
         break;
-    case CHASSIS_ROTATE: // 自旋,同时保持全向机动;当前wz维持定值,后续增加不规则的变速策略
-        chassis_cmd_recv.wz = 4000;
-        break;
+    case CHASSIS_ROTATE: // 自旋,同时保持全向机动
+                         // [修改] 优化小陀螺逻辑：区分变速/匀速，并统一应用平移优先策略
+#if VARIABLE_SPIN_ENABLED
+                         // 1. 变速小陀螺
+    {
+        float base_wz = GetVariableSpinBase(); // 获取随时间变化的基础速度
+        chassis_cmd_recv.wz = OptimizedSpinSpeed(base_wz, chassis_cmd_recv.vx, chassis_cmd_recv.vy);
+    }
+#else
+                         // 2. 优化后的匀速小陀螺
+    {
+        float const_target = SPIN_TOP_MAX_SPEED; // 固定最大速度
+        chassis_cmd_recv.wz = OptimizedSpinSpeed(const_target, chassis_cmd_recv.vx, chassis_cmd_recv.vy);
+    }
+#endif
+    break;
     default:
         break;
     }
@@ -502,6 +583,15 @@ void ChassisTask()
     // // 当前只做了17mm热量的数据获取,后续根据robot_def中的宏切换双枪管和英雄42mm的情况
     // chassis_feedback_data.bullet_speed = referee_data->GameRobotState.shooter_id1_17mm_speed_limit;
     // chassis_feedback_data.rest_heat = referee_data->PowerHeatData.shooter_heat0;
+
+    // [新增] 填充底盘真实旋转角速度 (用于云台前馈)
+    // 假设 Gyro[Z] 单位是 rad/s (需根据 ins_task.c 确认，若为 deg/s 则不需要转换)
+    // 通常 DJI C Board 示例代码中 INS 输出的 Gyro 为 rad/s
+    if (Chassis_IMU_data != NULL) {
+        chassis_feedback_data.real_wz_deg = Chassis_IMU_data->Gyro[Z] * RAD_2_DEGREE;
+    } else {
+        chassis_feedback_data.real_wz_deg = 0.0f;
+    }
 
     // 推送反馈消息
 #ifdef ONE_BOARD

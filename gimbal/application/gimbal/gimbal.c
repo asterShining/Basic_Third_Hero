@@ -71,7 +71,7 @@ void GimbalInit()
             },
             .speed_PID = {
                 .Kp = 2.1, // 2.1
-                .Ki = 0.1, // 0.1
+                .Ki = 0.1, // 0.1 //最好增加速度环ki,小陀螺的时候可以抑制云台偏移
                 .Kd = 0,
                 .Improve = PID_Trapezoid_Intergral | PID_Integral_Limit | PID_Derivative_On_Measurement,
                 .IntegralLimit = 3,
@@ -163,38 +163,35 @@ void GimbalTask()
     }
     // [新增] 静态变量: 用于存储前馈值 (必须是static，因为指针会被传递给电机驱动)
     static float pitch_ff_storage = 0.0f;
-    // 调用标定更新函数
-    /******************
-    // if (gimbal_cmd_recv.gimbal_mode == GIMBAL_CALI_MODE) {
-    //     // 如果当前是空闲状态，则开始标定
-    //     if (pitch_cali_handler.state == CALI_STATE_IDLE) {
-    //         GimbalCali_Start(&pitch_cali_handler);
-    //     }
-    // }
-    // float current_imu_roll = (gimba_IMU_data ? gimba_IMU_data->Roll : 0.0f);
-    // // 调用更新函数，如果正在标定(返回1)，则跳过后面的正常控制逻辑
-    // if (GimbalCali_Update(&pitch_cali_handler, pitch_motor, current_imu_roll)) {
-    //     // 正在标定中...
-    //     // 此时不要执行下面的 switch(gimbal_mode) 逻辑，防止冲突
-    //     // 也不要推送反馈消息，或者仅推送标定状态
-    //     osDelay(2);
-    //     return;
-    // }
-          */
+    static float yaw_ff_storage = 0.0f; // [新增] Yaw轴前馈存储
+
+    // ... (省略部分注释代码) ...
+
     // @todo:现在已不再需要电机反馈,实际上可以始终使用IMU的姿态数据来作为云台的反馈,yaw电机的offset只是用来跟随底盘
     // 根据控制模式进行电机反馈切换和过渡,视觉模式在robot_cmd模块就已经设置好,gimbal只看yaw_ref和pitch_ref
     switch (gimbal_cmd_recv.gimbal_mode) {
     // 停止
     case GIMBAL_ZERO_FORCE:
-        if (yaw_motor)
+        if (yaw_motor) {
             DMMotorStop(yaw_motor);
+            // 清除前馈
+            yaw_motor->motor_settings.feedforward_flag &= ~SPEED_FEEDFORWARD;
+        }
         if (pitch_motor)
             DMMotorStop(pitch_motor);
         break;
     // 使用陀螺仪的反馈,底盘根据yaw电机的offset跟随云台或视觉模式采用
     case GIMBAL_GYRO_MODE: // 后续只保留此模式
-        if (yaw_motor)
+        if (yaw_motor) {
             DMMotorEnable(yaw_motor);
+
+            // [新增] 应用底盘速度前馈
+            // 收到的是底盘真实角速度(deg/s), 赋值给电机速度前馈
+            // 注意方向: 底盘逆时针转(+), 云台Yaw电机需顺时针转(-)以保持绝对静止
+            yaw_ff_storage = -gimbal_cmd_recv.chassis_rotate_wz;
+            yaw_motor->speed_feedforward_ptr = &yaw_ff_storage;
+            yaw_motor->motor_settings.feedforward_flag |= SPEED_FEEDFORWARD; // 开启速度前馈
+        }
         if (pitch_motor)
             DMMotorEnable(pitch_motor);
 
@@ -205,8 +202,12 @@ void GimbalTask()
         break;
     // 云台自由模式,使用编码器反馈,底盘和云台分离,仅云台旋转,一般用于调整云台姿态(英雄吊射等)/能量机关
     case GIMBAL_FREE_MODE: // 后续删除,或加入云台追地盘的跟随模式(响应速度更快)
-        if (yaw_motor)
+        if (yaw_motor) {
             DMMotorEnable(yaw_motor);
+            // 自由模式下可能不需要此特定前馈，或者需要根据实际情况决定
+            // 暂时关闭前馈以保安全
+            yaw_motor->motor_settings.feedforward_flag &= ~SPEED_FEEDFORWARD;
+        }
         if (pitch_motor)
             DMMotorEnable(pitch_motor);
 
@@ -251,17 +252,16 @@ void GimbalTask()
     }
 
     // 设置反馈数据,主要是imu和yaw的ecd
-    // 1. 获取 Yaw 电机当前的弧度值 (DM电机反馈的是弧度)
+    // 1. 获取 Yaw 电机当前的连续累计弧度值 (解决 ±12.5 rad 跳变与 2PI 不匹配的问题)
     float yaw_rad = 0.0f;
     if (yaw_motor) {
-        yaw_rad = yaw_motor->measure.position;
+        yaw_rad = yaw_motor->measure.total_angle; // 使用 total_angle 替代 position，避免多圈溢出问题
     }
 
     // 2. 将弧度转换为角度 ( 1 rad ≈ 57.3 deg )
     float yaw_deg = yaw_rad * RAD_2_DEGREE;
 
     // 3. 将角度归一化到 0 ~ 360 度 (对应单圈角度)
-    // DM电机的 position 可能是多圈的 (例如 720度, -50度等)，我们需要把它变成 0-360
     while (yaw_deg < 0.0f)
         yaw_deg += 360.0f;
     while (yaw_deg >= 360.0f)

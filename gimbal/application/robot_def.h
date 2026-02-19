@@ -246,6 +246,8 @@ typedef struct
     uint8_t rest_heat; // 剩余枪口热量
     Bullet_Speed_e bullet_speed; // 弹速限制
     Enemy_Color_e enemy_color; // 0 for blue, 1 for red
+    // [新增] 底盘真实旋转角速度(deg/s), 用于云台前馈控制
+    float real_wz_deg;
 
 } Chassis_Upload_Data_s;
 
