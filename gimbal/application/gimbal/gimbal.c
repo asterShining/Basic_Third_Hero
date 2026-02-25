@@ -174,8 +174,6 @@ void GimbalTask()
     case GIMBAL_ZERO_FORCE:
         if (yaw_motor) {
             DMMotorStop(yaw_motor);
-            // 清除前馈
-            yaw_motor->motor_settings.feedforward_flag &= ~SPEED_FEEDFORWARD;
         }
         if (pitch_motor)
             DMMotorStop(pitch_motor);
@@ -187,10 +185,7 @@ void GimbalTask()
 
             // [新增] 应用底盘速度前馈
             // 收到的是底盘真实角速度(deg/s), 赋值给电机速度前馈
-            // 注意方向: 底盘逆时针转(+), 云台Yaw电机需顺时针转(-)以保持绝对静止
-            yaw_ff_storage = -gimbal_cmd_recv.chassis_rotate_wz;
-            yaw_motor->speed_feedforward_ptr = &yaw_ff_storage;
-            yaw_motor->motor_settings.feedforward_flag |= SPEED_FEEDFORWARD; // 开启速度前馈
+            // 注意方向：根据物理模型修正前馈方向
         }
         if (pitch_motor)
             DMMotorEnable(pitch_motor);

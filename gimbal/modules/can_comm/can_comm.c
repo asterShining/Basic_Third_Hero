@@ -34,8 +34,8 @@ static void CANCommRxCallback(CANInstance *_instance)
     /* 当前接收状态判断 */
     if (_instance->rx_buff[0] == CAN_COMM_HEADER && comm->recv_state == 0) // 之前尚未开始接收且此次包里第一个位置是帧头
     {
-        // LOGINFO("[can_comm] Header matched - Data len: %d, Expected: %d",
-        //         _instance->rx_buff[1], comm->recv_data_len);
+        LOGINFO("[can_comm] Header matched - Data len: %d, Expected: %d",
+                _instance->rx_buff[1], comm->recv_data_len);
         if (_instance->rx_buff[1] == comm->recv_data_len) // 如果这一包里的datalen也等于我们设定接收长度(这是因为暂时不支持动态包长)
         {
             comm->recv_state = 1; // 设置接收状态为1,说明已经开始接收
@@ -124,8 +124,8 @@ CANCommInstance *CANCommInit(CANComm_Init_Config_s *comm_config)
 void CANCommSend(CANCommInstance *instance, uint8_t *data)
 {
     // 添加这里 ↓
-    // LOGINFO("[can_comm] Sending - Data len: %d, Total buf len: %d",
-    //         instance->send_data_len, instance->send_buf_len);
+    LOGINFO("[can_comm] Sending - Data len: %d, Total buf len: %d",
+            instance->send_data_len, instance->send_buf_len);
     static uint8_t crc8;
     static uint8_t send_len;
     // 将data copy到raw_sendbuf中,计算crc8

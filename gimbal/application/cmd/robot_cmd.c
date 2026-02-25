@@ -249,8 +249,6 @@ static void RemoteControlSet()
     }
     // [上] 底盘无力，云台能够转动
     else if (switch_is_up(current_switch_right)) {
-        // --- 子模式：自动标定 (左拨杆为上) ---
-
         // 无扰切换判断
         if (!switch_is_up(last_switch_right)) {
             if (!switch_is_up(last_switch_right)) {
@@ -612,9 +610,6 @@ void RobotCMDTask()
     // 推送消息,双板通信,视觉通信等
     // 其他应用所需的控制数据在remotecontrolsetmode和mousekeysetmode中完成设置
     chassis_cmd_send.gimbal_gyro_z = gimbal_fetch_data.gimbal_imu_data.Gyro[2] * RAD_2_DEGREE; // 假设原始是弧度，转成度
-
-    // [新增] 将底盘真实角速度转发给云台 (用于前馈)
-    gimbal_cmd_send.chassis_rotate_wz = chassis_fetch_data.real_wz_deg;
 
 #ifdef ONE_BOARD
     PubPushMessage(chassis_cmd_pub, (void *)&chassis_cmd_send);
