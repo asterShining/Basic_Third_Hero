@@ -82,26 +82,26 @@ static float real_wz = 0.0f; // 真实旋转速度 deg/s
 // [新增] 小陀螺模式配置
 // ==========================================
 #define VARIABLE_SPIN_ENABLED 1 // 1: 启用变速小陀螺; 0: 启用优化后的匀速小陀螺
-#define SPIN_TOP_MAX_SPEED 4000.0f // 小陀螺最大旋转速度 (deg/s)
+#define SPIN_TOP_MAX_SPEED 500.0f // 小陀螺最大旋转速度 (deg/s) 降低转速以防电机过度饱和发生偏航漂移
 #define TRANSLATION_PRIORITY_RATIO 0.6f // 平移优先系数 (0~1)，越大则平移时旋转降速越明显
 
 /**
  * @brief 计算小陀螺的旋转目标速度 (核心优化逻辑：平移优先)
  *
  * @param base_target_wz 基础目标旋转速度 (如果是变速模式，这里输入的是随时间变化的值)
- * @param vx_cmd 当前的前进指令 (m/s)
- * @param vy_cmd 当前的横移指令 (m/s)
+ * @param vx_cmd 当前的前进指令 (来自摇杆解析，范围对应最大如 6600)
+ * @param vy_cmd 当前的横移指令 (来自摇杆解析，范围对应最大如 6600)
  * @return float 最终的旋转速度 target_wz
  */
 static float OptimizedSpinSpeed(float base_target_wz, float vx_cmd, float vy_cmd)
 {
-    // 1. 计算当前的平移需求幅度 (0 ~ MAX_SPEED)
-    // 简单近似：取 vx 和 vy 中的较大值，或者向量模长
+    // 1. 计算当前的平移需求幅度
     float trans_speed = sqrtf(vx_cmd * vx_cmd + vy_cmd * vy_cmd);
 
     // 2. 归一化平移强度 (0.0 ~ 1.0)
-    // 假设 MAX_CHASSIS_VX_SPEED 为 6.0f (需与 robot_def.h 一致，这里暂时硬编码保护)
-    const float MAX_TRANS_SPEED_REF = 6.0f;
+    // 根据 robot_cmd.c 中的摇杆解算逻辑，推杆满位时 vx/vy 数值可达 6600。
+    // 将阈值修正为 6600.0f 以匹配当前的指令单位尺度，恢复摇杆的线性与平移灵敏度。
+    const float MAX_TRANS_SPEED_REF = 6600.0f;
     float trans_ratio = trans_speed / MAX_TRANS_SPEED_REF;
     if (trans_ratio > 1.0f)
         trans_ratio = 1.0f;
@@ -128,13 +128,12 @@ static float GetVariableSpinBase()
 
     // 周期设计：
     // 正弦波: A * sin(2*pi*f*t) + Offset
-    // 设周期 T = 2秒 (f=0.5Hz)，幅度 Amp = 2000，偏置 = 3000
-    // 结果范围: 1000 ~ 5000 deg/s
-
+    // 设周期 T = 2秒 (f=0.5Hz)
+    // 为避免电机在小陀螺时转速溢出，我们将振幅和均值同比下调
     float time_sec = current_time / 1000.0f;
     const float SPIN_PERIOD = 2.0f; // 周期 2秒
-    const float SPIN_AMP = 1500.0f; // 波动幅度
-    const float SPIN_OFFSET = 3500.0f; // 基础均值
+    const float SPIN_AMP = 150.0f; // 波动幅度 (降为原来的1/10)
+    const float SPIN_OFFSET = 450.0f; // 基础均值
 
     // 2 * PI * f * t = 2 * PI * (1/T) * t
     float phase = 2.0f * PI * (1.0f / SPIN_PERIOD) * time_sec;
@@ -558,8 +557,10 @@ void ChassisTask()
     static float sin_theta, cos_theta;
     cos_theta = arm_cos_f32(chassis_cmd_recv.offset_angle * DEGREE_2_RAD);
     sin_theta = arm_sin_f32(chassis_cmd_recv.offset_angle * DEGREE_2_RAD);
-    chassis_vx = chassis_cmd_recv.vx * cos_theta - chassis_cmd_recv.vy * sin_theta;
-    chassis_vy = chassis_cmd_recv.vx * sin_theta + chassis_cmd_recv.vy * cos_theta;
+    // 修正旋转矩阵：底盘为右手系（X向前方，Y向右方），且 offset_angle 以逆时针方向为正。
+    // 因此在分解目标云台向上的平移速度(vx, vy)时，sin 项的符号需要与标准矩阵相反，避免出现推杆前进而横移的现象。
+    chassis_vx = chassis_cmd_recv.vx * cos_theta + chassis_cmd_recv.vy * sin_theta;
+    chassis_vy = -chassis_cmd_recv.vx * sin_theta + chassis_cmd_recv.vy * cos_theta;
 
     if (chassis_cmd_recv.chassis_mode == CHASSIS_NO_FOLLOW) {
         // ChassisHeadLock();
@@ -583,15 +584,6 @@ void ChassisTask()
     // // 当前只做了17mm热量的数据获取,后续根据robot_def中的宏切换双枪管和英雄42mm的情况
     // chassis_feedback_data.bullet_speed = referee_data->GameRobotState.shooter_id1_17mm_speed_limit;
     // chassis_feedback_data.rest_heat = referee_data->PowerHeatData.shooter_heat0;
-
-    // [新增] 填充底盘真实旋转角速度 (用于云台前馈)
-    // 假设 Gyro[Z] 单位是 rad/s (需根据 ins_task.c 确认，若为 deg/s 则不需要转换)
-    // 通常 DJI C Board 示例代码中 INS 输出的 Gyro 为 rad/s
-    if (Chassis_IMU_data != NULL) {
-        chassis_feedback_data.real_wz_deg = Chassis_IMU_data->Gyro[Z] * RAD_2_DEGREE;
-    } else {
-        chassis_feedback_data.real_wz_deg = 0.0f;
-    }
 
     // 推送反馈消息
 #ifdef ONE_BOARD

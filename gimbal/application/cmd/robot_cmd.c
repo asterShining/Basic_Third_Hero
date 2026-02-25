@@ -249,7 +249,6 @@ static void RemoteControlSet()
     }
     // [上] 底盘无力，云台能够转动
     else if (switch_is_up(current_switch_right)) {
-
         // 无扰切换判断
         if (!switch_is_up(last_switch_right)) {
             if (!switch_is_up(last_switch_right)) {
@@ -611,18 +610,6 @@ void RobotCMDTask()
     // 推送消息,双板通信,视觉通信等
     // 其他应用所需的控制数据在remotecontrolsetmode和mousekeysetmode中完成设置
     chassis_cmd_send.gimbal_gyro_z = gimbal_fetch_data.gimbal_imu_data.Gyro[2] * RAD_2_DEGREE; // 假设原始是弧度，转成度
-
-    // 功能：提取底盘真实角速度并在小陀螺模式下转发给云台；非小陀螺模式则置零
-    // 原因：在底盘跟随云台模式中，若施加底盘旋转的前馈给云台，通讯和控制延迟会导致正反馈耦合，使得云台出现越来越大的自激振荡。
-    if (chassis_cmd_send.chassis_mode == CHASSIS_ROTATE) {
-        // 功能：小陀螺模式下转发真实底盘角速度
-        // 原因：小陀螺模式底盘自旋，提供前馈给云台电机可主动抵抗自旋带来的扰动
-        gimbal_cmd_send.chassis_rotate_wz = chassis_fetch_data.real_wz_deg;
-    } else {
-        // 功能：非小陀螺模式下将前馈速度置零
-        // 原因：切断跟随模式下的正反馈回路，避免云台来回摆动
-        gimbal_cmd_send.chassis_rotate_wz = 0.0f;
-    }
 
 #ifdef ONE_BOARD
     PubPushMessage(chassis_cmd_pub, (void *)&chassis_cmd_send);
