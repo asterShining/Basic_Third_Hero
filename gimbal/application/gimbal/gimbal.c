@@ -70,8 +70,8 @@ void GimbalInit()
                 .MaxOut = 20,
             },
             .speed_PID = {
-                .Kp = 2.1, // 2.1
-                .Ki = 0.1, // 0.1 //最好增加速度环ki,小陀螺的时候可以抑制云台偏移
+                .Kp = 1.5, // 2.1
+                .Ki = 0.2, // 0.1 //最好增加速度环ki,小陀螺的时候可以抑制云台偏移
                 .Kd = 0,
                 .Improve = PID_Trapezoid_Intergral | PID_Integral_Limit | PID_Derivative_On_Measurement,
                 .IntegralLimit = 3,

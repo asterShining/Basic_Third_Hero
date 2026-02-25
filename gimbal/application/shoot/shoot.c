@@ -74,12 +74,12 @@ void ShootInit()
         },
         .controller_param_init_config = {
             .speed_PID = {
-                .Kp = 8.3, // 8
-                .Ki = 1.3, // 1
+                .Kp = 9.3, // 8
+                .Ki = 0.9, // 1
                 .Kd = 0,
                 .Improve = PID_Integral_Limit,
                 .IntegralLimit = 10000,
-                .MaxOut = 16000,
+                .MaxOut = 15000,
             },
             .current_feedforward_ptr = NULL,
         },
@@ -149,11 +149,11 @@ void ShootInit()
 
             },
             .speed_PID = {
-                .Kp = 2.9, // 10S
-                .Ki = 0.05, // 1
+                .Kp = 3.5, // 10S
+                .Ki = 0.0, // 1
                 .Kd = 0.0,
                 .Improve = PID_Integral_Limit,
-                .IntegralLimit = 1000,
+                .IntegralLimit = 5000,
                 .MaxOut = 16100,
             },
 
@@ -836,7 +836,7 @@ void ShootTask()
             break;
         case BIG_AMU_16:
             // 目标16.5m/s：一级给16.0，二级给16.8
-            ShootSetSpeedDual(16.0f, 16.8f);
+            ShootSetSpeedDual(15.5f, 16.5f);
             break;
         default:
             // 默认值

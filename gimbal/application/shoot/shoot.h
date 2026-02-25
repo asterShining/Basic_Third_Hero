@@ -8,12 +8,12 @@
 // 摩擦轮半径 (单位: 米), 例如 30mm = 0.03m
 #define FRICTION_WHEEL_RADIUS 0.03f
 // 打滑补偿系数 (需要实测微调, 通常在 1.0 - 1.2 之间)
-#define SLIP_COMPENSATION 1.03f
+#define SLIP_COMPENSATION 1.00f
 
 // [新增] 摩擦轮软启动步长 (deg/loop)
 // 假设 200Hz 控制频率，15m/s (约28000dps)
 // 设为 150.0f 表示约 1秒 达到满速
-#define FRICTION_RAMP_STEP 150.0f
+#define FRICTION_RAMP_STEP 100.0f
 
 // [新增] 摩擦轮前馈控制参数
 #define FRICTION_FEEDFORWARD_CURRENT 500 // 前馈电流值
@@ -21,15 +21,15 @@
 
 // ==================== 堵转检测参数 ====================
 // 堵转检测电流阈值 (raw值, M3508满量程16384, 设为 ~80% 高阈值使堵转处理更激烈)
-#define STALL_CURRENT_THRESHOLD 15500
+#define STALL_CURRENT_THRESHOLD 15000
 // 堵转检测速度阈值 (deg/s), 低于此值且电流高则判定为堵转
-#define STALL_SPEED_THRESHOLD 500.0f
+#define STALL_SPEED_THRESHOLD 400.0f
 // 堵转检测消抖时间 (ms), 持续满足条件才确认堵转
-#define STALL_DETECT_TIME 500
+#define STALL_DETECT_TIME 1500
 // 反转角度 (deg), 约为1/2颗弹丸角度,足够解卡但用户无感
-#define REVERSE_ANGLE ONE_BULLET_DELTA_ANGLE
+#define REVERSE_ANGLE 2 * ONE_BULLET_DELTA_ANGLE
 // 反转持续时间 (ms)
-#define REVERSE_TIME 200
+#define REVERSE_TIME 500
 // 恢复等待时间 (ms), 反转后等待稳定再继续供弹
 #define RECOVERY_TIME 80
 // 连续反转次数上限, 超过则认为卡死,停止尝试
@@ -37,7 +37,7 @@
 
 // ==================== 单发控制参数 ====================
 // 送弹速度 (deg/s), 中速稳定推弹, 给检测留足时间
-#define SF_FEED_SPEED 5000.0f
+#define SF_FEED_SPEED 9000.0f
 // 制动速度 (deg/s), 负值反向制动, 抵消惯性防止第二颗进入
 #define SF_BRAKE_SPEED -1000.0f
 // 制动持续时间 (ms), 反向制动的持续时长

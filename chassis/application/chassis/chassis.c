@@ -151,13 +151,12 @@ void ChassisInit()
     Motor_Init_Config_s chassis_motor_config = {
         .controller_param_init_config = {
             .speed_PID = {
-                .Kp = 3.7, // 4.5
-                .Ki = 0.0, // 0
+                .Kp = 3.1, // 4.5 3.7
+                .Ki = 0.0, // 0.2
                 .Kd = 0.0, // 0
-                .IntegralLimit = 3000,
                 .Improve = PID_Trapezoid_Intergral | PID_Integral_Limit | PID_Derivative_On_Measurement,
                 .MaxOut = 15000,
-                .Output_LPF_RC = 0.3,
+                .Output_LPF_RC = 0.1,
             },
         },
         .controller_setting_init_config = {
