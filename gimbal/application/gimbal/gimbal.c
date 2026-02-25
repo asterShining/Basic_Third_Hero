@@ -90,7 +90,7 @@ void GimbalInit()
         },
         .motor_type = J8006
     };
-    // PITCH
+    // PITCH  冲坡的时候，由于陀螺仪反馈，容易撞击到下限位
     Motor_Init_Config_s pitch_config = {
         .can_init_config = {
             .can_handle = &hcan1,
