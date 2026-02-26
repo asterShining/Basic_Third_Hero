@@ -116,7 +116,8 @@ void GimbalInit()
                 .IntegralLimit = 5,
                 .MaxOut = 15,
             },
-            .other_angle_feedback_ptr = &gimba_IMU_data->Roll,
+            // [轴互换后] Pitch 字段现在就是物理 Pitch 轴数据
+            .other_angle_feedback_ptr = &gimba_IMU_data->Pitch,
             .other_speed_feedback_ptr = (&gimba_IMU_data->Gyro[1]),
         },
         .controller_setting_init_config = {
@@ -224,8 +225,8 @@ void GimbalTask()
         k2_val = PITCH_GRAVITY_COEFFICIENT_K2;
 
         // B. 获取当前 Pitch 角度 (弧度制)
-        // 务必确认 gimba_IMU_data->Roll 对应的是 Pitch 轴的物理运动
-        float pitch_rad = (gimba_IMU_data ? gimba_IMU_data->Roll : 0.0f) * DEGREE_2_RAD;
+        // [轴互换后] Pitch 字段直接对应物理 Pitch 轴
+        float pitch_rad = (gimba_IMU_data ? gimba_IMU_data->Pitch : 0.0f) * DEGREE_2_RAD;
 
         // C. 计算补偿力矩
         // 匹配拟合模型: T = -k1*cos + k2*sin + offset

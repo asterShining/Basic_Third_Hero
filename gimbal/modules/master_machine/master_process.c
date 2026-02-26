@@ -43,9 +43,10 @@ void VisionSetQuaternion(const float *q)
  */
 void VisionSetAltitude(float yaw, float pitch, float yaw_vel, float pitch_vel)
 {
+    // [轴互换后] EKF 层已完成 Pitch/Roll 互换，传入的 pitch 即物理 Pitch
     send_data.yaw = yaw;
-    send_data.pitch = pitch;
     send_data.yaw_vel = yaw_vel;
+    send_data.pitch = pitch;
     send_data.pitch_vel = pitch_vel;
 }
 

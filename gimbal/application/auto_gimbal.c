@@ -42,6 +42,27 @@ static float FindClosestAngle(float current_angle, float target_angle_norm)
     return target;
 }
 
+// ==========================================
+// [新增] 调试专用结构体
+// ==========================================
+typedef struct {
+    // 上位机发送的原始数据 (用于观察上位机发了什么)
+    float vision_yaw; // 上位机发来的 Yaw (弧度)
+    float vision_pitch; // 上位机发来的 Pitch (弧度)
+    float vision_yaw_deg; // 上位机发来的 Yaw (转换后角度)
+
+    // 当前实际状态 (用于观察当前云台在哪)
+    float current_yaw; // 当前云台 Yaw (Total Angle)
+    float current_pitch; // 当前云台 Pitch
+
+    // 最终生成的控制目标 (用于观察下位机想要转到哪)
+    float cmd_yaw; // 最终发给电机的目标 Yaw
+    float cmd_pitch; // 最终发给电机的目标 Pitch
+    uint8_t vision_control; // 上位机是否下发了控制标志位
+} AutoAim_Debug_t;
+
+AutoAim_Debug_t auto_aim_debug = { 0 }; // 实例化全局结构体供 Debug 观察
+
 void AutoGimbalInit(void)
 {
     // 初始化自瞄参数 (如有必要)
@@ -54,17 +75,26 @@ AutoAim_State_e AutoGimbalRun(Vision_Recv_s *vis_recv, float current_yaw, float 
         return AUTO_AIM_IDLE;
     }
 
+    // 将实际状态和控制标志位存入结构体以便 Debug 查看
+    auto_aim_debug.current_yaw = current_yaw;
+    auto_aim_debug.current_pitch = current_pitch;
+    auto_aim_debug.vision_control = vis_recv->control;
+
     // 1. 检查上位机是否发来控制指令 (control=1)
     if (vis_recv->control) {
+        // --- 保存上位机原始数据 ---
+        auto_aim_debug.vision_yaw = vis_recv->yaw;
+        auto_aim_debug.vision_pitch = vis_recv->pitch;
+
         // --- 目标 Pitch 计算 ---
         // 上位机发来的是弧度，需转换为角度
-        // 注意: 直接使用上位机的 Pitch，下位机执行端已经做了重力补偿和限位保护
-        // 但这里需要映射到下位机的 Pitch 定义域 (通常是 -20 ~ 30 度)
+        // EKF Pitch 正方向 = 抬头, 上位机 Pitch 正方向 = 抬头, 方向一致, 无需取反
         float target_pitch_deg = vis_recv->pitch * RAD_TO_DEG;
 
         // --- 目标 Yaw 计算 (最短路径处理) ---
         // 上位机发来的 Yaw 是 [-PI, PI] 的绝对角度
         float vision_yaw_deg = vis_recv->yaw * RAD_TO_DEG;
+        auto_aim_debug.vision_yaw_deg = vision_yaw_deg;
 
         // 计算最短路径目标值，解决 0/360 跳变和多圈问题
         float target_yaw_deg = FindClosestAngle(current_yaw, vision_yaw_deg);
@@ -72,6 +102,10 @@ AutoAim_State_e AutoGimbalRun(Vision_Recv_s *vis_recv, float current_yaw, float 
         // --- 赋值输出 ---
         *cmd_yaw = target_yaw_deg;
         *cmd_pitch = target_pitch_deg;
+
+        // 保存最终生成的控制目标以便 Debug 查看
+        auto_aim_debug.cmd_yaw = *cmd_yaw;
+        auto_aim_debug.cmd_pitch = *cmd_pitch;
 
         return AUTO_AIM_TRACKING;
     } else {
