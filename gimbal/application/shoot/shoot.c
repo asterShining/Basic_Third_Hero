@@ -340,16 +340,14 @@ static float GetOuterFrictionAvgSpeed(void)
  */
 static uint8_t IsFrictionDipping(void)
 {
-    float current_inner = GetInnerFrictionAvgSpeed();
+    // 仅使用外圈摩擦轮进行掉速检测
+    // 原因: 外圈是弹丸最后经过的一级, 检测到掉速即确认弹丸已完全发射出去, 计数更准确
     float current_outer = GetOuterFrictionAvgSpeed();
 
-    // 内圈掉速判断
-    uint8_t inner_dip = (single_fire.baseline_speed - current_inner) > FRICTION_SPEED_DIP_THRESHOLD;
-    // 外圈掉速判断
+    // 外圈掉速判断: 基准速度与当前速度之差超过阈值, 认为弹丸正在通过
     uint8_t outer_dip = (single_fire.outer_baseline_speed - current_outer) > FRICTION_SPEED_DIP_THRESHOLD;
 
-    // 只要有任意一级出现明显掉速, 即认为弹丸正在通过
-    return inner_dip || outer_dip;
+    return outer_dip;
 }
 
 /**

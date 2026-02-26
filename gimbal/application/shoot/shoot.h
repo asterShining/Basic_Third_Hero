@@ -41,14 +41,13 @@
 // 制动速度 (deg/s), 负值反向制动, 抵消惯性防止第二颗进入
 #define SF_BRAKE_SPEED -1000.0f
 // 制动持续时间 (ms), 反向制动的持续时长
-#define SF_BRAKE_TIME 1000
+#define SF_BRAKE_TIME 500
 // 送弹超时时间 (ms), 超时未检测到掉速则认为缺弹或卡弹
 #define SF_FEED_TIMEOUT 9500
 
 // ==================== 发射确认检测参数 ====================
 // 掉速检测阈值 (deg/s), 内圈摩擦轮速度下降超过此值认为有弹丸通过
-// 使用内圈检测是因为弹丸先接触内圈, 信号更早, 能更有效防止多发
-#define FRICTION_SPEED_DIP_THRESHOLD 800.0f
+#define FRICTION_SPEED_DIP_THRESHOLD 1000.0f
 // 回升检测阈值 (deg/s), 与目标速度差小于此值认为回升完成
 #define FRICTION_SPEED_RECOVER_THRESHOLD 100.0f
 // [新增] 射速就绪阈值 (deg/s), 实际速度与目标速度误差小于此值才允许发射
