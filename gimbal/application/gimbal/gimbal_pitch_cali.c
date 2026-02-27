@@ -23,7 +23,7 @@ void GimbalCali_Start(GimbalCali_Handler_t *handler)
     }
 }
 
-uint8_t GimbalCali_Update(GimbalCali_Handler_t *handler, DMMotorInstance *motor, float current_roll_deg)
+uint8_t GimbalCali_Update(GimbalCali_Handler_t *handler, DMMotorInstance *motor, float current_pitch_deg)
 {
     if (handler == NULL || motor == NULL)
         return 0;
@@ -51,7 +51,7 @@ uint8_t GimbalCali_Update(GimbalCali_Handler_t *handler, DMMotorInstance *motor,
         handler->timer_cnt = 0;
 
         // 4. 打印表头 (方便Excel处理)
-        LOGINFO("DATA_START: Target_Torque(Nm), Angle_Roll(Deg), Real_Torque(Nm)");
+        LOGINFO("DATA_START: Target_Torque(Nm), Angle_Pitch(Deg), Real_Torque(Nm)");
 
         handler->state = CALI_STATE_RAMP;
         break;
@@ -83,7 +83,7 @@ uint8_t GimbalCali_Update(GimbalCali_Handler_t *handler, DMMotorInstance *motor,
 
         // 采集数据并滤波 (利用 user_lib 中的 AverageFilter)
         // 注意：这里为了简单，每次都计算一次平均值，实际是取最后一次的窗口平均
-        handler->avg_angle = AverageFilter(current_roll_deg, handler->angle_buffer, 50);
+        handler->avg_angle = AverageFilter(current_pitch_deg, handler->angle_buffer, 50);
 
         handler->timer_cnt += CALI_TASK_PERIOD_MS;
         if (handler->timer_cnt >= CALI_RECORD_TIME_MS) {

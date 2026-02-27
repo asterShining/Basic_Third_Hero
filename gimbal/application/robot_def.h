@@ -62,35 +62,35 @@
 // 补偿算法需要反向: 目标扭矩(Nm) -> 目标电流Raw
 #define TORQUE_2_CURRENT_COEF (1.0f / 0.0003662109375f)
 // ==========================================
-// [新增] IMU 轴向映射与符号修正
-// 用户反馈: 真实的 Pitch 轴对应陀螺仪的 Roll 数据
+// IMU -> 云台坐标映射 (保持右手坐标系)
+// 当前安装关系: 物理 Pitch 对应 IMU 的 Roll 通道
 // ==========================================
-#define GIMBAL_PITCH_AXIS Roll // 映射 Pitch 轴数据源为 Roll
-#define GIMBAL_ROLL_AXIS Pitch // 映射 Roll 轴数据源为 Pitch (假设交换)
-#define GIMBAL_YAW_AXIS Yaw // Yaw 轴保持不变
+// 可标定项: 抬头时 Pitch 应增大,若相反则改成 1
+#define IMU_TO_GIMBAL_PITCH_SIGN 1
+#define IMU_TO_GIMBAL_YAW_SIGN 1
+// 由右手系约束自动推导: 交换 Pitch/Roll 轴后必须满足 det=+1
+#define IMU_TO_GIMBAL_ROLL_SIGN (-(IMU_TO_GIMBAL_YAW_SIGN) * (IMU_TO_GIMBAL_PITCH_SIGN))
 
-#define GIMBAL_PITCH_SIGN (-1.0f) // Pitch 轴方向修正 (根据 GYRO2GIMBAL_DIR_ROLL 原始定义为 1, 此处可按需调整)
-#define GIMBAL_ROLL_SIGN (1.0f) // Roll 轴方向修正
-#define GIMBAL_YAW_SIGN (1.0f) // Yaw 轴方向修正
+#if ((IMU_TO_GIMBAL_PITCH_SIGN != 1) && (IMU_TO_GIMBAL_PITCH_SIGN != -1))
+#error "IMU_TO_GIMBAL_PITCH_SIGN must be +1 or -1"
+#endif
+#if ((IMU_TO_GIMBAL_YAW_SIGN != 1) && (IMU_TO_GIMBAL_YAW_SIGN != -1))
+#error "IMU_TO_GIMBAL_YAW_SIGN must be +1 or -1"
+#endif
+#if ((IMU_TO_GIMBAL_ROLL_SIGN != 1) && (IMU_TO_GIMBAL_ROLL_SIGN != -1))
+#error "IMU_TO_GIMBAL_ROLL_SIGN must be +1 or -1"
+#endif
+#if ((IMU_TO_GIMBAL_YAW_SIGN * IMU_TO_GIMBAL_PITCH_SIGN * IMU_TO_GIMBAL_ROLL_SIGN) != -1)
+#error "Invalid IMU axis mapping: right-hand constraint violated (det must be +1)"
+#endif
 
-#define GYRO2GIMBAL_DIR_ROLL 1 // 陀螺仪 data相较于云台的roll的方向,1为相同,-1为相反
-
-// ==========================================
-// [新增] 视觉自瞄专用 IMU 映射宏
-// 用于解决 user 提到的 "Roll 是 Pitch" 问题
-// ==========================================
-// 视觉算法需要的 Pitch 数据实际上对应 IMU 的 Roll 轴
-#define VISION_PITCH_AXIS Roll
-// 视觉 Pitch 轴的方向修正 (需要根据实际测试调整: 1 或 -1)
-#define VISION_PITCH_SIGN -1.0f
-
-// 视觉算法需要的 Yaw 数据对应 IMU 的 YawTotalAngle (累计角度)
-#define VISION_YAW_AXIS YawTotalAngle
-// 视觉 Yaw 轴的方向修正
+// 视觉层额外符号修正(默认保持 1, 姿态映射已在 INS 内完成)
+#define VISION_PITCH_SIGN 1.0f
 #define VISION_YAW_SIGN 1.0f
 
-#define GYRO2GIMBAL_DIR_PITCH -1 // [保留原宏兼容]
-#define GYRO2GIMBAL_DIR_ROLL 1 // [保留原宏兼容]
+// 兼容旧宏
+#define GYRO2GIMBAL_DIR_PITCH IMU_TO_GIMBAL_PITCH_SIGN
+#define GYRO2GIMBAL_DIR_ROLL IMU_TO_GIMBAL_ROLL_SIGN
 
 // ==========================================
 // [新增] 底盘速度限制参数 (m/s)

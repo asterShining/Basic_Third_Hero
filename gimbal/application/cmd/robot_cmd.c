@@ -212,7 +212,7 @@ static void RemoteControlSet()
     uint16_t current_switch_right = rc_data[TEMP].rc.switch_right;
     uint16_t current_switch_left = rc_data[TEMP].rc.switch_left;
 
-    float current_real_pitch = gimbal_fetch_data.gimbal_imu_data.Roll; // 实际pitch角度反馈值
+    float current_real_pitch = gimbal_fetch_data.gimbal_imu_data.Pitch; // 实际pitch角度反馈值
 
     // --- 状态机逻辑 ---
 
@@ -281,7 +281,7 @@ static void RemoteControlSet()
         }
 
         robot_state = ROBOT_READY;
-        chassis_cmd_send.chassis_mode = CHASSIS_FOLLOW_GIMBAL_YAW;
+        chassis_cmd_send.chassis_mode = CHASSIS_ZERO_FORCE;
         gimbal_cmd_send.gimbal_mode = GIMBAL_GYRO_MODE;
         shoot_cmd_send.shoot_mode = SHOOT_ON;
     }
@@ -341,13 +341,9 @@ static void RemoteControlSet()
     // // 修正: 只有在 GIMBAL_GYRO_MODE 下才允许自瞄介入
     if (switch_is_up(current_switch_right)) {
         if (gimbal_cmd_send.gimbal_mode == GIMBAL_GYRO_MODE) {
-            // 1. 获取当前云台反馈
-            // 注意: 我们在 robot_def.h 中定义了 VISION_YAW_AXIS 和 VISION_PITCH_AXIS
-            // 确保使用宏定义的轴向, 保持逻辑统一
-            float current_yaw_total = gimbal_fetch_data.gimbal_imu_data.VISION_YAW_AXIS * VISION_YAW_SIGN;
-
-            // [轴互换后] Pitch 字段直接对应物理 Pitch 轴
-            float current_pitch = gimbal_fetch_data.gimbal_imu_data.VISION_PITCH_AXIS * VISION_PITCH_SIGN;
+            // 1. 获取当前云台反馈(INS 已完成轴映射)
+            float current_yaw_total = gimbal_fetch_data.gimbal_imu_data.YawTotalAngle * VISION_YAW_SIGN;
+            float current_pitch = gimbal_fetch_data.gimbal_imu_data.Pitch * VISION_PITCH_SIGN;
 
             // 2. 运行自瞄逻辑
             // 如果识别到目标，cmd_yaw/pitch 会被更新为目标值

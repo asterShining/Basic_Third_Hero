@@ -29,8 +29,7 @@ typedef struct
 {
     float Gyro[3];  // 角速度
     float Accel[3]; // 加速度
-    // 还需要增加角速度数据
-    float Roll;
+    // 对外仅暴露物理云台语义: Yaw / Pitch
     float Pitch;
     float Yaw;
     float YawTotalAngle;
@@ -38,7 +37,8 @@ typedef struct
 
 typedef struct
 {
-    float q[4]; // 四元数估计值
+    float q[4]; // IMU原始四元数估计值
+    float q_mapped[4]; // 映射到云台坐标系后的四元数
 
     float MotionAccel_b[3]; // 机体坐标加速度
     float MotionAccel_n[3]; // 绝对系加速度
@@ -57,11 +57,14 @@ typedef struct
     // IMU量测值
     float Gyro[3];  // 角速度
     float Accel[3]; // 加速度
-    // 位姿
-    float Roll;
-    float Pitch;
-    float Yaw;
-    float YawTotalAngle;
+    // 原始欧拉角(由EKF直接输出)
+    float RollRaw;
+    float PitchRaw;
+    float YawRaw;
+    float YawTotalAngleRaw;
+
+    // 对外发布的姿态数据(物理语义)
+    attitude_t attitude;
 
     uint8_t init;
 } INS_t;

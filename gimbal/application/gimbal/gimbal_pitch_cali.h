@@ -62,9 +62,9 @@ void GimbalCali_Start(GimbalCali_Handler_t *handler);
  * @brief 标定状态机更新函数 (需在GimbalTask循环中持续调用)
  * * @param handler 句柄指针
  * @param motor   Pitch电机实例
- * @param current_roll_deg 当前IMU的Roll轴角度(单位:度)
+ * @param current_pitch_deg 当前IMU的Pitch轴角度(单位:度)
  * @return uint8_t 1: 正在标定中(屏蔽原控制逻辑) 0: 未标定(正常运行)
  */
-uint8_t GimbalCali_Update(GimbalCali_Handler_t *handler, DMMotorInstance *motor, float current_roll_deg);
+uint8_t GimbalCali_Update(GimbalCali_Handler_t *handler, DMMotorInstance *motor, float current_pitch_deg);
 
 #endif // GIMBAL_PITCH_CALI_H

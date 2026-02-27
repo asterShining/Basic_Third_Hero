@@ -19,6 +19,7 @@
 #include "user_lib.h"
 #include "general_def.h"
 #include "master_process.h"
+#include "robot_def.h"
 
 static INS_t INS;
 static IMU_Param_t IMU_Param;
@@ -34,6 +35,16 @@ static float dt = 0, t = 0;
 static float RefTemp = 40; // 恒温设定温度
 
 static void IMU_Param_Correction(IMU_Param_t *param, float gyro[3], float accel[3]);
+static void MapAttitudeToGimbalFrame(float yaw_raw, float pitch_raw, float roll_raw, float *yaw_out, float *pitch_out, float *roll_out);
+
+static void MapAttitudeToGimbalFrame(float yaw_raw, float pitch_raw, float roll_raw, float *yaw_out, float *pitch_out, float *roll_out)
+{
+    // 当前机械安装: 物理 Pitch <- IMU Roll, 物理 Roll <- IMU Pitch
+    // 符号由 robot_def.h 宏配置并满足右手约束.
+    *yaw_out = yaw_raw * (float)IMU_TO_GIMBAL_YAW_SIGN;
+    *pitch_out = roll_raw * (float)IMU_TO_GIMBAL_PITCH_SIGN;
+    *roll_out = pitch_raw * (float)IMU_TO_GIMBAL_ROLL_SIGN;
+}
 
 static void IMUPWMSet(uint16_t pwm)
 {
@@ -81,7 +92,7 @@ attitude_t *INS_Init(void)
     if (!INS.init)
         INS.init = 1;
     else
-        return (attitude_t *)&INS.Gyro;
+        return &INS.attitude;
 
     HAL_TIM_PWM_Start(&htim10, TIM_CHANNEL_1);
 
@@ -111,11 +122,11 @@ attitude_t *INS_Init(void)
     // noise of accel is relatively big and of high freq,thus lpf is used
     INS.AccelLPF = 0.0085;
     DWT_GetDeltaT(&INS_DWT_Count);
-    return (attitude_t *)&INS.Gyro; // @todo: 这里偷懒了,不要这样做! 修改INT_t结构体可能会导致异常,待修复.
+    return &INS.attitude;
 }
 void INS_Calibrate(void)
 {
-    INS_t INS;
+    memset(&INS, 0, sizeof(INS));
     INS.init = 0;
     // 2. 重新调用初始化
     INS_Init();
@@ -166,14 +177,24 @@ void INS_Task(void)
         }
         BodyFrameToEarthFrame(INS.MotionAccel_b, INS.MotionAccel_n, INS.q); // 转换回导航系n
 
-        INS.Yaw = QEKF_INS.Yaw;
-        INS.Pitch = QEKF_INS.Pitch;
-        INS.Roll = QEKF_INS.Roll;
-        INS.YawTotalAngle = QEKF_INS.YawTotalAngle;
+        INS.YawRaw = QEKF_INS.Yaw;
+        INS.PitchRaw = QEKF_INS.Pitch;
+        INS.RollRaw = QEKF_INS.Roll;
+        INS.YawTotalAngleRaw = QEKF_INS.YawTotalAngle;
+
+        float mapped_roll = 0.0f;
+        MapAttitudeToGimbalFrame(INS.YawRaw, INS.PitchRaw, INS.RollRaw, &INS.attitude.Yaw, &INS.attitude.Pitch, &mapped_roll);
+
+        INS.attitude.YawTotalAngle = INS.YawTotalAngleRaw * (float)IMU_TO_GIMBAL_YAW_SIGN;
+        memcpy(INS.attitude.Gyro, INS.Gyro, sizeof(INS.Gyro));
+        memcpy(INS.attitude.Accel, INS.Accel, sizeof(INS.Accel));
+
+        EularAngleToQuaternion(INS.attitude.Yaw, INS.attitude.Pitch, mapped_roll, INS.q_mapped);
 
         // 同步 IMU 数据到视觉通信模块 (四元数 + 姿态角 + 角速度)
-        VisionSetQuaternion(INS.q);
-        VisionSetAltitude(INS.Yaw, INS.Pitch, INS.Gyro[Z], INS.Gyro[Y]);
+        // 注意: EKF/姿态接口内部使用角度,视觉协议要求弧度
+        VisionSetQuaternion(INS.q_mapped);
+        VisionSetAltitude(INS.attitude.Yaw * DEGREE_2_RAD, INS.attitude.Pitch * DEGREE_2_RAD, INS.Gyro[Z], INS.Gyro[Y]);
     }
 
     // temperature control
