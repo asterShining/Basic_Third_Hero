@@ -78,7 +78,7 @@ static AutoAim_State_e auto_aim_state = AUTO_AIM_IDLE;
 void RobotCMDInit()
 {
     rc_data = RemoteControlInit(&huart3); // 修改为对应串口,注意如果是自研板dbus协议串口需选用添加了反相器的那个
-    // vision_recv_data = VisionInit(&huart1); // 视觉通信串口
+    vision_recv_data = VisionInit(&huart1); // 视觉通信串口
     Buzzer_config_s hint_config = {
         .alarm_level = ALARM_LEVEL_MEDIUM, // 优先级
         .octave = OCTAVE_5, // 音调 (SoFreq)
@@ -258,12 +258,12 @@ static void RemoteControlSet()
 
         robot_state = ROBOT_READY;
         // [用户要求] 注释掉原有逻辑 (User request: Comment out original logic)
-        // chassis_cmd_send.chassis_mode = CHASSIS_NO_FOLLOW;
+        chassis_cmd_send.chassis_mode = CHASSIS_ZERO_FORCE;
         // gimbal_cmd_send.gimbal_mode = GIMBAL_FREE_MODE;
 
         // [新增] 小陀螺模式配置 (New Configuration: Little Top Mode)
         // 底盘进入自旋模式 (wz=4000，由chassis.c控制)
-        chassis_cmd_send.chassis_mode = CHASSIS_ROTATE;
+        // chassis_cmd_send.chassis_mode = CHASSIS_ROTATE;
         // 云台切换至陀螺仪模式以保持世界坐标系下的稳定瞄准
         gimbal_cmd_send.gimbal_mode = GIMBAL_GYRO_MODE;
 
@@ -339,36 +339,35 @@ static void RemoteControlSet()
     // 或者，我们可以定义一个特定的开关逻辑
 
     // // 修正: 只有在 GIMBAL_GYRO_MODE 下才允许自瞄介入
-    // if (gimbal_cmd_send.gimbal_mode == GIMBAL_GYRO_MODE) {
-    //     // 1. 获取当前云台反馈
-    //     // 注意: 我们在 robot_def.h 中定义了 VISION_YAW_AXIS 和 VISION_PITCH_AXIS
-    //     // 确保使用宏定义的轴向, 保持逻辑统一
-    //     float current_yaw_total = gimbal_fetch_data.gimbal_imu_data.VISION_YAW_AXIS * VISION_YAW_SIGN;
+    if (switch_is_up(current_switch_right)) {
+        if (gimbal_cmd_send.gimbal_mode == GIMBAL_GYRO_MODE) {
+            // 1. 获取当前云台反馈
+            // 注意: 我们在 robot_def.h 中定义了 VISION_YAW_AXIS 和 VISION_PITCH_AXIS
+            // 确保使用宏定义的轴向, 保持逻辑统一
+            float current_yaw_total = gimbal_fetch_data.gimbal_imu_data.VISION_YAW_AXIS * VISION_YAW_SIGN;
 
-    //     // Pitch 轴需要根据宏定义来获取，如果是 Roll 轴，则取 gimbal_imu_data.Roll
-    //     // 但 C 语言中结构体成员名不能直接用宏替换 (除非宏是成员名本身)
-    //     // 在 robot_def.h 中: #define VISION_PITCH_AXIS Roll
-    //     // 所以 gimbal_fetch_data.gimbal_imu_data.VISION_PITCH_AXIS 展开后为 gimbal_fetch_data.gimbal_imu_data.Roll
-    //     float current_pitch = gimbal_fetch_data.gimbal_imu_data.VISION_PITCH_AXIS * VISION_PITCH_SIGN;
+            // [轴互换后] Pitch 字段直接对应物理 Pitch 轴
+            float current_pitch = gimbal_fetch_data.gimbal_imu_data.VISION_PITCH_AXIS * VISION_PITCH_SIGN;
 
-    //     // 2. 运行自瞄逻辑
-    //     // 如果识别到目标，cmd_yaw/pitch 会被更新为目标值
-    //     // 如果未识别到，cmd_yaw/pitch 保持 RemoteControl 计算出的手动值
-    //     auto_aim_state = AutoGimbalRun(
-    //         vision_recv_data,
-    //         current_yaw_total,
-    //         current_pitch,
-    //         &gimbal_cmd_send.yaw,
-    //         &gimbal_cmd_send.pitch);
+            // 2. 运行自瞄逻辑
+            // 如果识别到目标，cmd_yaw/pitch 会被更新为目标值
+            // 如果未识别到，cmd_yaw/pitch 保持 RemoteControl 计算出的手动值
+            auto_aim_state = AutoGimbalRun(
+                vision_recv_data,
+                current_yaw_total,
+                current_pitch,
+                &gimbal_cmd_send.yaw,
+                &gimbal_cmd_send.pitch);
 
-    //     // 如果进入自瞄跟踪状态，可以覆盖底盘模式为跟随云台 (可选)
-    //     if (auto_aim_state == AUTO_AIM_TRACKING) {
-    //         // chassis_cmd_send.chassis_mode = CHASSIS_FOLLOW_GIMBAL_YAW;
-    //         // (保持小陀螺或跟随，视 tactical 需求而定，暂不强制修改底盘模式)
-    //     }
-    // } else {
-    //     auto_aim_state = AUTO_AIM_IDLE;
-    // }
+            // 如果进入自瞄跟踪状态，可以覆盖底盘模式为跟随云台 (可选)
+            if (auto_aim_state == AUTO_AIM_TRACKING) {
+                // chassis_cmd_send.chassis_mode = CHASSIS_FOLLOW_GIMBAL_YAW;
+                // (保持小陀螺或跟随，视 tactical 需求而定，暂不强制修改底盘模式)
+            }
+        } else {
+            auto_aim_state = AUTO_AIM_IDLE;
+        }
+    }
 
     // 底盘参数
     // 右手系 x正向前进 y正向右移
