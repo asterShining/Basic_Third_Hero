@@ -18,7 +18,6 @@
 #include "tim.h"
 #include "user_lib.h"
 #include "general_def.h"
-#include "master_process.h"
 
 static INS_t INS;
 static IMU_Param_t IMU_Param;
@@ -171,7 +170,7 @@ void INS_Task(void)
         INS.Roll = QEKF_INS.Roll;
         INS.YawTotalAngle = QEKF_INS.YawTotalAngle;
 
-        VisionSetAltitude(INS.Yaw, INS.Pitch, INS.Roll);
+        // What: 视觉模块已删除，此处仅保留姿态解算结果在本模块内更新；Why: 避免跨模块空调用影响实时路径可维护性
     }
 
     // temperature control

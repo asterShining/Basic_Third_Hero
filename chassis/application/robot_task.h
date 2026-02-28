@@ -10,7 +10,6 @@
 #include "ins_task.h"
 #include "motor_task.h"
 #include "referee_task.h"
-#include "master_process.h"
 #include "daemon.h"
 #include "HT04.h"
 #include "buzzer.h"
@@ -69,7 +68,7 @@ __attribute__((noreturn)) void StartINSTASK(void const *argument)
         if (ins_dt > 1)
             LOGERROR("[freeRTOS] INS Task DELAY! dt = %d us", (int)(ins_dt * 1000));
 
-        VisionSend();
+        // What: 视觉模块已移除，INS任务不再发送视觉数据；Why: 避免无效串口链路占用1kHz任务预算
         osDelay(1);
     }
 }

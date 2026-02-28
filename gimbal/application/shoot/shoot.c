@@ -608,8 +608,8 @@ static void HandleSingleFire(uint8_t trigger_active)
             // 这里可以针对每个电机单独设置方向 +/-
             // 目前假设底层电机模块处理了 MOTOR_DIRECTION_REVERSE, 所以这里都给正值 (Forward Current)
             ff_inner_left = FRICTION_FEEDFORWARD_CURRENT; // 使用宏定义
-            ff_inner_right = FRICTION_FEEDFORWARD_CURRENT; // 200 -> 宏
-            ff_inner_down = FRICTION_FEEDFORWARD_CURRENT; // 500 -> 宏
+            ff_inner_right = FRICTION_FEEDFORWARD_CURRENT; //
+            ff_inner_down = FRICTION_FEEDFORWARD_CURRENT; //
             ff_outer_left = 0.0f;
             ff_outer_right = 0.0f;
             ff_outer_down = 0.0f;
@@ -622,7 +622,6 @@ static void HandleSingleFire(uint8_t trigger_active)
             ff_outer_down = 0.0f;
         }
 
-        // [新增] 动态基准逻辑 (Peak Hold) - 双重
         // 如果电机因为前馈加速了, 基准线也要跟着涨, 否则检测不到掉速
         { // 增加大括号限制作用域
             float current_inner = GetInnerFrictionAvgSpeed();
@@ -708,7 +707,6 @@ static void HandleSingleFire(uint8_t trigger_active)
         break;
 
     case SF_COOLDOWN:
-        // 冷却时间 80ms (参考原 SF_COOLDOWN_TIME 建议，这里直接用宏或硬编码)
         if (current_time - single_fire.cooldown_start_time > 80) {
             single_fire.state = SF_IDLE;
         }
@@ -747,7 +745,6 @@ void ShootTask()
         DJIMotorEnable(loader);
     }
 
-    // [新增] 堵转检测与自动反转处理
     // 该函数会在堵转时自动替换发射模式为反转/停止状态
     loader_mode_e actual_load_mode = HandleLoaderStall(shoot_cmd_recv.load_mode);
 

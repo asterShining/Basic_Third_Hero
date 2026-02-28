@@ -189,7 +189,7 @@ void ChassisInit()
     chassis_motor_config.controller_setting_init_config.motor_reverse_flag = MOTOR_DIRECTION_REVERSE;
     motor_lb = PowerControlInit(&chassis_motor_config);
 
-    // referee_data = UITaskInit(&huart6, &ui_data); // 裁判系统初始化,会同时初始化UI
+    referee_data = UITaskInit(&huart6, &ui_data); // 裁判系统初始化,会同时初始化UI
     PowerControl_EnableSlopeComp(1);
 
 #ifdef USE_SUPER_CAP
