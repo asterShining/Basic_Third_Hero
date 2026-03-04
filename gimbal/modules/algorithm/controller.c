@@ -195,6 +195,7 @@ float PIDCalculate(PIDInstance *pid, float measure, float ref)
     {
         pid->Output = 0;
         pid->ITerm = 0;
+        pid->Iout = 0; // [修复] 清零积分累积值, 防止残留积分在目标为零时驱动电机自转
     }
 
     // 保存当前数据,用于下次计算

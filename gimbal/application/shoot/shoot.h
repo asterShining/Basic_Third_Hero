@@ -17,7 +17,7 @@
 
 // [新增] 摩擦轮前馈控制参数
 #define FRICTION_FEEDFORWARD_CURRENT 500 // 前馈电流值
-#define FRICTION_FEEDFORWARD_TIME 300 // 前馈持续时间 (ms)
+#define FRICTION_FEEDFORWARD_TIME 500 // 前馈持续时间 (ms)
 
 // ==================== 堵转检测参数 ====================
 // 堵转检测电流阈值 (raw值, M3508满量程16384, 设为 ~80% 高阈值使堵转处理更激烈)
@@ -37,11 +37,11 @@
 
 // ==================== 单发控制参数 ====================
 // 送弹速度 (deg/s), 中速稳定推弹, 给检测留足时间
-#define SF_FEED_SPEED 9000.0f
+#define SF_FEED_SPEED 13000.0f
 // 制动速度 (deg/s), 负值反向制动, 抵消惯性防止第二颗进入
 #define SF_BRAKE_SPEED -1000.0f
 // 制动持续时间 (ms), 反向制动的持续时长
-#define SF_BRAKE_TIME 500
+#define SF_BRAKE_TIME 100
 // 送弹超时时间 (ms), 超时未检测到掉速则认为缺弹或卡弹
 #define SF_FEED_TIMEOUT 9500
 

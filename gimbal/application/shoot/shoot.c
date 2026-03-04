@@ -47,11 +47,12 @@ void ShootInit()
         },
         .controller_param_init_config = {
             .speed_PID = {
-                .Kp = 9.7, // 9.3
-                .Ki = 0.9, // 1.3
+                .Kp = 8.7, // 8.7
+                .Ki = 0.5, // 0.5
                 .Kd = 0,
+                .DeadBand = 10.0f, // [新增] 死区: ±20 deg/s 以内视为零速, 配合 Iout 清零防止停止时自转
                 .Improve = PID_Integral_Limit,
-                .IntegralLimit = 10000,
+                .IntegralLimit = 5000,
                 .MaxOut = 16000,
             },
             // [修改] 下面会针对每个电机单独赋值
@@ -74,11 +75,12 @@ void ShootInit()
         },
         .controller_param_init_config = {
             .speed_PID = {
-                .Kp = 9.3, // 8
-                .Ki = 0.9, // 1
+                .Kp = 8.3, // 8.3
+                .Ki = 0.5, // 0.5
                 .Kd = 0,
+                .DeadBand = 10.0f, // [新增] 死区: ±20 deg/s 以内视为零速, 配合 Iout 清零防止停止时自转
                 .Improve = PID_Integral_Limit,
-                .IntegralLimit = 10000,
+                .IntegralLimit = 5000,
                 .MaxOut = 15000,
             },
             .current_feedforward_ptr = NULL,
@@ -114,24 +116,24 @@ void ShootInit()
     friction_config_inner.controller_param_init_config.current_feedforward_ptr = &ff_inner_right; // 绑定独立前馈
     friction_inner_right = DJIMotorInit(&friction_config_inner);
 
-    // 第二级，外摩擦轮初始化
-    // 1. 下
-    friction_config_outer.can_init_config.tx_id = 4;
-    friction_config_outer.controller_setting_init_config.motor_reverse_flag = MOTOR_DIRECTION_NORMAL;
-    friction_config_outer.controller_param_init_config.current_feedforward_ptr = &ff_outer_down; // 绑定独立前馈
-    friction_outer_down = DJIMotorInit(&friction_config_outer);
+    // // 第二级，外摩擦轮初始化
+    // // 1. 下
+    // friction_config_outer.can_init_config.tx_id = 4;
+    // friction_config_outer.controller_setting_init_config.motor_reverse_flag = MOTOR_DIRECTION_NORMAL;
+    // friction_config_outer.controller_param_init_config.current_feedforward_ptr = &ff_outer_down; // 绑定独立前馈
+    // friction_outer_down = DJIMotorInit(&friction_config_outer);
 
-    // 2. 左 (反转)
-    friction_config_outer.can_init_config.tx_id = 5;
-    friction_config_outer.controller_setting_init_config.motor_reverse_flag = MOTOR_DIRECTION_REVERSE;
-    friction_config_outer.controller_param_init_config.current_feedforward_ptr = &ff_outer_left; // 绑定独立前馈
-    friction_outer_left = DJIMotorInit(&friction_config_outer);
+    // // 2. 左 (反转)
+    // friction_config_outer.can_init_config.tx_id = 5;
+    // friction_config_outer.controller_setting_init_config.motor_reverse_flag = MOTOR_DIRECTION_REVERSE;
+    // friction_config_outer.controller_param_init_config.current_feedforward_ptr = &ff_outer_left; // 绑定独立前馈
+    // friction_outer_left = DJIMotorInit(&friction_config_outer);
 
-    // 3. 右
-    friction_config_outer.can_init_config.tx_id = 6;
-    friction_config_outer.controller_setting_init_config.motor_reverse_flag = MOTOR_DIRECTION_NORMAL;
-    friction_config_outer.controller_param_init_config.current_feedforward_ptr = &ff_outer_right; // 绑定独立前馈
-    friction_outer_right = DJIMotorInit(&friction_config_outer);
+    // // 3. 右
+    // friction_config_outer.can_init_config.tx_id = 6;
+    // friction_config_outer.controller_setting_init_config.motor_reverse_flag = MOTOR_DIRECTION_NORMAL;
+    // friction_config_outer.controller_param_init_config.current_feedforward_ptr = &ff_outer_right; // 绑定独立前馈
+    // friction_outer_right = DJIMotorInit(&friction_config_outer);
 
     // 拨盘电机
     Motor_Init_Config_s loader_config = {
@@ -150,7 +152,7 @@ void ShootInit()
             },
             .speed_PID = {
                 .Kp = 3.5, // 10S
-                .Ki = 0.0, // 1
+                .Ki = 0.5, // 1
                 .Kd = 0.0,
                 .Improve = PID_Integral_Limit,
                 .IntegralLimit = 5000,
@@ -827,10 +829,10 @@ void ShootTask()
         switch (shoot_cmd_recv.bullet_speed) {
         case BIG_AMU_12:
             // 目标12m/s：一级给11.5，二级给12.0
-            ShootSetSpeedDual(11.5f, 12.0f);
+            ShootSetSpeedDual(11.0f, 12.0f);
             break;
         case BIG_AMU_16:
-            // 目标16.5m/s：一级给16.0，二级给16.8
+            // 目标16.5m/s：一级给15.5，二级给16.5
             ShootSetSpeedDual(15.5f, 16.5f);
             break;
         default:

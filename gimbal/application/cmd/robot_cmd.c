@@ -78,7 +78,7 @@ static AutoAim_State_e auto_aim_state = AUTO_AIM_IDLE;
 void RobotCMDInit()
 {
     rc_data = RemoteControlInit(&huart3); // 修改为对应串口,注意如果是自研板dbus协议串口需选用添加了反相器的那个
-    vision_recv_data = VisionInit(&huart1); // 视觉通信串口
+    // vision_recv_data = VisionInit(&huart1); // 视觉通信串口
     Buzzer_config_s hint_config = {
         .alarm_level = ALARM_LEVEL_MEDIUM, // 优先级
         .octave = OCTAVE_5, // 音调 (SoFreq)
@@ -426,7 +426,7 @@ static void RemoteControlSet()
         if (friction_switch_state == 1) {
             // 1. 开启摩擦轮
             shoot_cmd_send.friction_mode = FRICTION_ON;
-            shoot_cmd_send.bullet_speed = BIG_AMU_16;
+            shoot_cmd_send.bullet_speed = BIG_AMU_12;
 
             // 2. 处理开火指令 (左拨杆 -> 下)
             // 只有在摩擦轮开启时，拨到下面才有效

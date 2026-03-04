@@ -60,22 +60,22 @@ void GimbalInit()
         },
         .controller_param_init_config = {
             .angle_PID = {
-                .Kp = 0.61, // 0.72
+                .Kp = 0.71, // 0.71
                 .Ki = 0,
                 .Kd = 0,
 
                 .Improve = PID_Trapezoid_Intergral | PID_Integral_Limit | PID_Derivative_On_Measurement | PID_ErrorHandle,
                 .IntegralLimit = 7,
 
-                .MaxOut = 20,
+                .MaxOut = 21,
             },
             .speed_PID = {
-                .Kp = 1.5, // 2.1
-                .Ki = 0.2, // 0.1 //最好增加速度环ki,小陀螺的时候可以抑制云台偏移
+                .Kp = 2.4, // 2.1
+                .Ki = 0.0, // 0.1 //最好增加速度环ki,小陀螺的时候可以抑制云台偏移
                 .Kd = 0,
                 .Improve = PID_Trapezoid_Intergral | PID_Integral_Limit | PID_Derivative_On_Measurement,
                 .IntegralLimit = 3,
-                .MaxOut = 5,
+                .MaxOut = 10,
             },
             .other_angle_feedback_ptr = &gimba_IMU_data->YawTotalAngle,
             // 还需要增加角速度额外反馈指针,注意方向,ins_task.md中有c板的bodyframe坐标系说明
@@ -99,7 +99,7 @@ void GimbalInit()
         },
         .controller_param_init_config = {
             .angle_PID = {
-                .Kp = 0.72,
+                .Kp = 0.92,
                 .Ki = 0.0,
                 .Kd = 0.0,
                 .DeadBand = 0.0,
@@ -109,7 +109,7 @@ void GimbalInit()
             },
             .speed_PID = {
                 // 此处为速度环参数，均为负数
-                .Kp = -6.54,
+                .Kp = -6.84,
                 .Ki = -0.23,
                 .Kd = 0, // 0
                 .Improve = PID_Trapezoid_Intergral | PID_Integral_Limit | PID_Derivative_On_Measurement,
