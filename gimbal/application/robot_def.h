@@ -32,8 +32,8 @@
 #define PITCH_MAX_ANGLE 37 // 云台陀螺仪竖直方向最大角度
 #define PITCH_MIN_ANGLE -11 // 云台陀螺仪竖直方向最小角度
 // 发射参数
-#define ONE_BULLET_DELTA_ANGLE 40 // 发射一发弹丸拨盘转动的距离,由机械设计图纸给出
-#define REDUCTION_RATIO_LOADER 19.0f // 英雄需要修改为3508的19.0f
+#define ONE_BULLET_DELTA_ANGLE 80 // 发射一发弹丸拨盘转动的距离,由机械设计图纸给出
+#define REDUCTION_RATIO_LOADER 16.0f // 英雄需要修改为3508的15.7f
 #define NUM_PER_CIRCLE 9 // 拨盘一圈的装载量
 // 机器人底盘修改的参数,单位为mm(毫米)
 #define WHEEL_BASE 450 // 纵向轴距(前进后退方向)
@@ -65,8 +65,8 @@
 // [新增] IMU 轴向映射与符号修正
 // 用户反馈: 真实的 Pitch 轴对应陀螺仪的 Roll 数据
 // ==========================================
-#define GIMBAL_PITCH_AXIS Pitch  // [轴互换后] 直接映射 (EKF 层已交换)
-#define GIMBAL_ROLL_AXIS Roll    // [轴互换后] 直接映射
+#define GIMBAL_PITCH_AXIS Pitch // [轴互换后] 直接映射 (EKF 层已交换)
+#define GIMBAL_ROLL_AXIS Roll // [轴互换后] 直接映射
 #define GIMBAL_YAW_AXIS Yaw // Yaw 轴保持不变
 
 #define GIMBAL_PITCH_SIGN (-1.0f) // Pitch 轴方向修正 (根据 GYRO2GIMBAL_DIR_ROLL 原始定义为 1, 此处可按需调整)
@@ -80,7 +80,7 @@
 // 用于解决 user 提到的 "Roll 是 Pitch" 问题
 // ==========================================
 // 视觉算法需要的 Pitch 数据实际上对应 IMU 的 Roll 轴
-#define VISION_PITCH_AXIS Pitch  // [轴互换后] 直接映射
+#define VISION_PITCH_AXIS Pitch // [轴互换后] 直接映射
 // 视觉 Pitch 轴的方向修正 (EKF Pitch 正方向 = 抬头, 与上位机一致, 无需取反)
 #define VISION_PITCH_SIGN 1.0f
 

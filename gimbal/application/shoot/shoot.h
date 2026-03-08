@@ -8,7 +8,7 @@
 // 摩擦轮半径 (单位: 米), 例如 30mm = 0.03m
 #define FRICTION_WHEEL_RADIUS 0.03f
 // 打滑补偿系数 (需要实测微调, 通常在 1.0 - 1.2 之间)
-#define SLIP_COMPENSATION 1.00f
+#define SLIP_COMPENSATION 1.20f
 
 // [新增] 摩擦轮软启动步长 (deg/loop)
 // 假设 200Hz 控制频率，15m/s (约28000dps)
@@ -26,8 +26,8 @@
 #define STALL_SPEED_THRESHOLD 400.0f
 // 堵转检测消抖时间 (ms), 持续满足条件才确认堵转
 #define STALL_DETECT_TIME 1500
-// 反转角度 (deg), 约为1/2颗弹丸角度,足够解卡但用户无感
-#define REVERSE_ANGLE 2 * ONE_BULLET_DELTA_ANGLE
+// 反转角度 (deg), 约为 1/2 颗弹丸角度, 足够解卡但尽量不把正常节拍打乱
+#define REVERSE_ANGLE (0.5f * ONE_BULLET_DELTA_ANGLE)
 // 反转持续时间 (ms)
 #define REVERSE_TIME 500
 // 恢复等待时间 (ms), 反转后等待稳定再继续供弹
@@ -36,12 +36,22 @@
 #define MAX_REVERSE_COUNT 5
 
 // ==================== 单发控制参数 ====================
-// 送弹速度 (deg/s), 中速稳定推弹, 给检测留足时间
-#define SF_FEED_SPEED 13000.0f
-// 制动速度 (deg/s), 负值反向制动, 抵消惯性防止第二颗进入
-#define SF_BRAKE_SPEED -1000.0f
-// 制动持续时间 (ms), 反向制动的持续时长
-#define SF_BRAKE_TIME 100
+// 单发冲刺行程 (单位: 发), 直接给出大位置误差, 让位置环一开始就把速度环顶到高输出
+#define SF_RUSH_BULLET_COUNT 2.0f
+// 拨盘电机总角度对应的一发角度 (deg), 需要乘减速比, 因为 total_angle 是电机转子多圈角度
+#define LOADER_MOTOR_ANGLE_PER_BULLET (ONE_BULLET_DELTA_ANGLE * REDUCTION_RATIO_LOADER)
+// 单发冲刺总角度 (deg), 用于位置环大步进推弹
+#define SF_RUSH_ANGLE (SF_RUSH_BULLET_COUNT * LOADER_MOTOR_ANGLE_PER_BULLET)
+// 单发冲刺到位容差 (deg), 用于在掉速丢失时尽快收口, 避免持续追一个过远目标
+#define SF_RUSH_REACHED_TOLERANCE (0.10f * LOADER_MOTOR_ANGLE_PER_BULLET)
+// 补发频率 (Hz), 初次冲刺未发现掉速时按该节拍继续位置环补步, 便于逐颗寻找弹丸
+#define SF_RETRY_RATE_HZ 8.0f
+// 单次补发步距 (单位: 发), 继续沿用统一机械节距, 避免单发/二连发/反转的几何语义分裂
+#define SF_RETRY_STEP_BULLET_COUNT 2.0f
+// 有限重试上限, 超过后判定本次未成功出弹并锁止, 防止空仓时无休止卷弹
+#define SF_RETRY_MAX_COUNT 5u
+// 补发间隔 (ms), 由补发频率直接换算, 便于状态机按绝对时间节拍触发下一步
+#define SF_RETRY_INTERVAL_MS (1000.0f / SF_RETRY_RATE_HZ)
 // 送弹超时时间 (ms), 超时未检测到掉速则认为缺弹或卡弹
 #define SF_FEED_TIMEOUT 9500
 
@@ -69,9 +79,15 @@ static struct {
     SingleFireState_e state; // 当前状态
     float baseline_speed; // 触发时的基准摩擦轮速度 (内圈)
     float outer_baseline_speed; // 触发时的基准摩擦轮速度 (外圈)
+    float rush_start_angle; // 冲刺起始角度, 用于调试观察本次发射从哪里开始
+    float rush_target_angle; // 冲刺目标角度, 用于给位置环施加大误差换取起步力矩
+    float lock_target_angle; // 锁止目标角度, 用于在掉速瞬间冻结当前位置防止多送
+    float shot_start_time; // 本次单发事务开始时间戳 (ms), 用于限制整次有限重试的总时长
     float feed_start_time; // 送弹开始时间戳 (ms)
-    float brake_start_time; // 制动开始时间戳 (ms)
+    float retry_start_time; // 补发等待起始时间戳 (ms), 用于按固定频率释放下一次补步
+    float brake_start_time; // 锁止开始时间戳 (ms), 保留原字段名以减少调试结构变更范围
     float cooldown_start_time; // 冷却开始时间戳 (ms)
+    uint8_t retry_count; // 已执行的补发次数, 用于实现有限重试而不是无限卷弹
     uint16_t fire_count; // 累计发射计数
     uint16_t feed_timeout_count; // 送弹超时计数
 } single_fire = { 0 };

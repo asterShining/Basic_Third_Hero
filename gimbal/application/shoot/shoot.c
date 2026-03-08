@@ -143,16 +143,17 @@ void ShootInit()
         },
         .controller_param_init_config = {
             .angle_PID = {
-                // 如果启用位置环来控制发弹,需要较大的I值保证输出力矩的线性度否则出现接近拨出的力矩大幅下降
-                .Kp = 1.3, // 10
+                // 这里把位置环 Kp 和输出上限一起抬高，作用是把 2.5 发量级的大角度误差直接转换成高速度给定；
+                // 原因是 DJI 串级控制里位置环输出先喂给速度环，若这里不够大，拨盘就无法在起步瞬间打出满力矩冲刺。
+                .Kp = 19.0f,
                 .Ki = 0.0,
-                .Kd = 0.01,
-                .MaxOut = 9000, // 角度环输出限幅 (deg/s), 提高以允许更大力矩
+                .Kd = 0.0f,
+                .MaxOut = 40000,
 
             },
             .speed_PID = {
-                .Kp = 3.5, // 10S
-                .Ki = 0.5, // 1
+                .Kp = 3.1, // 3.1
+                .Ki = 0.0, // 1
                 .Kd = 0.0,
                 .Improve = PID_Integral_Limit,
                 .IntegralLimit = 5000,
@@ -215,6 +216,174 @@ float SpeedAps2Mps(float speed_aps)
 }
 
 /**
+ * @brief 读取电机实时角速度
+ * @param motor 电机实例
+ * @return 电机实时角速度，空指针时返回 0
+ * @note 这里统一做空指针保护，原因是当前外圈摩擦轮可能被裁剪为未安装配置，直接解引用会把射击任务打崩。
+ */
+static float GetMotorSpeedAps(const DJIMotorInstance *motor)
+{
+    if (motor == NULL)
+        return 0.0f;
+
+    return motor->measure.speed_aps;
+}
+
+/**
+ * @brief 判断外圈摩擦轮是否完整存在
+ * @return 1 表示外圈三电机都已初始化，0 表示当前平台没有完整外圈
+ * @note 这里单独做能力检测，原因是掉速检测和就绪判定需要根据硬件配置自动降级，避免把不存在的外圈当成故障。
+ */
+static uint8_t HasOuterFrictionWheel(void)
+{
+    return (friction_outer_left != NULL) &&
+           (friction_outer_right != NULL) &&
+           (friction_outer_down != NULL);
+}
+
+/**
+ * @brief 将拨盘输出端角度换算为电机 total_angle 单位
+ * @param output_angle_deg 拨盘输出端角度，单位为 deg
+ * @return 电机转子总角度，单位为 deg
+ * @note total_angle 是电机转子多圈角度而非拨盘输出角度，所以位置环目标必须乘减速比，否则会少转约 19 倍。
+ */
+static float LoaderOutputAngleToMotorAngle(float output_angle_deg)
+{
+    return output_angle_deg * REDUCTION_RATIO_LOADER;
+}
+
+/**
+ * @brief 将“多少发弹丸的机械行程”换算为电机 total_angle 单位
+ * @param bullet_count 以“发”为单位的拨盘行程
+ * @return 电机转子总角度，单位为 deg
+ * @note 用弹丸数量描述位置目标更符合射击机构语义，原因是单发、二连发、反转都天然按“几发”的机械节距定义。
+ */
+static float LoaderBulletCountToMotorAngle(float bullet_count)
+{
+    return bullet_count * LOADER_MOTOR_ANGLE_PER_BULLET;
+}
+
+/**
+ * @brief 给拨盘电机下发速度环目标
+ * @param speed_ref 目标角速度，单位为 deg/s
+ * @note 统一封装速度环切换和设定值下发，原因是单发/停机/连发都会复用，避免多处切环遗漏。
+ */
+static void LoaderSetSpeedRef(float speed_ref)
+{
+    DJIMotorOuterLoop(loader, SPEED_LOOP);
+    DJIMotorSetRef(loader, speed_ref);
+}
+
+/**
+ * @brief 给拨盘电机下发位置环目标
+ * @param angle_ref 目标 total_angle，单位为 deg
+ * @note 统一封装位置环切换和设定值下发，原因是单发冲刺、掉速锁角、二三连发都必须严格使用同一角度语义。
+ */
+static void LoaderSetAngleRef(float angle_ref)
+{
+    DJIMotorOuterLoop(loader, ANGLE_LOOP);
+    DJIMotorSetRef(loader, angle_ref);
+}
+
+/**
+ * @brief 统一设置摩擦轮前馈
+ * @param inner_ff 内圈前馈电流
+ * @param outer_ff 外圈前馈电流
+ * @note 这里把 6 个前馈量集中写入，原因是单发状态机有多处清零/注入动作，手写六次很容易漏改。
+ */
+static void SetFrictionFeedforward(float inner_ff, float outer_ff)
+{
+    ff_inner_left = inner_ff;
+    ff_inner_right = inner_ff;
+    ff_inner_down = inner_ff;
+    ff_outer_left = outer_ff;
+    ff_outer_right = outer_ff;
+    ff_outer_down = outer_ff;
+}
+
+/**
+ * @brief 安全地下发摩擦轮参考值
+ * @param motor 电机实例
+ * @param ref 目标角速度
+ * @note 这里对可选电机做空指针保护，原因是英雄当前代码允许裁剪外圈，空指针直接写 ref 会触发 HardFault。
+ */
+static void SetFrictionRefIfReady(DJIMotorInstance *motor, float ref)
+{
+    if (motor != NULL)
+        DJIMotorSetRef(motor, ref);
+}
+
+/**
+ * @brief 安全地启停电机
+ * @param motor 电机实例
+ * @param enable 1 使能，0 停止
+ * @note 统一封装空指针保护，原因是 ShootTask 会批量启停所有摩擦轮，当前硬件配置可能并不具备全部 6 个电机。
+ */
+static void SetMotorEnableIfReady(DJIMotorInstance *motor, uint8_t enable)
+{
+    if (motor == NULL)
+        return;
+
+    if (enable)
+        DJIMotorEnable(motor);
+    else
+        DJIMotorStop(motor);
+}
+
+/**
+ * @brief 中止单发状态机
+ * @note 这里同时清空前馈和挂起触发，原因是切换到二连发/连发/反转时必须把单发遗留状态完全收口，避免旧状态抢控制权。
+ */
+static void AbortSingleFire(void)
+{
+    single_fire.state = SF_IDLE;
+    single_fire.retry_count = 0;
+    single_fire.shot_start_time = 0.0f;
+    single_fire.feed_start_time = 0.0f;
+    single_fire.retry_start_time = 0.0f;
+    fire_trigger.pending_fire = 0;
+    SetFrictionFeedforward(0.0f, 0.0f);
+}
+
+/**
+ * @brief 进入单发有限重试等待态
+ * @param current_time 当前系统时间 (ms)
+ * @note 这里先锁住当前位置再等待下一次补步，作用是让重试节拍由时间控制而不是由电机惯性决定；
+ *       原因是用户要求“按一定频率位置环转动”，若不先锁住当前位置，补发间隔会随机械阻力漂移。
+ */
+static void EnterSingleFireRetryWait(float current_time)
+{
+    single_fire.state = SF_RETRYING;
+    single_fire.lock_target_angle = loader->measure.total_angle;
+    single_fire.retry_start_time = current_time;
+    SetFrictionFeedforward(0.0f, 0.0f);
+    LoaderSetAngleRef(single_fire.lock_target_angle);
+}
+
+/**
+ * @brief 结束本次单发事务并锁住当前位置
+ * @param current_time 当前系统时间 (ms)
+ * @param shot_success 1 表示确认出弹, 0 表示未确认出弹
+ * @note 这里统一收口成功/失败两条分支，作用是确保锁角、前馈清零、计数更新始终一致；
+ *       原因是单发现在包含初次冲刺和有限补发，多处手写收尾容易出现某个分支漏清状态。
+ */
+static void FinishSingleFire(float current_time, uint8_t shot_success)
+{
+    single_fire.state = SF_LOCKING;
+    single_fire.brake_start_time = current_time;
+    single_fire.lock_target_angle = loader->measure.total_angle;
+    SetFrictionFeedforward(0.0f, 0.0f);
+
+    if (shot_success) {
+        single_fire.fire_count++;
+    } else {
+        single_fire.feed_timeout_count++;
+    }
+
+    LoaderSetAngleRef(single_fire.lock_target_angle);
+}
+
+/**
  * @brief 分别设置两级摩擦轮的速度
  * @param inner_mps 第一级（内圈）目标射速 m/s
  * @param outer_mps 第二级（外圈）目标射速 m/s
@@ -246,14 +415,14 @@ void ShootSetSpeedDual(float inner_mps, float outer_mps)
 
     // 2. 设置第一级（内圈3个电机）- 负责主要加速
     // 注意：你的 shoot.c 初始化了 down, left, right 三个电机
-    DJIMotorSetRef(friction_inner_left, current_inner_deg);
-    DJIMotorSetRef(friction_inner_right, current_inner_deg);
-    DJIMotorSetRef(friction_inner_down, current_inner_deg);
+    SetFrictionRefIfReady(friction_inner_left, current_inner_deg);
+    SetFrictionRefIfReady(friction_inner_right, current_inner_deg);
+    SetFrictionRefIfReady(friction_inner_down, current_inner_deg);
 
     // 3. 设置第二级（外圈3个电机）- 负责稳速/微加速
-    DJIMotorSetRef(friction_outer_left, current_outer_deg);
-    DJIMotorSetRef(friction_outer_right, current_outer_deg);
-    DJIMotorSetRef(friction_outer_down, current_outer_deg);
+    SetFrictionRefIfReady(friction_outer_left, current_outer_deg);
+    SetFrictionRefIfReady(friction_outer_right, current_outer_deg);
+    SetFrictionRefIfReady(friction_outer_down, current_outer_deg);
 }
 /**
  * @brief 更新调试数据 (将电机反馈的角速度转换为线速度)
@@ -263,12 +432,12 @@ static void UpdateFrictionDebugInfo(void)
 {
     // 调用调试模块接口，传入6个电机的实时速度
     ShootDebug_UpdateFrictionInfo(
-        friction_inner_left ? friction_inner_left->measure.speed_aps : 0,
-        friction_inner_right ? friction_inner_right->measure.speed_aps : 0,
-        friction_inner_down ? friction_inner_down->measure.speed_aps : 0,
-        friction_outer_left ? friction_outer_left->measure.speed_aps : 0,
-        friction_outer_right ? friction_outer_right->measure.speed_aps : 0,
-        friction_outer_down ? friction_outer_down->measure.speed_aps : 0);
+        GetMotorSpeedAps(friction_inner_left),
+        GetMotorSpeedAps(friction_inner_right),
+        GetMotorSpeedAps(friction_inner_down),
+        GetMotorSpeedAps(friction_outer_left),
+        GetMotorSpeedAps(friction_outer_right),
+        GetMotorSpeedAps(friction_outer_down));
 }
 
 /**
@@ -310,9 +479,9 @@ static float GetInnerFrictionAvgSpeed(void)
     // 计算三个内圈摩擦轮的平均绝对速度
     // 取绝对值是因为电机方向可能不同, 我们只关心速度大小
     // [优化] 使用乘法代替除法: / 3.0f -> * 0.3333333f
-    float avg = (fabsf(friction_inner_left->measure.speed_aps) +
-                 fabsf(friction_inner_right->measure.speed_aps) +
-                 fabsf(friction_inner_down->measure.speed_aps)) *
+    float avg = (fabsf(GetMotorSpeedAps(friction_inner_left)) +
+                 fabsf(GetMotorSpeedAps(friction_inner_right)) +
+                 fabsf(GetMotorSpeedAps(friction_inner_down))) *
                 0.3333333f;
     return avg;
 }
@@ -323,10 +492,15 @@ static float GetInnerFrictionAvgSpeed(void)
  */
 static float GetOuterFrictionAvgSpeed(void)
 {
+    // 外圈缺失时退化为内圈平均速度，作用是让掉速检测与发射等待仍可工作；
+    // 原因是当前工程允许只装内圈摩擦轮，强依赖外圈会让单发状态机永远等不到有效检测。
+    if (!HasOuterFrictionWheel())
+        return GetInnerFrictionAvgSpeed();
+
     // [优化] 使用乘法代替除法
-    float avg = (fabsf(friction_outer_left->measure.speed_aps) +
-                 fabsf(friction_outer_right->measure.speed_aps) +
-                 fabsf(friction_outer_down->measure.speed_aps)) *
+    float avg = (fabsf(GetMotorSpeedAps(friction_outer_left)) +
+                 fabsf(GetMotorSpeedAps(friction_outer_right)) +
+                 fabsf(GetMotorSpeedAps(friction_outer_down))) *
                 0.3333333f;
     return avg;
 }
@@ -360,12 +534,12 @@ static void RecordDipBaseline(void)
 {
     // 调用调试模块接口，传入6个电机的实时速度
     ShootDebug_RecordDipBaseline(
-        friction_inner_left->measure.speed_aps,
-        friction_inner_right->measure.speed_aps,
-        friction_inner_down->measure.speed_aps,
-        friction_outer_left->measure.speed_aps,
-        friction_outer_right->measure.speed_aps,
-        friction_outer_down->measure.speed_aps);
+        GetMotorSpeedAps(friction_inner_left),
+        GetMotorSpeedAps(friction_inner_right),
+        GetMotorSpeedAps(friction_inner_down),
+        GetMotorSpeedAps(friction_outer_left),
+        GetMotorSpeedAps(friction_outer_right),
+        GetMotorSpeedAps(friction_outer_down));
 }
 
 /**
@@ -380,12 +554,12 @@ static void TakeDipSnapshot(void)
 
     // 调用调试模块接口，传入6个电机的实时速度和发射计数
     ShootDebug_TakeDipSnapshot(
-        friction_inner_left->measure.speed_aps,
-        friction_inner_right->measure.speed_aps,
-        friction_inner_down->measure.speed_aps,
-        friction_outer_left->measure.speed_aps,
-        friction_outer_right->measure.speed_aps,
-        friction_outer_down->measure.speed_aps,
+        GetMotorSpeedAps(friction_inner_left),
+        GetMotorSpeedAps(friction_inner_right),
+        GetMotorSpeedAps(friction_inner_down),
+        GetMotorSpeedAps(friction_outer_left),
+        GetMotorSpeedAps(friction_outer_right),
+        GetMotorSpeedAps(friction_outer_down),
         single_fire.fire_count);
 }
 
@@ -451,7 +625,10 @@ static loader_mode_e HandleLoaderStall(loader_mode_e current_mode)
             // 确认堵转,进入反转阶段
             stall_handler.state = STALL_REVERSING;
             stall_handler.reverse_start_time = current_time;
-            stall_handler.reverse_target_angle = loader->measure.total_angle - REVERSE_ANGLE;
+            // 反转目标统一换算到电机 total_angle 单位，作用是让位置环反转量与机械半发节距一致；
+            // 原因是 total_angle 统计的是转子角度，不乘减速比时反转角度会明显不足。
+            stall_handler.reverse_target_angle = loader->measure.total_angle -
+                                                 LoaderOutputAngleToMotorAngle(REVERSE_ANGLE);
             stall_handler.reverse_count++;
 
             // [重构] 更新调试模块的反转信息 (通过接口获取指针)
@@ -460,8 +637,7 @@ static loader_mode_e HandleLoaderStall(loader_mode_e current_mode)
             p_stall->reverse_target_angle = stall_handler.reverse_target_angle;
 
             // 设定反转目标角度 (在 ShootTask 的 switch 之前生效)
-            DJIMotorOuterLoop(loader, ANGLE_LOOP);
-            DJIMotorSetRef(loader, stall_handler.reverse_target_angle);
+            LoaderSetAngleRef(stall_handler.reverse_target_angle);
         }
         RETURN_WITH_DEBUG(current_mode); // 消抖中暂不修改
 
@@ -506,307 +682,305 @@ static loader_mode_e HandleLoaderStall(loader_mode_e current_mode)
  */
 static uint8_t ShootIsSpeedReady(void)
 {
+    float target_inner_abs = fabsf(current_inner_deg);
+    float target_outer_abs = fabsf(current_outer_deg);
+
     // 如果目标速度为0, 直接认为就绪 (避免无法停止)
-    if (current_inner_deg == 0.0f && current_outer_deg == 0.0f)
+    if (target_inner_abs == 0.0f && target_outer_abs == 0.0f)
         return 1;
 
-    // 检查内圈3个电机
-    if (fabsf(friction_inner_left->measure.speed_aps - current_inner_deg) > SHOOT_SPEED_READY_THRESHOLD)
+    // 用绝对值比较转速是否达标，作用是兼容反装电机；
+    // 原因是左摩擦轮在反转安装时反馈速度为负，直接和正目标做差会导致就绪判定永远失败。
+    if (fabsf(fabsf(GetMotorSpeedAps(friction_inner_left)) - target_inner_abs) > SHOOT_SPEED_READY_THRESHOLD)
         return 0;
-    if (fabsf(friction_inner_right->measure.speed_aps - current_inner_deg) > SHOOT_SPEED_READY_THRESHOLD)
+    if (fabsf(fabsf(GetMotorSpeedAps(friction_inner_right)) - target_inner_abs) > SHOOT_SPEED_READY_THRESHOLD)
         return 0;
-    if (fabsf(friction_inner_down->measure.speed_aps - current_inner_deg) > SHOOT_SPEED_READY_THRESHOLD)
+    if (fabsf(fabsf(GetMotorSpeedAps(friction_inner_down)) - target_inner_abs) > SHOOT_SPEED_READY_THRESHOLD)
         return 0;
 
-    // 检查外圈3个电机
-    if (fabsf(friction_outer_left->measure.speed_aps - current_outer_deg) > SHOOT_SPEED_READY_THRESHOLD)
-        return 0;
-    if (fabsf(friction_outer_right->measure.speed_aps - current_outer_deg) > SHOOT_SPEED_READY_THRESHOLD)
-        return 0;
-    if (fabsf(friction_outer_down->measure.speed_aps - current_outer_deg) > SHOOT_SPEED_READY_THRESHOLD)
-        return 0;
+    // 外圈存在时再参与判定，作用是让单发等待逻辑适配不同级数的摩擦轮；
+    // 原因是无外圈平台不应被一个不存在的速度反馈永远卡住。
+    if (HasOuterFrictionWheel()) {
+        if (fabsf(fabsf(GetMotorSpeedAps(friction_outer_left)) - target_outer_abs) > SHOOT_SPEED_READY_THRESHOLD)
+            return 0;
+        if (fabsf(fabsf(GetMotorSpeedAps(friction_outer_right)) - target_outer_abs) > SHOOT_SPEED_READY_THRESHOLD)
+            return 0;
+        if (fabsf(fabsf(GetMotorSpeedAps(friction_outer_down)) - target_outer_abs) > SHOOT_SPEED_READY_THRESHOLD)
+            return 0;
+    }
 
     return 1;
 }
 
 /**
- * @brief 单发处理逻辑 (基于摩擦轮入口限位 + 速度环 + 反向制动)
+ * @brief 单发处理逻辑 (基于摩擦轮掉速的“位置环冲刺 + 掉速锁角”)
  * @param trigger_active 是否触发 (边沿信号)
+ * @note 单发一旦触发就会自保持执行到锁角完成，原因是遥控拨杆通常是瞬时动作，不能要求操作者一直压住指令。
  */
 static void HandleSingleFire(uint8_t trigger_active)
 {
     float current_time = DWT_GetTimeline_ms();
-
-    // [重构] 更新单发调试信息 (通过接口获取指针)
     SingleFireDebug_s *p_sf = ShootDebug_GetSingleFirePtr();
     float inner_speed = GetInnerFrictionAvgSpeed();
     float outer_speed = GetOuterFrictionAvgSpeed();
 
-    p_sf->state = single_fire.state;
-    p_sf->baseline_speed = single_fire.baseline_speed;
-    p_sf->outer_baseline_speed = single_fire.outer_baseline_speed;
-    p_sf->current_speed = inner_speed;
-    p_sf->current_outer_speed = outer_speed;
-    p_sf->loader_speed = loader->measure.speed_aps;
-    p_sf->is_dipping = IsFrictionDipping();
-    p_sf->speed_diff = single_fire.baseline_speed - inner_speed;
-    p_sf->trigger_edge = trigger_active;
-    p_sf->fire_count = single_fire.fire_count;
-    p_sf->feed_timeout_count = single_fire.feed_timeout_count;
-    p_sf->brake_start_time = single_fire.brake_start_time;
-    p_sf->feed_start_time = single_fire.feed_start_time;
+    // 触发边沿在真正进入单发状态机时再消费，作用是防止堵转恢复期间误吞一次遥控触发。
+    if (trigger_active) {
+        fire_trigger.pending_fire = 0;
+    }
 
     switch (single_fire.state) {
     case SF_IDLE:
         if (trigger_active) {
-            // [修改] 触发后先进入等待状态，确保转速稳定
+            // 先进入待速阶段并锁住当前位置，作用是等摩擦轮恢复到稳态再发；
+            // 原因是位置环冲刺起步非常猛，若摩擦轮还没回速，会把进弹误差直接放大成多发风险。
             single_fire.state = SF_WAIT_SPEED;
-            // 记录触发时间作为等待起始(可选，用于超时判断，这里暂复用 feed_start_time)
+            single_fire.retry_count = 0;
+            single_fire.shot_start_time = current_time;
             single_fire.feed_start_time = current_time;
+            single_fire.retry_start_time = current_time;
+            single_fire.lock_target_angle = loader->measure.total_angle;
+            LoaderSetAngleRef(single_fire.lock_target_angle);
         } else {
-            // 确保停止
-            DJIMotorOuterLoop(loader, SPEED_LOOP);
-            DJIMotorSetRef(loader, 0);
+            LoaderSetSpeedRef(0.0f);
         }
         break;
 
     case SF_WAIT_SPEED:
-        // [新增] 等待转速就绪
-        // 如果转速达标 OR 等待超时(500ms防止死锁) -> 开始推弹
-        if (ShootIsSpeedReady() || (current_time - single_fire.feed_start_time > 500)) {
-            // 转入正式推弹
+        if (ShootIsSpeedReady() || (current_time - single_fire.feed_start_time > 500.0f)) {
+            // 进入冲刺阶段时记录起点、终点和摩擦轮基准，作用是后续用掉速瞬间的实际角度直接锁死当前位置；
+            // 原因是 total_angle 是多圈连续量，只要目标统一在这个坐标系里就能避免跨圈或减速比语义错乱。
             single_fire.state = SF_FEEDING;
-            single_fire.feed_start_time = current_time; // 重置推弹开始时间
+            single_fire.feed_start_time = current_time;
+            single_fire.rush_start_angle = loader->measure.total_angle;
+            single_fire.rush_target_angle = single_fire.rush_start_angle + SF_RUSH_ANGLE;
+            single_fire.lock_target_angle = single_fire.rush_start_angle;
+            single_fire.baseline_speed = inner_speed;
+            single_fire.outer_baseline_speed = outer_speed;
 
-            // 记录双重基准速度
-            single_fire.baseline_speed = GetInnerFrictionAvgSpeed();
-            single_fire.outer_baseline_speed = GetOuterFrictionAvgSpeed();
-
-            // [抓拍] 记录6电机基准速度
             RecordDipBaseline();
-
-            // 复位前馈
-            ff_inner_left = 0.0f;
-            ff_inner_right = 0.0f;
-            ff_inner_down = 0.0f;
-            ff_outer_left = 0.0f;
-            ff_outer_right = 0.0f;
-            ff_outer_down = 0.0f;
-
-            // 启动推弹
-            DJIMotorOuterLoop(loader, SPEED_LOOP);
-            DJIMotorSetRef(loader, SF_FEED_SPEED);
+            SetFrictionFeedforward(0.0f, 0.0f);
+            LoaderSetAngleRef(single_fire.rush_target_angle);
         } else {
-            // 继续等待, 保持停止
-            DJIMotorOuterLoop(loader, SPEED_LOOP);
-            DJIMotorSetRef(loader, 0);
+            // 待速期间保持当前位置锁定，作用是防止供弹盘在等待时被反扭矩拖走；
+            // 原因是下一次冲刺目标是相对当前位置叠加的，一旦等待期滑动，整个单发节距就会漂移。
+            LoaderSetAngleRef(single_fire.lock_target_angle);
         }
         break;
 
     case SF_FEEDING:
-        // [新增] 前馈控制逻辑 (Updated to 6 individual variables)
-        // 在送弹初期的短时间内, 注入额外电流
         if ((current_time - single_fire.feed_start_time) < FRICTION_FEEDFORWARD_TIME) {
-            // 这里可以针对每个电机单独设置方向 +/-
-            // 目前假设底层电机模块处理了 MOTOR_DIRECTION_REVERSE, 所以这里都给正值 (Forward Current)
-            ff_inner_left = FRICTION_FEEDFORWARD_CURRENT; // 使用宏定义
-            ff_inner_right = FRICTION_FEEDFORWARD_CURRENT; //
-            ff_inner_down = FRICTION_FEEDFORWARD_CURRENT; //
-            ff_outer_left = 0.0f;
-            ff_outer_right = 0.0f;
-            ff_outer_down = 0.0f;
+            // 在冲刺初段给摩擦轮额外前馈，作用是让咬弹瞬间的速度塌陷更可控；
+            // 原因是拨盘改成位置环后起步扭矩更猛，摩擦轮若不提前补能量，掉速幅值会放大且恢复更慢。
+            SetFrictionFeedforward(FRICTION_FEEDFORWARD_CURRENT, 0.0f);
         } else {
-            ff_inner_left = 0.0f;
-            ff_inner_right = 0.0f;
-            ff_inner_down = 0.0f;
-            ff_outer_left = 0.0f;
-            ff_outer_right = 0.0f;
-            ff_outer_down = 0.0f;
+            SetFrictionFeedforward(0.0f, 0.0f);
         }
 
-        // 如果电机因为前馈加速了, 基准线也要跟着涨, 否则检测不到掉速
-        { // 增加大括号限制作用域
-            float current_inner = GetInnerFrictionAvgSpeed();
-            if (current_inner > single_fire.baseline_speed) {
-                single_fire.baseline_speed = current_inner;
-            }
-            float current_outer = GetOuterFrictionAvgSpeed();
-            if (current_outer > single_fire.outer_baseline_speed) {
-                single_fire.outer_baseline_speed = current_outer;
-            }
+        // 基准线随峰值更新，作用是把前馈带来的正常提速吸收进去；
+        // 原因是掉速检测依赖“基准 - 当前”，若基准不跟峰值走就会把正常加速误判成未掉速。
+        if (inner_speed > single_fire.baseline_speed) {
+            single_fire.baseline_speed = inner_speed;
+        }
+        if (outer_speed > single_fire.outer_baseline_speed) {
+            single_fire.outer_baseline_speed = outer_speed;
         }
 
-        // [调试] 同时更新调试模块的基准速度 (Peak Hold), 确保调试数据准确
         ShootDebug_UpdatePeakBaseline(
-            friction_inner_left->measure.speed_aps,
-            friction_inner_right->measure.speed_aps,
-            friction_inner_down->measure.speed_aps,
-            friction_outer_left->measure.speed_aps,
-            friction_outer_right->measure.speed_aps,
-            friction_outer_down->measure.speed_aps);
+            GetMotorSpeedAps(friction_inner_left),
+            GetMotorSpeedAps(friction_inner_right),
+            GetMotorSpeedAps(friction_inner_down),
+            GetMotorSpeedAps(friction_outer_left),
+            GetMotorSpeedAps(friction_outer_right),
+            GetMotorSpeedAps(friction_outer_down));
 
-        // 监测掉速 (IsFrictionDipping 已更新为双重检测)
         if (IsFrictionDipping()) {
-            // [抓拍] 检测到掉速, 立即抓拍6电机掉速数据
+            // 掉速瞬间直接读取当前位置并改写成新的位置目标，作用是利用位置环立即“抱死”拨盘；
+            // 原因是此时弹丸已被摩擦轮咬住，继续追远端大目标只会把惯性能量再送到下一发。
             TakeDipSnapshot();
-
-            // 掉速 -> 立即反向制动
-            single_fire.state = SF_BRAKING;
-            single_fire.brake_start_time = current_time;
-
-            // 立即停止所有前馈
-            ff_inner_left = 0.0f;
-            ff_inner_right = 0.0f;
-            ff_inner_down = 0.0f;
-            ff_outer_left = 0.0f;
-            ff_outer_right = 0.0f;
-            ff_outer_down = 0.0f;
-
-            DJIMotorOuterLoop(loader, SPEED_LOOP);
-            DJIMotorSetRef(loader, SF_BRAKE_SPEED); // 反向
-        } else if ((current_time - single_fire.feed_start_time) > SF_FEED_TIMEOUT) {
-            // 超时 (缺弹或卡住) -> 回到空闲
-            single_fire.state = SF_IDLE;
-            single_fire.feed_timeout_count++;
-
-            // 停止所有前馈
-            ff_inner_left = 0.0f;
-            ff_inner_right = 0.0f;
-            ff_inner_down = 0.0f;
-            ff_outer_left = 0.0f;
-            ff_outer_right = 0.0f;
-            ff_outer_down = 0.0f;
-
-            DJIMotorOuterLoop(loader, SPEED_LOOP);
-            DJIMotorSetRef(loader, 0);
-        } else {
-            // 保持送弹
-            DJIMotorOuterLoop(loader, SPEED_LOOP);
-            DJIMotorSetRef(loader, SF_FEED_SPEED);
-        }
-        break;
-
-    case SF_BRAKING:
-        if ((current_time - single_fire.brake_start_time) > SF_BRAKE_TIME) {
-            // 制动结束 -> 进入冷却
-            single_fire.state = SF_COOLDOWN;
-            single_fire.cooldown_start_time = current_time;
-
-            // [重构] 验证掉速有效性并保存到历史 (调用合并后的接口)
             ValidateAndSaveDipSnapshot();
-
-            // 停止电机
-            DJIMotorOuterLoop(loader, SPEED_LOOP);
-            DJIMotorSetRef(loader, 0);
-
-            // 计数
-            single_fire.fire_count++;
+            FinishSingleFire(current_time, 1);
+        } else if ((current_time - single_fire.shot_start_time) > SF_FEED_TIMEOUT) {
+            // 整次事务超时后直接锁死并记失败，作用是保证有限重试有总时长上限；
+            // 原因是空仓或掉速传感异常时，即使每次补发都有限，也不能让单发状态机一直占着控制权。
+            FinishSingleFire(current_time, 0);
+        } else if (fabsf(single_fire.rush_target_angle - loader->measure.total_angle) < SF_RUSH_REACHED_TOLERANCE) {
+            // 当前一步已经走到位但仍未掉速，则转入按频率补步的有限重试等待；
+            // 原因是用户希望“没发现弹丸射出就按频率继续位置环转动”，而不是立刻判失败锁死。
+            if (single_fire.retry_count < SF_RETRY_MAX_COUNT) {
+                EnterSingleFireRetryWait(current_time);
+            } else {
+                FinishSingleFire(current_time, 0);
+            }
         } else {
-            // 保持制动
-            DJIMotorOuterLoop(loader, SPEED_LOOP);
-            DJIMotorSetRef(loader, SF_BRAKE_SPEED);
+            LoaderSetAngleRef(single_fire.rush_target_angle);
         }
         break;
 
-    case SF_COOLDOWN:
-        if (current_time - single_fire.cooldown_start_time > 80) {
-            single_fire.state = SF_IDLE;
+    case SF_RETRYING:
+        if (IsFrictionDipping()) {
+            // 重试等待期间若才观察到掉速，也立即按成功收口，作用是兼容掉速信号相对机械动作略滞后的情况；
+            // 原因是摩擦轮掉速与拨盘到位并不严格同相，不能因为进入等待态就丢弃这次有效出弹确认。
+            TakeDipSnapshot();
+            ValidateAndSaveDipSnapshot();
+            FinishSingleFire(current_time, 1);
+        } else if ((current_time - single_fire.shot_start_time) > SF_FEED_TIMEOUT) {
+            FinishSingleFire(current_time, 0);
+        } else if ((current_time - single_fire.retry_start_time) >= SF_RETRY_INTERVAL_MS) {
+            // 到达补发节拍后再前进一个机械节距，作用是把“频率”落实成固定时间间隔的离散位置步进；
+            // 原因是这里要的是逐颗找弹，而不是再次给一个过大的连续目标。
+            single_fire.retry_count++;
+            single_fire.state = SF_FEEDING;
+            single_fire.feed_start_time = current_time;
+            single_fire.rush_start_angle = loader->measure.total_angle;
+            single_fire.rush_target_angle = single_fire.rush_start_angle +
+                                            LoaderBulletCountToMotorAngle(SF_RETRY_STEP_BULLET_COUNT);
+            single_fire.baseline_speed = inner_speed;
+            single_fire.outer_baseline_speed = outer_speed;
+
+            RecordDipBaseline();
+            SetFrictionFeedforward(0.0f, 0.0f);
+            LoaderSetAngleRef(single_fire.rush_target_angle);
+        } else {
+            LoaderSetAngleRef(single_fire.lock_target_angle);
         }
-        // 保持停止
-        DJIMotorOuterLoop(loader, SPEED_LOOP);
-        DJIMotorSetRef(loader, 0);
+        break;
+
+    case SF_LOCKING:
+        if (trigger_active) {
+            // 在锁角态收到下一次触发时只重启待速，不先退回速度环，作用是保证两发之间的机械相位连续；
+            // 原因是当前位置已经是上一发真实出弹点，直接从这里叠加下一次冲刺最不容易积累角度误差。
+            single_fire.state = SF_WAIT_SPEED;
+            single_fire.retry_count = 0;
+            single_fire.shot_start_time = current_time;
+            single_fire.feed_start_time = current_time;
+            single_fire.retry_start_time = current_time;
+            single_fire.lock_target_angle = loader->measure.total_angle;
+        }
+        LoaderSetAngleRef(single_fire.lock_target_angle);
         break;
     }
+
+    // 调试信息在状态机执行后再写回，作用是让调试器看到当前循环的最新状态；
+    // 原因是单发状态会在一次调用中切换，先写调试会让观察值总是滞后一拍。
+    p_sf->state = single_fire.state;
+    p_sf->baseline_speed = single_fire.baseline_speed;
+    p_sf->outer_baseline_speed = single_fire.outer_baseline_speed;
+    p_sf->current_speed = GetInnerFrictionAvgSpeed();
+    p_sf->current_outer_speed = GetOuterFrictionAvgSpeed();
+    p_sf->loader_speed = loader->measure.speed_aps;
+    p_sf->is_dipping = IsFrictionDipping();
+    p_sf->speed_diff = single_fire.baseline_speed - p_sf->current_speed;
+    p_sf->trigger_edge = trigger_active;
+    p_sf->retry_count = single_fire.retry_count;
+    p_sf->fire_count = single_fire.fire_count;
+    p_sf->feed_timeout_count = single_fire.feed_timeout_count;
+    p_sf->brake_start_time = single_fire.brake_start_time;
+    p_sf->feed_start_time = single_fire.feed_start_time;
+    p_sf->retry_start_time = single_fire.retry_start_time;
 }
 
 /* 机器人发射机构控制核心任务 */
 void ShootTask()
 {
+    static uint16_t last_report_fire_count = 0;
+
     // 从cmd获取控制数据
     SubGetMessage(shoot_sub, &shoot_cmd_recv);
+
+    // 先对单发触发做边沿锁存，作用是把遥控器瞬时拨杆转换成一次完整的单发事务；
+    // 原因是单发改成位置环冲刺后必须执行到“掉速锁角”收口，不能依赖 LOAD_1_BULLET 电平持续存在。
+    if (shoot_cmd_recv.load_mode != LOAD_1_BULLET) {
+        fire_trigger.trigger_consumed = 0;
+    } else if (fire_trigger.last_mode != LOAD_1_BULLET && !fire_trigger.trigger_consumed) {
+        fire_trigger.pending_fire = 1;
+        fire_trigger.trigger_consumed = 1;
+    }
+
+    loader_mode_e requested_load_mode = shoot_cmd_recv.load_mode;
 
     // 对shoot mode等于SHOOT_STOP的情况特殊处理,直接停止所有电机(紧急停止)
     if (shoot_cmd_recv.shoot_mode == SHOOT_OFF) {
         current_inner_deg = 0.0f;
         current_outer_deg = 0.0f;
-        DJIMotorStop(friction_inner_left);
-        DJIMotorStop(friction_inner_right);
-        DJIMotorStop(friction_outer_left);
-        DJIMotorStop(friction_outer_right);
-        DJIMotorStop(friction_inner_down);
-        DJIMotorStop(friction_outer_down);
-        DJIMotorStop(loader);
+        requested_load_mode = LOAD_STOP;
+        fire_trigger.pending_fire = 0;
+        fire_trigger.trigger_consumed = 0;
+        AbortSingleFire();
+        SetMotorEnableIfReady(friction_inner_left, 0);
+        SetMotorEnableIfReady(friction_inner_right, 0);
+        SetMotorEnableIfReady(friction_outer_left, 0);
+        SetMotorEnableIfReady(friction_outer_right, 0);
+        SetMotorEnableIfReady(friction_inner_down, 0);
+        SetMotorEnableIfReady(friction_outer_down, 0);
+        SetMotorEnableIfReady(loader, 0);
     } else // 恢复运行
     {
-        DJIMotorEnable(friction_inner_left);
-        DJIMotorEnable(friction_inner_right);
-        DJIMotorEnable(friction_outer_left);
-        DJIMotorEnable(friction_outer_right);
-        DJIMotorEnable(friction_inner_down);
-        DJIMotorEnable(friction_outer_down);
-        DJIMotorEnable(loader);
+        SetMotorEnableIfReady(friction_inner_left, 1);
+        SetMotorEnableIfReady(friction_inner_right, 1);
+        SetMotorEnableIfReady(friction_outer_left, 1);
+        SetMotorEnableIfReady(friction_outer_right, 1);
+        SetMotorEnableIfReady(friction_inner_down, 1);
+        SetMotorEnableIfReady(friction_outer_down, 1);
+        SetMotorEnableIfReady(loader, 1);
+    }
+
+    // 当单发已经触发但遥控器电平回到 STOP 时，仍然把它作为单发事务送进堵转状态机；
+    // 原因是位置环冲刺阶段若中途不再参与堵转检测，卡弹时就会失去自动解卡能力。
+    loader_mode_e stall_input_mode = requested_load_mode;
+    if ((requested_load_mode == LOAD_STOP) &&
+        (fire_trigger.pending_fire || single_fire.state == SF_WAIT_SPEED || single_fire.state == SF_FEEDING)) {
+        stall_input_mode = LOAD_1_BULLET;
     }
 
     // 该函数会在堵转时自动替换发射模式为反转/停止状态
-    loader_mode_e actual_load_mode = HandleLoaderStall(shoot_cmd_recv.load_mode);
+    loader_mode_e actual_load_mode = HandleLoaderStall(stall_input_mode);
 
     // 若不在休眠状态,根据实际发射模式进行拨盘电机参考值设定和模式切换
     switch (actual_load_mode) {
     // 停止拨盘
     case LOAD_STOP:
-        DJIMotorOuterLoop(loader, SPEED_LOOP); // 切换到速度环
-        DJIMotorSetRef(loader, 0); // 同时设定参考值为0,这样停止的速度最快
-        // [新增] 当模式切换到STOP时, 复位触发状态, 允许下一次触发
-        fire_trigger.trigger_consumed = 0;
-        fire_trigger.pending_fire = 0;
-        // [新增] 复位单发状态机
-        single_fire.state = SF_IDLE;
+        if ((single_fire.state != SF_IDLE || fire_trigger.pending_fire) && stall_handler.state == STALL_NORMAL) {
+            HandleSingleFire(fire_trigger.pending_fire);
+        } else {
+            AbortSingleFire();
+            LoaderSetSpeedRef(0.0f);
+        }
         break;
     // 单发模式
     case LOAD_1_BULLET:
-        // [新增] 边沿触发检测
-        {
-            uint8_t measure_trigger = 0;
-            // 只有当上一次是LOAD_STOP时才认为是新的触发
-            if (fire_trigger.last_mode != LOAD_1_BULLET && !fire_trigger.trigger_consumed) {
-                measure_trigger = 1;
-                fire_trigger.trigger_consumed = 1; // 标记消费
-            }
-            // 调用单发逻辑处理 (包含速度环控制和制动)
-            HandleSingleFire(measure_trigger);
-        }
+        HandleSingleFire(fire_trigger.pending_fire);
         break;
     // 三连发
     case LOAD_3_BULLET:
+        AbortSingleFire();
         if (hibernate_time + dead_time > DWT_GetTimeline_ms())
             break;
-        DJIMotorOuterLoop(loader, ANGLE_LOOP);
-        DJIMotorSetRef(loader, loader->measure.total_angle + 3 * ONE_BULLET_DELTA_ANGLE);
+        LoaderSetAngleRef(loader->measure.total_angle + LoaderBulletCountToMotorAngle(3.0f));
         hibernate_time = DWT_GetTimeline_ms();
         dead_time = 300;
         break;
     // 二连发模式 (英雄专用)
     case LOAD_2_BULLET:
+        AbortSingleFire();
         if (hibernate_time + dead_time > DWT_GetTimeline_ms())
             break;
-        DJIMotorOuterLoop(loader, ANGLE_LOOP);
-        DJIMotorSetRef(loader, loader->measure.total_angle + 2 * ONE_BULLET_DELTA_ANGLE);
+        LoaderSetAngleRef(loader->measure.total_angle + LoaderBulletCountToMotorAngle(2.0f));
         hibernate_time = DWT_GetTimeline_ms();
         dead_time = 200;
         break;
     // 连发模式
     case LOAD_BURSTFIRE:
         // 在连发模式下复位单发标志位，确保切回单发时可立即触发一次
+        AbortSingleFire();
         fire_trigger.trigger_consumed = 0;
-        DJIMotorOuterLoop(loader, SPEED_LOOP);
-        DJIMotorSetRef(loader, shoot_cmd_recv.shoot_rate * 360 * REDUCTION_RATIO_LOADER / 8);
+        LoaderSetSpeedRef(shoot_cmd_recv.shoot_rate * 360 * REDUCTION_RATIO_LOADER / 8);
         break;
     // 拨盘反转,对速度闭环,后续增加卡弹检测(通过裁判系统剩余热量反馈和电机电流)
     // 也有可能需要从switch-case中独立出来
     case LOAD_REVERSE:
-        // DJIMotorOuterLoop(loader, SPEED_LOOP);
-        DJIMotorOuterLoop(loader, ANGLE_LOOP); // 切换到角度环
-        DJIMotorSetRef(loader, loader->measure.total_angle - ONE_BULLET_DELTA_ANGLE / 2.0f); // 控制量减少一发弹丸的一半角度
+        AbortSingleFire();
+        LoaderSetAngleRef(loader->measure.total_angle - LoaderBulletCountToMotorAngle(0.5f));
         hibernate_time = DWT_GetTimeline_ms(); // 记录触发指令的时间
         dead_time = 150; // 完成1发弹丸发射的时间
         break;
@@ -815,8 +989,9 @@ void ShootTask()
             ; // 未知模式,停止运行,检查指针越界,内存溢出等问题
     }
 
-    // [新增] 更新上一次的发射模式, 用于下一次边沿检测
-    fire_trigger.last_mode = actual_load_mode;
+    // 这里保存原始遥控指令而不是实际执行模式，作用是让边沿检测只对用户动作敏感；
+    // 原因是堵转状态机会临时把模式改成 STOP，若记录 actual_load_mode 会把一次拨杆动作误拆成多次触发。
+    fire_trigger.last_mode = requested_load_mode;
 
     // [重构] 摩擦轮控制逻辑 (包含调试覆盖)
     // 优先级: 调试覆盖 > 正常指令
@@ -860,9 +1035,11 @@ void ShootTask()
         UpdateFrictionDebugInfo();
     }
 
-    // [新增] 更新反馈数据, 供外部模块订阅
+    // 用 fire_count 边沿生成 bullet_fired_flag，作用是把“成功发射”变成单周期脉冲；
+    // 原因是单发现在会长时间停留在锁角态，不能再用状态枚举直接映射“本周期已发射”。
     shoot_feedback_data.fire_count = single_fire.fire_count;
-    shoot_feedback_data.bullet_fired_flag = (single_fire.state == SF_COOLDOWN); // 简单映射
+    shoot_feedback_data.bullet_fired_flag = (single_fire.fire_count != last_report_fire_count);
+    last_report_fire_count = single_fire.fire_count;
     shoot_feedback_data.empty_flag = (single_fire.feed_timeout_count > 0);
 
     // 反馈数据,目前暂时没有要设定的反馈数据,后续可能增加应用离线监测以及卡弹反馈
