@@ -245,14 +245,15 @@ static uint8_t HasOuterFrictionWheel(void)
 }
 
 /**
- * @brief 将拨盘输出端角度换算为电机 total_angle 单位
- * @param output_angle_deg 拨盘输出端角度，单位为 deg
+ * @brief 将拨盘输出轴角度换算为电机 total_angle 单位
+ * @param output_angle_deg 拨盘输出轴角度，单位为 deg
  * @return 电机转子总角度，单位为 deg
- * @note total_angle 是电机转子多圈角度而非拨盘输出角度，所以位置环目标必须乘减速比，否则会少转约 19 倍。
+ * @note total_angle 是电机转子多圈角度而非减速箱输出轴角度，所以位置环目标只需乘减速比；
+ *       原因是 2:1 外齿轮关系已经体现在 ONE_BULLET_DELTA_ANGLE 语义里，若这里再乘一次会把反转量放大。
  */
 static float LoaderOutputAngleToMotorAngle(float output_angle_deg)
 {
-    return output_angle_deg * REDUCTION_RATIO_LOADER * 2;
+    return output_angle_deg * REDUCTION_RATIO_LOADER;
 }
 
 /**
@@ -362,8 +363,56 @@ static void AbortSingleFire(void)
     single_fire.feed_start_time = 0.0f;
     single_fire.retry_start_time = 0.0f;
     single_fire_dip_detected = 0;
+    stall_handler.single_fire_interrupted = 0;
+    stall_handler.single_fire_state_before_stall = SF_IDLE;
+    stall_handler.single_fire_pause_start_time = 0.0f;
     fire_trigger.pending_fire = 0;
     SetFrictionFeedforward(0.0f, 0.0f);
+}
+
+/**
+ * @brief 记录单发被堵转流程打断的上下文
+ * @param current_time 当前系统时间 (ms)
+ * @note 这里在堵转刚进入消抖时就开始记录中断，作用是让后续整段堵转时间都能从单发计时里扣除；
+ *       原因是若只从确认反转后才暂停计时，单发超时仍会在消抖阶段被白白消耗。
+ */
+static void MarkSingleFireInterrupted(float current_time)
+{
+    if (stall_handler.single_fire_interrupted)
+        return;
+
+    if (single_fire.state == SF_WAIT_SPEED || single_fire.state == SF_FEEDING) {
+        stall_handler.single_fire_interrupted = 1;
+        stall_handler.single_fire_state_before_stall = single_fire.state;
+        stall_handler.single_fire_pause_start_time = current_time;
+    }
+}
+
+/**
+ * @brief 在堵转结束后补偿单发状态机被暂停的时间
+ * @param current_time 当前系统时间 (ms)
+ * @note 这里把堵转期间占用的时间加回单发计时，作用是让恢复后的这一发继续按原节拍完成；
+ *       原因是若不补偿 feed_start_time 和 shot_start_time，恢复后这发会被立刻判超时或提前切相位。
+ */
+static void ResumeSingleFireAfterStall(float current_time)
+{
+    if (!stall_handler.single_fire_interrupted)
+        return;
+
+    float pause_duration = current_time - stall_handler.single_fire_pause_start_time;
+    if (pause_duration < 0.0f)
+        pause_duration = 0.0f;
+
+    if (single_fire.feed_start_time > 0.0f)
+        single_fire.feed_start_time += pause_duration;
+    if (single_fire.shot_start_time > 0.0f)
+        single_fire.shot_start_time += pause_duration;
+    if (single_fire.retry_start_time > 0.0f)
+        single_fire.retry_start_time += pause_duration;
+
+    stall_handler.single_fire_interrupted = 0;
+    stall_handler.single_fire_state_before_stall = SF_IDLE;
+    stall_handler.single_fire_pause_start_time = 0.0f;
 }
 
 /**
@@ -615,6 +664,7 @@ static loader_mode_e HandleLoaderStall(loader_mode_e current_mode)
             stall_handler.state = STALL_DETECTING;
             stall_handler.detect_start_time = current_time;
             stall_handler.saved_mode = current_mode; // 保存当前模式
+            MarkSingleFireInterrupted(current_time);
         }
         // 如果当前是主动反转或停止,重置反转计数
         if (current_mode == LOAD_REVERSE || current_mode == LOAD_STOP) {
@@ -627,6 +677,7 @@ static loader_mode_e HandleLoaderStall(loader_mode_e current_mode)
         if (!IsLoaderStalled()) {
             // 堵转消失,恢复正常
             stall_handler.state = STALL_NORMAL;
+            ResumeSingleFireAfterStall(current_time);
             RETURN_WITH_DEBUG(current_mode);
         }
         // 检查是否超过消抖时间
@@ -668,10 +719,12 @@ static loader_mode_e HandleLoaderStall(loader_mode_e current_mode)
                 // 连续反转达到上限,停止发射,需要人工干预
                 stall_handler.state = STALL_NORMAL;
                 stall_handler.reverse_count = 0;
+                AbortSingleFire();
                 RETURN_WITH_DEBUG(LOAD_STOP); // 返回停止,等待新指令
             }
             // 恢复正常状态,继续之前的发射模式
             stall_handler.state = STALL_NORMAL;
+            ResumeSingleFireAfterStall(current_time);
             RETURN_WITH_DEBUG(stall_handler.saved_mode);
         }
         RETURN_WITH_DEBUG(LOAD_STOP); // 恢复期也返回 STOP
@@ -913,22 +966,26 @@ void ShootTask()
         SetMotorEnableIfReady(loader, 1);
     }
 
-    // 当单发已经触发但遥控器电平回到 STOP 时，仍然把它作为单发事务送进堵转状态机；
-    // 原因是位置环冲刺阶段若中途不再参与堵转检测，卡弹时就会失去自动解卡能力。
-    loader_mode_e stall_input_mode = requested_load_mode;
-    if ((requested_load_mode == LOAD_STOP) &&
-        (fire_trigger.pending_fire || single_fire.state == SF_WAIT_SPEED || single_fire.state == SF_FEEDING)) {
-        stall_input_mode = LOAD_1_BULLET;
+    // [临时关闭] 这里旁路防堵转状态机，作用是让拨盘完全按上层发射模式执行；
+    // 原因是你当前明确表示暂时不需要自动解卡，继续介入会打断单发调试并干扰相位观察。
+    stall_handler.state = STALL_NORMAL;
+    stall_handler.reverse_count = 0;
+    stall_handler.single_fire_interrupted = 0;
+    stall_handler.single_fire_state_before_stall = SF_IDLE;
+    stall_handler.single_fire_pause_start_time = 0.0f;
+    if (p_stall_debug != NULL) {
+        // 同步把调试视图也复位到正常状态，作用是避免 Ozone 里残留上一次堵转状态；
+        // 原因是当前不再进入 HandleLoaderStall，调试结构不会再被那条路径自动刷新。
+        p_stall_debug->state = STALL_NORMAL;
+        p_stall_debug->is_stalled = 0;
     }
-
-    // 该函数会在堵转时自动替换发射模式为反转/停止状态
-    loader_mode_e actual_load_mode = HandleLoaderStall(stall_input_mode);
+    loader_mode_e actual_load_mode = requested_load_mode;
 
     // 若不在休眠状态,根据实际发射模式进行拨盘电机参考值设定和模式切换
     switch (actual_load_mode) {
     // 停止拨盘
     case LOAD_STOP:
-        if ((single_fire.state != SF_IDLE || fire_trigger.pending_fire) && stall_handler.state == STALL_NORMAL) {
+        if (single_fire.state != SF_IDLE || fire_trigger.pending_fire) {
             HandleSingleFire(fire_trigger.pending_fire);
         } else {
             AbortSingleFire();

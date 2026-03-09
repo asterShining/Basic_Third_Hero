@@ -20,18 +20,22 @@
 #define FRICTION_FEEDFORWARD_TIME 500 // 前馈持续时间 (ms)
 
 // ==================== 堵转检测参数 ====================
-// 堵转检测电流阈值 (raw值, M3508满量程16384, 设为 ~80% 高阈值使堵转处理更激烈)
+// 堵转检测电流阈值 (raw值), 取较高阈值以减少正常发射时的误触发
+// 原因是当前主要诉求是别让防堵转频繁打断单发事务，因此先回到更保守的触发电流
 #define STALL_CURRENT_THRESHOLD 15000
-// 堵转检测速度阈值 (deg/s), 低于此值且电流高则判定为堵转
+// 堵转检测速度阈值 (deg/s), 只有速度明显塌到较低水平才认为疑似堵转
+// 原因是阈值过高会把正常咬弹和负载波动误判成卡弹，破坏拨盘相位一致性
 #define STALL_SPEED_THRESHOLD 400.0f
-// 堵转检测消抖时间 (ms), 持续满足条件才确认堵转
-#define STALL_DETECT_TIME 1500
+// 堵转检测消抖时间 (ms), 延长确认时间以降低误判反转概率
+// 原因是本轮优先减少误触发而不是追求最激进的解卡响应
+#define STALL_DETECT_TIME 600
 // 反转角度 (deg), 约为 1/2 颗弹丸角度, 足够解卡但尽量不把正常节拍打乱
 #define REVERSE_ANGLE (0.5f * ONE_BULLET_DELTA_ANGLE)
 // 反转持续时间 (ms)
 #define REVERSE_TIME 500
-// 恢复等待时间 (ms), 反转后等待稳定再继续供弹
-#define RECOVERY_TIME 80
+// 恢复等待时间 (ms), 保持现有恢复节拍避免在本轮同时改变过多行为
+// 原因是这次重点是避免误触发和保留单发事务，不额外改恢复手感
+#define RECOVERY_TIME 50
 // 连续反转次数上限, 超过则认为卡死,停止尝试
 #define MAX_REVERSE_COUNT 5
 
@@ -67,6 +71,9 @@ static struct {
     float reverse_target_angle; // 反转目标角度
     uint8_t reverse_count; // 连续反转次数
     loader_mode_e saved_mode; // 保存的原发射模式
+    uint8_t single_fire_interrupted; // 单发事务是否被堵转流程打断
+    SingleFireState_e single_fire_state_before_stall; // 堵转前的单发状态, 用于恢复原事务语义
+    float single_fire_pause_start_time; // 堵转打断开始时间, 用于补偿单发计时
 } stall_handler = { 0 };
 
 // 单发控制状态结构体 (运行时数据, 仅供 shoot.c 内部使用)
