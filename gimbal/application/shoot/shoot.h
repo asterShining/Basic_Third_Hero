@@ -36,24 +36,19 @@
 #define MAX_REVERSE_COUNT 5
 
 // ==================== 单发控制参数 ====================
-// 单发冲刺行程 (单位: 发), 直接给出大位置误差, 让位置环一开始就把速度环顶到高输出
-#define SF_RUSH_BULLET_COUNT 2.0f
+// 单发固定截止行程 (单位: 发), 采用略小于整发的保守值提升防连发容错
+// 原因是拨盘到固定相位即收口比“继续追整发再等掉速”更不容易把下一发带出来
+#define SF_RUSH_BULLET_COUNT 0.95f
 // 拨盘电机总角度对应的一发角度 (deg), 需要乘减速比, 因为 total_angle 是电机转子多圈角度
 #define LOADER_MOTOR_ANGLE_PER_BULLET (ONE_BULLET_DELTA_ANGLE * REDUCTION_RATIO_LOADER)
-// 单发冲刺总角度 (deg), 用于位置环大步进推弹
+// 单发截止总角度 (deg), 用于把每次单发统一锁到固定拨盘相位
 #define SF_RUSH_ANGLE (SF_RUSH_BULLET_COUNT * LOADER_MOTOR_ANGLE_PER_BULLET)
-// 单发冲刺到位容差 (deg), 用于在掉速丢失时尽快收口, 避免持续追一个过远目标
-#define SF_RUSH_REACHED_TOLERANCE (0.10f * LOADER_MOTOR_ANGLE_PER_BULLET)
-// 补发频率 (Hz), 初次冲刺未发现掉速时按该节拍继续位置环补步, 便于逐颗寻找弹丸
-#define SF_RETRY_RATE_HZ 8.0f
-// 单次补发步距 (单位: 发), 继续沿用统一机械节距, 避免单发/二连发/反转的几何语义分裂
-#define SF_RETRY_STEP_BULLET_COUNT 2.0f
-// 有限重试上限, 超过后判定本次未成功出弹并锁止, 防止空仓时无休止卷弹
-#define SF_RETRY_MAX_COUNT 5u
-// 补发间隔 (ms), 由补发频率直接换算, 便于状态机按绝对时间节拍触发下一步
-#define SF_RETRY_INTERVAL_MS (1000.0f / SF_RETRY_RATE_HZ)
-// 送弹超时时间 (ms), 超时未检测到掉速则认为缺弹或卡弹
-#define SF_FEED_TIMEOUT 9500
+// 单发恒电流起步的目标电流 (raw), 保守起步先保证相位一致性而不是极限推弹
+// 原因是开环电流过大会放大惯性过冲, 直接降低固定相位截止的防连发容错
+#define SF_STARTUP_CURRENT_REF 10000.0f
+// 单发恒电流阶段的最长持续时间 (ms), 超时仍未到截止角则立即收口防止拖泥带水
+// 原因是单发不再依赖掉速等待或补发重试, 这里要给编码器异常和机械异常一个硬上限
+#define SF_STARTUP_TIMEOUT 300.0f
 
 // ==================== 发射确认检测参数 ====================
 // 掉速检测阈值 (deg/s), 内圈摩擦轮速度下降超过此值认为有弹丸通过
