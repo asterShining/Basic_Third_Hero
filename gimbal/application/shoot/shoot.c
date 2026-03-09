@@ -341,6 +341,8 @@ static void AbortSingleFire(void)
     single_fire.shot_start_time = 0.0f;
     single_fire.feed_start_time = 0.0f;
     single_fire.retry_start_time = 0.0f;
+    single_fire.final_target_angle = 0.0f;
+    single_fire.dip_confirmed = 0;
     fire_trigger.pending_fire = 0;
     SetFrictionFeedforward(0.0f, 0.0f);
 }
@@ -354,7 +356,9 @@ static void AbortSingleFire(void)
 static void EnterSingleFireRetryWait(float current_time)
 {
     single_fire.state = SF_RETRYING;
-    single_fire.lock_target_angle = loader->measure.total_angle;
+    // 在固定步距结束后锁住固定终点，作用是让等待补发期间的位置语义保持一致；
+    // 原因是当前需求要求单发优先按固定机械节距停盘，而不是锁在掉速发生瞬间的随机位置。
+    single_fire.lock_target_angle = single_fire.final_target_angle;
     single_fire.retry_start_time = current_time;
     SetFrictionFeedforward(0.0f, 0.0f);
     LoaderSetAngleRef(single_fire.lock_target_angle);
@@ -371,7 +375,12 @@ static void FinishSingleFire(float current_time, uint8_t shot_success)
 {
     single_fire.state = SF_LOCKING;
     single_fire.brake_start_time = current_time;
+    // 到达固定终点附近时优先锁到固定终点，作用是让单发收口位置更一致；
+    // 原因是本次改造要弱化掉速对停盘点的影响，但超时/异常时仍需允许锁住当前位置以避免继续顶弹。
     single_fire.lock_target_angle = loader->measure.total_angle;
+    if (fabsf(single_fire.final_target_angle - loader->measure.total_angle) < SF_FINAL_TARGET_TOLERANCE) {
+        single_fire.lock_target_angle = single_fire.final_target_angle;
+    }
     SetFrictionFeedforward(0.0f, 0.0f);
 
     if (shot_success) {
@@ -573,6 +582,96 @@ static void ValidateAndSaveDipSnapshot(void)
 }
 
 /**
+ * @brief 启动一轮“固定终点为主”的单发送弹
+ * @param current_time 当前系统时间 (ms)
+ * @param inner_speed 当前内圈平均速度 (deg/s)
+ * @param outer_speed 当前外圈平均速度 (deg/s)
+ * @note 这里统一初始化固定终点、冲刺远目标和掉速基线，作用是让首发与补发共用同一套位置语义；
+ *       原因是单发与重试都必须按同一固定步距推进，否则停盘点会再次被掉速时刻间接主导。
+ */
+static void StartSingleFireFeed(float current_time, float inner_speed, float outer_speed)
+{
+    float single_step_angle = LoaderBulletCountToMotorAngle(SF_SINGLE_TARGET_BULLET_COUNT);
+    float rush_step_angle = LoaderBulletCountToMotorAngle(SF_RUSH_BULLET_COUNT);
+    float rush_command_angle = (rush_step_angle > single_step_angle) ? rush_step_angle : single_step_angle;
+
+    single_fire.state = SF_FEEDING;
+    single_fire.feed_start_time = current_time;
+    single_fire.rush_start_angle = loader->measure.total_angle;
+    single_fire.final_target_angle = single_fire.rush_start_angle + single_step_angle;
+    single_fire.rush_target_angle = single_fire.rush_start_angle + rush_command_angle;
+    single_fire.lock_target_angle = single_fire.rush_start_angle;
+    single_fire.baseline_speed = inner_speed;
+    single_fire.outer_baseline_speed = outer_speed;
+    single_fire.dip_confirmed = 0;
+
+    // 每轮送弹前重录基线并清掉上轮抓拍状态，作用是让掉速确认只对当前步距负责；
+    // 原因是单发现在允许多轮固定节拍补发，若沿用旧快照会把上一轮噪声带进这一轮确认。
+    RecordDipBaseline();
+    SetFrictionFeedforward(0.0f, 0.0f);
+    LoaderSetAngleRef(single_fire.rush_target_angle);
+}
+
+/**
+ * @brief 获取当前单发应下发的位置目标
+ * @return 本周期拨盘位置环目标角度 (deg)
+ * @note 接近固定终点时切回终点目标，作用是让拨盘先猛推再稳收口；
+ *       原因是位置环 Kp 较大，若整轮都追远目标，即使已确认出弹也容易把惯性继续送到下一发。
+ */
+static float GetSingleFireCommandAngle(void)
+{
+    float remaining_angle = single_fire.final_target_angle - loader->measure.total_angle;
+    float final_approach_angle = LoaderBulletCountToMotorAngle(SF_FINAL_APPROACH_BULLET_COUNT);
+
+    if (remaining_angle <= final_approach_angle) {
+        return single_fire.final_target_angle;
+    }
+
+    return single_fire.rush_target_angle;
+}
+
+/**
+ * @brief 判断本轮单发是否已经到达固定终点
+ * @return 1 表示已到达固定终点附近, 0 表示仍需继续推进
+ * @note 用独立终点容差统一判断一轮固定步距是否完成，作用是把“到位”与“掉速确认”解耦；
+ *       原因是本次改造要求单发先按机械步距走完，再根据掉速确认决定成功还是继续补发。
+ */
+static uint8_t IsSingleFireFinalTargetReached(void)
+{
+    return fabsf(single_fire.final_target_angle - loader->measure.total_angle) < SF_FINAL_TARGET_TOLERANCE;
+}
+
+/**
+ * @brief 尝试把原始掉速升级为“有效出弹确认”
+ * @return 1 表示已确认有效出弹, 0 表示尚未确认
+ * @note 这里复用现有抓拍和校验接口，作用是让掉速只负责确认出弹而不直接控制停盘；
+ *       原因是简单阈值掉速容易受噪声影响，改造成辅助信号后必须先过一次有效性校验。
+ */
+static uint8_t TryConfirmSingleFireDip(void)
+{
+    if (single_fire.dip_confirmed) {
+        return 1;
+    }
+
+    if (!IsFrictionDipping()) {
+        return 0;
+    }
+
+    // 同一轮送弹只抓拍并校验一次，作用是避免持续掉速时重复写入同一帧历史记录；
+    // 原因是单发现在不会在首个掉速点立刻结束，若每个周期都重复校验会把一次事件误记成多次观测。
+    if (!ShootDebug_IsSnapshotTaken()) {
+        TakeDipSnapshot();
+        ValidateAndSaveDipSnapshot();
+    }
+
+    if ((p_dip_snapshot != NULL) && p_dip_snapshot->is_valid_shot) {
+        single_fire.dip_confirmed = 1;
+    }
+
+    return single_fire.dip_confirmed;
+}
+
+/**
  * @brief 堵转检测与自动反转处理状态机
  * @param current_mode 当前的发射模式
  * @return 经过堵转处理后的发射模式 (可能被临时替换为反转模式)
@@ -740,6 +839,8 @@ static void HandleSingleFire(uint8_t trigger_active)
             single_fire.feed_start_time = current_time;
             single_fire.retry_start_time = current_time;
             single_fire.lock_target_angle = loader->measure.total_angle;
+            single_fire.final_target_angle = loader->measure.total_angle;
+            single_fire.dip_confirmed = 0;
             LoaderSetAngleRef(single_fire.lock_target_angle);
         } else {
             LoaderSetSpeedRef(0.0f);
@@ -748,19 +849,9 @@ static void HandleSingleFire(uint8_t trigger_active)
 
     case SF_WAIT_SPEED:
         if (ShootIsSpeedReady() || (current_time - single_fire.feed_start_time > 500.0f)) {
-            // 进入冲刺阶段时记录起点、终点和摩擦轮基准，作用是后续用掉速瞬间的实际角度直接锁死当前位置；
-            // 原因是 total_angle 是多圈连续量，只要目标统一在这个坐标系里就能避免跨圈或减速比语义错乱。
-            single_fire.state = SF_FEEDING;
-            single_fire.feed_start_time = current_time;
-            single_fire.rush_start_angle = loader->measure.total_angle;
-            single_fire.rush_target_angle = single_fire.rush_start_angle + SF_RUSH_ANGLE;
-            single_fire.lock_target_angle = single_fire.rush_start_angle;
-            single_fire.baseline_speed = inner_speed;
-            single_fire.outer_baseline_speed = outer_speed;
-
-            RecordDipBaseline();
-            SetFrictionFeedforward(0.0f, 0.0f);
-            LoaderSetAngleRef(single_fire.rush_target_angle);
+            // 待速结束后统一启动固定步距送弹，作用是让首发和补发都共享同一套终点/冲刺目标生成逻辑；
+            // 原因是用户要求单发按固定位置转动，不能让不同分支各自生成目标后再慢慢漂出两套语义。
+            StartSingleFireFeed(current_time, inner_speed, outer_speed);
         } else {
             // 待速期间保持当前位置锁定，作用是防止供弹盘在等待时被反扭矩拖走；
             // 原因是下一次冲刺目标是相对当前位置叠加的，一旦等待期滑动，整个单发节距就会漂移。
@@ -794,53 +885,41 @@ static void HandleSingleFire(uint8_t trigger_active)
             GetMotorSpeedAps(friction_outer_right),
             GetMotorSpeedAps(friction_outer_down));
 
-        if (IsFrictionDipping()) {
-            // 掉速瞬间直接读取当前位置并改写成新的位置目标，作用是利用位置环立即“抱死”拨盘；
-            // 原因是此时弹丸已被摩擦轮咬住，继续追远端大目标只会把惯性能量再送到下一发。
-            TakeDipSnapshot();
-            ValidateAndSaveDipSnapshot();
-            FinishSingleFire(current_time, 1);
-        } else if ((current_time - single_fire.shot_start_time) > SF_FEED_TIMEOUT) {
+        // 原始掉速仅用于确认“是否真的出弹”，作用是不再让单发停盘点由掉速瞬间直接决定；
+        // 原因是本次需求要把拨盘收口位置固定到机械步距附近，同时保留掉速对成功计数的判据价值。
+        TryConfirmSingleFireDip();
+
+        if ((current_time - single_fire.shot_start_time) > SF_FEED_TIMEOUT) {
             // 整次事务超时后直接锁死并记失败，作用是保证有限重试有总时长上限；
             // 原因是空仓或掉速传感异常时，即使每次补发都有限，也不能让单发状态机一直占着控制权。
             FinishSingleFire(current_time, 0);
-        } else if (fabsf(single_fire.rush_target_angle - loader->measure.total_angle) < SF_RUSH_REACHED_TOLERANCE) {
-            // 当前一步已经走到位但仍未掉速，则转入按频率补步的有限重试等待；
-            // 原因是用户希望“没发现弹丸射出就按频率继续位置环转动”，而不是立刻判失败锁死。
-            if (single_fire.retry_count < SF_RETRY_MAX_COUNT) {
+        } else if (IsSingleFireFinalTargetReached()) {
+            // 到达固定终点后再根据掉速确认决定成功/补发，作用是把“停盘位置”和“出弹确认”彻底解耦；
+            // 原因是单发现在要优先按固定机械步距完成，再决定这一步是否已经成功把弹送出。
+            if (single_fire.dip_confirmed) {
+                FinishSingleFire(current_time, 1);
+            } else if (single_fire.retry_count < SF_RETRY_MAX_COUNT) {
                 EnterSingleFireRetryWait(current_time);
             } else {
                 FinishSingleFire(current_time, 0);
             }
         } else {
-            LoaderSetAngleRef(single_fire.rush_target_angle);
+            LoaderSetAngleRef(GetSingleFireCommandAngle());
         }
         break;
 
     case SF_RETRYING:
-        if (IsFrictionDipping()) {
-            // 重试等待期间若才观察到掉速，也立即按成功收口，作用是兼容掉速信号相对机械动作略滞后的情况；
-            // 原因是摩擦轮掉速与拨盘到位并不严格同相，不能因为进入等待态就丢弃这次有效出弹确认。
-            TakeDipSnapshot();
-            ValidateAndSaveDipSnapshot();
+        if (TryConfirmSingleFireDip()) {
+            // 等待补发期间若才确认出弹，也按成功收口，作用是兼容掉速信号相对机械动作略滞后的情况；
+            // 原因是此时拨盘已经锁在固定终点附近，迟到确认不应再触发额外推进。
             FinishSingleFire(current_time, 1);
         } else if ((current_time - single_fire.shot_start_time) > SF_FEED_TIMEOUT) {
             FinishSingleFire(current_time, 0);
         } else if ((current_time - single_fire.retry_start_time) >= SF_RETRY_INTERVAL_MS) {
-            // 到达补发节拍后再前进一个机械节距，作用是把“频率”落实成固定时间间隔的离散位置步进；
-            // 原因是这里要的是逐颗找弹，而不是再次给一个过大的连续目标。
+            // 到达补发节拍后再走一轮相同固定步距，作用是把“频率”落实成固定时间间隔的离散位置步进；
+            // 原因是用户要求没出弹时继续按固定位置补发，不能再回到 1.5 发大步进的旧语义。
             single_fire.retry_count++;
-            single_fire.state = SF_FEEDING;
-            single_fire.feed_start_time = current_time;
-            single_fire.rush_start_angle = loader->measure.total_angle;
-            single_fire.rush_target_angle = single_fire.rush_start_angle +
-                                            LoaderBulletCountToMotorAngle(SF_RETRY_STEP_BULLET_COUNT);
-            single_fire.baseline_speed = inner_speed;
-            single_fire.outer_baseline_speed = outer_speed;
-
-            RecordDipBaseline();
-            SetFrictionFeedforward(0.0f, 0.0f);
-            LoaderSetAngleRef(single_fire.rush_target_angle);
+            StartSingleFireFeed(current_time, inner_speed, outer_speed);
         } else {
             LoaderSetAngleRef(single_fire.lock_target_angle);
         }
@@ -856,6 +935,8 @@ static void HandleSingleFire(uint8_t trigger_active)
             single_fire.feed_start_time = current_time;
             single_fire.retry_start_time = current_time;
             single_fire.lock_target_angle = loader->measure.total_angle;
+            single_fire.final_target_angle = loader->measure.total_angle;
+            single_fire.dip_confirmed = 0;
         }
         LoaderSetAngleRef(single_fire.lock_target_angle);
         break;
@@ -869,7 +950,9 @@ static void HandleSingleFire(uint8_t trigger_active)
     p_sf->current_speed = GetInnerFrictionAvgSpeed();
     p_sf->current_outer_speed = GetOuterFrictionAvgSpeed();
     p_sf->loader_speed = loader->measure.speed_aps;
+    p_sf->final_target_angle = single_fire.final_target_angle;
     p_sf->is_dipping = IsFrictionDipping();
+    p_sf->dip_confirmed = single_fire.dip_confirmed;
     p_sf->speed_diff = single_fire.baseline_speed - p_sf->current_speed;
     p_sf->trigger_edge = trigger_active;
     p_sf->retry_count = single_fire.retry_count;

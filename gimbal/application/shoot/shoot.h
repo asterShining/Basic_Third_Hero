@@ -37,17 +37,27 @@
 
 // ==================== 单发控制参数 ====================
 // 单发冲刺行程 (单位: 发), 直接给出大位置误差, 让位置环一开始就把速度环顶到高输出
-#define SF_RUSH_BULLET_COUNT 2.0f
+#define SF_RUSH_BULLET_COUNT 1.5f
 // 拨盘电机总角度对应的一发角度 (deg), 需要乘减速比, 因为 total_angle 是电机转子多圈角度
 #define LOADER_MOTOR_ANGLE_PER_BULLET (ONE_BULLET_DELTA_ANGLE * REDUCTION_RATIO_LOADER)
 // 单发冲刺总角度 (deg), 用于位置环大步进推弹
 #define SF_RUSH_ANGLE (SF_RUSH_BULLET_COUNT * LOADER_MOTOR_ANGLE_PER_BULLET)
 // 单发冲刺到位容差 (deg), 用于在掉速丢失时尽快收口, 避免持续追一个过远目标
 #define SF_RUSH_REACHED_TOLERANCE (0.10f * LOADER_MOTOR_ANGLE_PER_BULLET)
+// 单发固定终点步距 (单位: 发), 作用是让单发最终停在固定机械节距附近
+// 原因是用户希望弱化摩擦轮掉速对停盘点的影响, 改为主要由机械步距决定停盘位置
+#define SF_SINGLE_TARGET_BULLET_COUNT 1.4f
+// 切入最终收口的提前量 (单位: 发), 作用是在接近固定终点时尽早切回终点目标
+// 原因是拨盘位置环 Kp 较高, 若一直追冲刺远目标容易把惯性能量带过头
+#define SF_FINAL_APPROACH_BULLET_COUNT 0.25f
+// 固定终点到位容差 (deg), 作用是统一判定“本轮固定步距已完成”
+// 原因是单发现在要先追远目标再收口, 需要独立于冲刺容差的终点完成条件
+#define SF_FINAL_TARGET_TOLERANCE (0.10f * LOADER_MOTOR_ANGLE_PER_BULLET)
 // 补发频率 (Hz), 初次冲刺未发现掉速时按该节拍继续位置环补步, 便于逐颗寻找弹丸
 #define SF_RETRY_RATE_HZ 8.0f
-// 单次补发步距 (单位: 发), 继续沿用统一机械节距, 避免单发/二连发/反转的几何语义分裂
-#define SF_RETRY_STEP_BULLET_COUNT 2.0f
+// 兼容保留的补发步距宏, 作用是让历史代码若继续引用时仍与新的固定终点步距一致
+// 原因是本次改造要求补发也按同一固定机械步距推进, 不能再回到旧的 1.5 发语义
+#define SF_RETRY_STEP_BULLET_COUNT SF_SINGLE_TARGET_BULLET_COUNT
 // 有限重试上限, 超过后判定本次未成功出弹并锁止, 防止空仓时无休止卷弹
 #define SF_RETRY_MAX_COUNT 5u
 // 补发间隔 (ms), 由补发频率直接换算, 便于状态机按绝对时间节拍触发下一步
@@ -81,12 +91,14 @@ static struct {
     float outer_baseline_speed; // 触发时的基准摩擦轮速度 (外圈)
     float rush_start_angle; // 冲刺起始角度, 用于调试观察本次发射从哪里开始
     float rush_target_angle; // 冲刺目标角度, 用于给位置环施加大误差换取起步力矩
+    float final_target_angle; // 本轮固定终点角度, 用于把单发停盘点约束在固定机械步距附近
     float lock_target_angle; // 锁止目标角度, 用于在掉速瞬间冻结当前位置防止多送
     float shot_start_time; // 本次单发事务开始时间戳 (ms), 用于限制整次有限重试的总时长
     float feed_start_time; // 送弹开始时间戳 (ms)
     float retry_start_time; // 补发等待起始时间戳 (ms), 用于按固定频率释放下一次补步
     float brake_start_time; // 锁止开始时间戳 (ms), 保留原字段名以减少调试结构变更范围
     float cooldown_start_time; // 冷却开始时间戳 (ms)
+    uint8_t dip_confirmed; // 本轮是否已通过掉速校验确认出弹, 用于把掉速降级为确认信号而非停盘信号
     uint8_t retry_count; // 已执行的补发次数, 用于实现有限重试而不是无限卷弹
     uint16_t fire_count; // 累计发射计数
     uint16_t feed_timeout_count; // 送弹超时计数

@@ -66,10 +66,12 @@ typedef struct {
     float current_outer_speed; // 当前外圈摩擦轮平均速度 (deg/s)
     float speed_diff; // 速度差 (baseline - current), 正值表示掉速
     float loader_speed; // 拨盘当前速度 (deg/s)
+    float final_target_angle; // 当前这轮单发的固定终点角度, 用于确认是否按机械节距收口
     float feed_start_time; // 送弹开始时间 (ms)
     float retry_start_time; // 上一次开始补发等待的时间 (ms), 用于观察有限重试节拍是否正确
     float brake_start_time; // 锁止开始时间 (ms), 保留原字段名以兼容现有调试观察脚本
     uint8_t is_dipping; // 是否检测到掉速 (1=掉速中)
+    uint8_t dip_confirmed; // 是否已通过掉速校验确认出弹, 用于区分“原始掉速”和“有效出弹”
     uint8_t trigger_edge; // 是否检测到触发边沿 (1=边沿触发)
     uint8_t retry_count; // 当前已执行的补发次数, 用于确认有限重试是否按预期停止
     uint16_t fire_count; // 累计发射弹丸计数
