@@ -47,8 +47,8 @@ void ShootInit()
         },
         .controller_param_init_config = {
             .speed_PID = {
-                .Kp = 8.7, // 8.7
-                .Ki = 0.5, // 0.5
+                .Kp = 9.7, // 8.7
+                .Ki = 0.0, // 0.5
                 .Kd = 0,
                 .DeadBand = 10.0f, // [新增] 死区: ±20 deg/s 以内视为零速, 配合 Iout 清零防止停止时自转
                 .Improve = PID_Integral_Limit,
@@ -76,7 +76,7 @@ void ShootInit()
         .controller_param_init_config = {
             .speed_PID = {
                 .Kp = 8.3, // 8.3
-                .Ki = 0.5, // 0.5
+                .Ki = 0.0, // 0.0
                 .Kd = 0,
                 .DeadBand = 10.0f, // [新增] 死区: ±20 deg/s 以内视为零速, 配合 Iout 清零防止停止时自转
                 .Improve = PID_Integral_Limit,
@@ -116,24 +116,24 @@ void ShootInit()
     friction_config_inner.controller_param_init_config.current_feedforward_ptr = &ff_inner_right; // 绑定独立前馈
     friction_inner_right = DJIMotorInit(&friction_config_inner);
 
-    // // 第二级，外摩擦轮初始化
-    // // 1. 下
-    // friction_config_outer.can_init_config.tx_id = 4;
-    // friction_config_outer.controller_setting_init_config.motor_reverse_flag = MOTOR_DIRECTION_NORMAL;
-    // friction_config_outer.controller_param_init_config.current_feedforward_ptr = &ff_outer_down; // 绑定独立前馈
-    // friction_outer_down = DJIMotorInit(&friction_config_outer);
+    // 第二级，外摩擦轮初始化
+    // 1. 下
+    friction_config_outer.can_init_config.tx_id = 4;
+    friction_config_outer.controller_setting_init_config.motor_reverse_flag = MOTOR_DIRECTION_NORMAL;
+    friction_config_outer.controller_param_init_config.current_feedforward_ptr = &ff_outer_down; // 绑定独立前馈
+    friction_outer_down = DJIMotorInit(&friction_config_outer);
 
-    // // 2. 左 (反转)
-    // friction_config_outer.can_init_config.tx_id = 5;
-    // friction_config_outer.controller_setting_init_config.motor_reverse_flag = MOTOR_DIRECTION_REVERSE;
-    // friction_config_outer.controller_param_init_config.current_feedforward_ptr = &ff_outer_left; // 绑定独立前馈
-    // friction_outer_left = DJIMotorInit(&friction_config_outer);
+    // 2. 左 (反转)
+    friction_config_outer.can_init_config.tx_id = 5;
+    friction_config_outer.controller_setting_init_config.motor_reverse_flag = MOTOR_DIRECTION_REVERSE;
+    friction_config_outer.controller_param_init_config.current_feedforward_ptr = &ff_outer_left; // 绑定独立前馈
+    friction_outer_left = DJIMotorInit(&friction_config_outer);
 
-    // // 3. 右
-    // friction_config_outer.can_init_config.tx_id = 6;
-    // friction_config_outer.controller_setting_init_config.motor_reverse_flag = MOTOR_DIRECTION_NORMAL;
-    // friction_config_outer.controller_param_init_config.current_feedforward_ptr = &ff_outer_right; // 绑定独立前馈
-    // friction_outer_right = DJIMotorInit(&friction_config_outer);
+    // 3. 右
+    friction_config_outer.can_init_config.tx_id = 6;
+    friction_config_outer.controller_setting_init_config.motor_reverse_flag = MOTOR_DIRECTION_NORMAL;
+    friction_config_outer.controller_param_init_config.current_feedforward_ptr = &ff_outer_right; // 绑定独立前馈
+    friction_outer_right = DJIMotorInit(&friction_config_outer);
 
     // 拨盘电机
     Motor_Init_Config_s loader_config = {
@@ -145,10 +145,10 @@ void ShootInit()
             .angle_PID = {
                 // 这里把位置环 Kp 和输出上限一起抬高，作用是把 2.5 发量级的大角度误差直接转换成高速度给定；
                 // 原因是 DJI 串级控制里位置环输出先喂给速度环，若这里不够大，拨盘就无法在起步瞬间打出满力矩冲刺。
-                .Kp = 19.0f,
+                .Kp = 14.0f,
                 .Ki = 0.0,
                 .Kd = 0.0f,
-                .MaxOut = 40000,
+                .MaxOut = 30000,
 
             },
             .speed_PID = {
@@ -343,6 +343,23 @@ static void AbortSingleFire(void)
     single_fire.retry_start_time = 0.0f;
     fire_trigger.pending_fire = 0;
     SetFrictionFeedforward(0.0f, 0.0f);
+}
+
+/**
+ * @brief 判断单发事务是否处于“可被 STOP 打断”的补发阶段
+ * @return 1 表示当前已经进入补发等待或补发送弹，0 表示仍处于首发自保持阶段
+ * @note 这里统一识别补发等待和补发步进两种状态，作用是让 STOP 指令在补发期间立即停拨；
+ *       原因是首发冲刺需要保证一次触发完整收口，而补发只是附加尝试，安全优先级高于补发完成率。
+ */
+static uint8_t SingleFireIsRetryActive(void)
+{
+    if (single_fire.state == SF_RETRYING)
+        return 1;
+
+    if (single_fire.state == SF_FEEDING && single_fire.retry_count > 0)
+        return 1;
+
+    return 0;
 }
 
 /**
@@ -925,10 +942,11 @@ void ShootTask()
         SetMotorEnableIfReady(loader, 1);
     }
 
-    // 当单发已经触发但遥控器电平回到 STOP 时，仍然把它作为单发事务送进堵转状态机；
-    // 原因是位置环冲刺阶段若中途不再参与堵转检测，卡弹时就会失去自动解卡能力。
+    // 当单发已经触发但遥控器电平回到 STOP 时，仅在首发待速/首发冲刺阶段继续送进堵转状态机；
+    // 原因是首发事务尚未收口时仍需保留自动解卡，而补发属于附加尝试，必须允许用户立即停拨。
     loader_mode_e stall_input_mode = requested_load_mode;
     if ((requested_load_mode == LOAD_STOP) &&
+        !SingleFireIsRetryActive() &&
         (fire_trigger.pending_fire || single_fire.state == SF_WAIT_SPEED || single_fire.state == SF_FEEDING)) {
         stall_input_mode = LOAD_1_BULLET;
     }
@@ -940,7 +958,11 @@ void ShootTask()
     switch (actual_load_mode) {
     // 停止拨盘
     case LOAD_STOP:
-        if ((single_fire.state != SF_IDLE || fire_trigger.pending_fire) && stall_handler.state == STALL_NORMAL) {
+        // 补发期间收到 STOP 时直接中止状态机，作用是切断后续补步；
+        // 原因是补发继续卷弹会扩大误触风险，安全停拨要优先于“补发补到底”。
+        if (!SingleFireIsRetryActive() &&
+            (single_fire.state != SF_IDLE || fire_trigger.pending_fire) &&
+            stall_handler.state == STALL_NORMAL) {
             HandleSingleFire(fire_trigger.pending_fire);
         } else {
             AbortSingleFire();
