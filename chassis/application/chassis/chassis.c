@@ -33,7 +33,7 @@
 #define HALF_WHEEL_BASE (WHEEL_BASE / 2.0f) // 半轴距
 #define HALF_TRACK_WIDTH (TRACK_WIDTH / 2.0f) // 半轮距
 #define PERIMETER_WHEEL (RADIUS_WHEEL * 2 * PI) // 轮子周长
-#define DEFAULT_TEST_POWER 100.0f // 调试用的基础功率
+#define DEFAULT_TEST_POWER 300.0f // 调试用的基础功率
 
 /* 底盘应用包含的模块和信息存储,底盘是单例模式,因此不需要为底盘建立单独的结构体 */
 #ifdef CHASSIS_BOARD // 如果是底盘板,使用板载IMU获取底盘转动角速度
@@ -189,7 +189,7 @@ void ChassisInit()
     chassis_motor_config.controller_setting_init_config.motor_reverse_flag = MOTOR_DIRECTION_REVERSE;
     motor_lb = PowerControlInit(&chassis_motor_config);
 
-    referee_data = UITaskInit(&huart6, &ui_data); // 裁判系统初始化,会同时初始化UI
+    // referee_data = UITaskInit(&huart6, &ui_data); // 裁判系统初始化,会同时初始化UI
     PowerControl_EnableSlopeComp(1);
 
 #ifdef USE_SUPER_CAP
@@ -489,7 +489,7 @@ void ChassisTask()
         final_power_limit = referee_power_limit * 1.00f;
     } else {
         // 平地模式：使用 75% 功率
-        final_power_limit = referee_power_limit * 0.75f;
+        final_power_limit = referee_power_limit * 1.0f;
     }
 
     // 3. [条件编译] 超电爆发功率策略
@@ -505,8 +505,8 @@ void ChassisTask()
 #endif // USE_SUPER_CAP
 
     // 4. 最终限幅保护
-    if (final_power_limit > 150.0f)
-        final_power_limit = 150.0f; // 物理极限
+    if (final_power_limit > 300.0f)
+        final_power_limit = 300.0f; // 物理极限
     // 5. 设置给底盘功率控制算法 (这个函数控制电机的电流)
     SetPowerLimit(final_power_limit);
 
@@ -528,7 +528,7 @@ void ChassisTask()
         break;
     case CHASSIS_FOLLOW_GIMBAL_YAW:
 
-        chassis_cmd_recv.wz = -3.1f * chassis_cmd_recv.offset_angle * abs(chassis_cmd_recv.offset_angle) - 1.0 * gimbal_wz; // 考虑加入pid闭环会更好
+        chassis_cmd_recv.wz = -3.6f * chassis_cmd_recv.offset_angle * abs(chassis_cmd_recv.offset_angle) - 0.7 * gimbal_wz; // 考虑加入pid闭环会更好
         // chassis_cmd_recv.wz = -1.0 * gimbal_wz;
         break;
     case CHASSIS_ROTATE: // 自旋,同时保持全向机动

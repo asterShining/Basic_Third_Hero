@@ -28,6 +28,8 @@
 #define PTICH_HORIZON_ANGLE (PITCH_HORIZON_ECD * ECD_ANGLE_COEF_DJI) // pitch水平时电机的角度,0-360
 
 #define RC_TRIGGER_TH 500
+// Yaw 死区漂移低通锁定系数: 0.90~0.98，值越小锁定越快，0.95 约 0.5s 平滑锁定
+#define YAW_DRIFT_LOCK_COEF 0.95f
 
 /* cmd应用包含的模块实例指针和交互信息存储*/
 #ifdef GIMBAL_BOARD // 对双板的兼容,条件编译
@@ -154,9 +156,8 @@ static void CalcOffsetAngle()
     // 获取你在 gimbal.c 中计算出的 0~360 度角度
     float gimbal_angle = gimbal_fetch_data.yaw_motor_single_round_angle;
 
-    // DM电机通常上电归零，所以偏移量设为0；如果需要机械对齐，可修改 YAW_ALIGN_ANGLE
-    float align_offset = 0.0f;
-    // 或者保留宏定义： float align_offset = YAW_CHASSIS_ALIGN_ECD * ECD_ANGLE_COEF_DJI; (需确保宏转换正确)
+    // 这里使用机械对齐角作为虚拟中值，作用是让底盘跟随围绕真实安装零位闭环，避免长期存在固定虚位。
+    float align_offset = YAW_ALIGN_ANGLE;
 
     // 1. 计算原始偏差
     float error = gimbal_angle - align_offset;
@@ -320,6 +321,20 @@ static void RemoteControlSet()
         // 使用处理后的 rocker_lx 和 rocker_ly
         gimbal_cmd_send.yaw -= yaw_sensitivity * rocker_lx;
         gimbal_cmd_send.pitch += pitch_sensitivity * rocker_ly;
+
+        // ==================== [新增] Yaw 死区零偏漂移限位 ====================
+        // 功能: 当摇杆 X 轴在死区内 (rocker_lx == 0) 时，陀螺仪零偏会让 YawTotalAngle
+        //       持续缓慢变化，但 gimbal_cmd_send.yaw（目标值）却保持不动，
+        //       导致 PID 误差不断积累，云台被强迫追赶漂移，表现为"飘"。
+        // 原理: 在无输入期间，将目标值以低通方式软锁定到当前 IMU 反馈值，
+        //       使目标值跟随真实漂移，消除误差累积。
+        //       低通系数 YAW_DRIFT_LOCK_COEF 越小，锁定越快（0.0 = 立即锁定，会突变）；
+        //       设为 0.95 可让云台在放手后约 0.5s 内平滑锁定到当前姿态，无扰动感。
+        if (rocker_lx == 0.0f) {
+            // 将目标值向当前 IMU 真实 yaw 缓慢拉拢，防止零偏积分积累误差
+            gimbal_cmd_send.yaw = YAW_DRIFT_LOCK_COEF * gimbal_cmd_send.yaw +
+                                  (1.0f - YAW_DRIFT_LOCK_COEF) * gimbal_fetch_data.gimbal_imu_data.YawTotalAngle;
+        }
 
         // ==================== [新增] 软件限幅逻辑 ====================
 

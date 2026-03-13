@@ -47,7 +47,7 @@ void ShootInit()
         },
         .controller_param_init_config = {
             .speed_PID = {
-                .Kp = 9.7, // 8.7
+                .Kp = 7.7, // 8.7
                 .Ki = 0.0, // 0.5
                 .Kd = 0,
                 .DeadBand = 10.0f, // [新增] 死区: ±20 deg/s 以内视为零速, 配合 Iout 清零防止停止时自转
@@ -75,7 +75,7 @@ void ShootInit()
         },
         .controller_param_init_config = {
             .speed_PID = {
-                .Kp = 8.3, // 8.3
+                .Kp = 7.3, // 8.3
                 .Ki = 0.0, // 0.0
                 .Kd = 0,
                 .DeadBand = 10.0f, // [新增] 死区: ±20 deg/s 以内视为零速, 配合 Iout 清零防止停止时自转
@@ -431,15 +431,23 @@ void ShootSetSpeedDual(float inner_mps, float outer_mps)
         current_outer_deg = target_outer_deg;
 
     // 2. 设置第一级（内圈3个电机）- 负责主要加速
-    // 注意：你的 shoot.c 初始化了 down, left, right 三个电机
-    SetFrictionRefIfReady(friction_inner_left, current_inner_deg);
-    SetFrictionRefIfReady(friction_inner_right, current_inner_deg);
-    SetFrictionRefIfReady(friction_inner_down, current_inner_deg);
+    // 仅在基础速度非零（摩擦轮已开启）时才叠加各轮独立 Trim 偏置；
+    // 原因: 若基础速度为 0（摩擦轮关闭）时仍叠加非零 Trim，电机会持续转动，与关闭意图相悖。
+    {
+        float ref_inner_base = current_inner_deg; // 经软启动斜坡后的内圈基础目标角速度
+        SetFrictionRefIfReady(friction_inner_left, ref_inner_base != 0.0f ? ref_inner_base + SpeedMps2Degs(FRICTION_TRIM_INNER_LEFT) : 0.0f);
+        SetFrictionRefIfReady(friction_inner_right, ref_inner_base != 0.0f ? ref_inner_base + SpeedMps2Degs(FRICTION_TRIM_INNER_RIGHT) : 0.0f);
+        SetFrictionRefIfReady(friction_inner_down, ref_inner_base != 0.0f ? ref_inner_base + SpeedMps2Degs(FRICTION_TRIM_INNER_DOWN) : 0.0f);
+    }
 
     // 3. 设置第二级（外圈3个电机）- 负责稳速/微加速
-    SetFrictionRefIfReady(friction_outer_left, current_outer_deg);
-    SetFrictionRefIfReady(friction_outer_right, current_outer_deg);
-    SetFrictionRefIfReady(friction_outer_down, current_outer_deg);
+    // 同理，基础速度为 0 时直接下发 0，不叠加 Trim
+    {
+        float ref_outer_base = current_outer_deg; // 经软启动斜坡后的外圈基础目标角速度
+        SetFrictionRefIfReady(friction_outer_left, ref_outer_base != 0.0f ? ref_outer_base + SpeedMps2Degs(FRICTION_TRIM_OUTER_LEFT) : 0.0f);
+        SetFrictionRefIfReady(friction_outer_right, ref_outer_base != 0.0f ? ref_outer_base + SpeedMps2Degs(FRICTION_TRIM_OUTER_RIGHT) : 0.0f);
+        SetFrictionRefIfReady(friction_outer_down, ref_outer_base != 0.0f ? ref_outer_base + SpeedMps2Degs(FRICTION_TRIM_OUTER_DOWN) : 0.0f);
+    }
 }
 /**
  * @brief 更新调试数据 (将电机反馈的角速度转换为线速度)
@@ -780,8 +788,8 @@ static void HandleSingleFire(uint8_t trigger_active)
             LoaderSetAngleRef(single_fire.rush_target_angle);
         } else {
             // 待速期间保持当前位置锁定，作用是防止供弹盘在等待时被反扭矩拖走；
-            // 原因是下一次冲刺目标是相对当前位置叠加的，一旦等待期滑动，整个单发节距就会漂移。
-            LoaderSetAngleRef(single_fire.lock_target_angle);
+            // [新增] 加上抵着限位的偏置角度，保证入弹口被微弱推力顶住
+            LoaderSetAngleRef(single_fire.lock_target_angle + SF_LOCK_PUSH_ANGLE);
         }
         break;
 
@@ -789,7 +797,7 @@ static void HandleSingleFire(uint8_t trigger_active)
         if ((current_time - single_fire.feed_start_time) < FRICTION_FEEDFORWARD_TIME) {
             // 在冲刺初段给摩擦轮额外前馈，作用是让咬弹瞬间的速度塌陷更可控；
             // 原因是拨盘改成位置环后起步扭矩更猛，摩擦轮若不提前补能量，掉速幅值会放大且恢复更慢。
-            SetFrictionFeedforward(FRICTION_FEEDFORWARD_CURRENT, 0.0f);
+            SetFrictionFeedforward(FRICTION_FEEDFORWARD_CURRENT, 400.0f);
         } else {
             SetFrictionFeedforward(0.0f, 0.0f);
         }
@@ -874,7 +882,8 @@ static void HandleSingleFire(uint8_t trigger_active)
             single_fire.retry_start_time = current_time;
             single_fire.lock_target_angle = loader->measure.total_angle;
         }
-        LoaderSetAngleRef(single_fire.lock_target_angle);
+        // [新增] 加上抵着限位的偏置角度，保证入弹口被微弱推力顶住
+        LoaderSetAngleRef(single_fire.lock_target_angle + SF_LOCK_PUSH_ANGLE);
         break;
     }
 
@@ -1030,7 +1039,7 @@ void ShootTask()
             break;
         case BIG_AMU_16:
             // 目标16.5m/s：一级给15.5，二级给16.5
-            ShootSetSpeedDual(15.5f, 16.5f);
+            ShootSetSpeedDual(14.5f, 16.5f);
             break;
         default:
             // 默认值
