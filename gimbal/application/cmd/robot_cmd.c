@@ -72,8 +72,8 @@ BMI088_Data_t bmi088_data;
 // 定义一个静态变量来保存上一次的开关状态，初始化为下（急停/停止状态）
 static uint16_t last_switch_right = RC_SW_DOWN;
 // 记录当前用于底盘跟随的 Yaw 对齐基准角。
-// 默认沿用机械安装零位，手动 DM 校零后切换为运行时零位，避免校零后 offset 仍然减旧机械角。
-static float yaw_align_offset_deg = YAW_ALIGN_ANGLE;
+// 当前设计默认信任 DM 已保存的硬件零点，因此开机直接以 0 度作为软件对齐基准。
+static float yaw_align_offset_deg = 0.0f;
 
 // --- 新增的静态变量，用于长按计时 ---
 static uint32_t inner_eight_cnt = 0; // 内八计时器
@@ -85,8 +85,8 @@ static AutoAim_State_e auto_aim_state = AUTO_AIM_IDLE;
 
 void RobotCMDInit()
 {
-    // 初始化时先使用机械安装零位，原因是上电后在未执行手动校零前仍需保持老车参数兼容。
-    yaw_align_offset_deg = YAW_ALIGN_ANGLE;
+    // 开机直接按 DM 硬件零点工作，不回退到机械安装角。
+    yaw_align_offset_deg = 0.0f;
     rc_data = RemoteControlInit(&huart3); // 修改为对应串口,注意如果是自研板dbus协议串口需选用添加了反相器的那个
     // vision_recv_data = VisionInit(&huart1); // 视觉通信串口
     Buzzer_config_s hint_config = {
@@ -165,7 +165,7 @@ static void CalcOffsetAngle()
     float gimbal_angle = gimbal_fetch_data.yaw_motor_single_round_angle;
 
     // 使用当前生效的对齐基准角计算 offset。
-    // 这样手动 DM 校零后，底盘跟随会立即围绕新的零位闭环，而不是继续减旧的机械安装角。
+    // 默认信任 DM 硬件零点，因此软件基准开机就是 0；手动校零后仍保持围绕 0 闭环。
     float align_offset = yaw_align_offset_deg;
 
     // 1. 计算原始偏差

@@ -34,7 +34,7 @@
 #define HALF_WHEEL_BASE (WHEEL_BASE / 2.0f) // 半轴距
 #define HALF_TRACK_WIDTH (TRACK_WIDTH / 2.0f) // 半轮距
 #define PERIMETER_WHEEL (RADIUS_WHEEL * 2 * PI) // 轮子周长
-#define DEFAULT_TEST_POWER 300.0f // 调试用的基础功率
+#define DEFAULT_TEST_POWER 60.0f // 调试用的基础功率
 #define REFEREE_KEYMOUSE_TIMEOUT_MS 100u // What: 定义键鼠超时窗口；Why: 100ms内无新帧就清零，避免粘键
 #define REFEREE_MOUSE_DELTA_LIMIT 660 // What: 限制单帧鼠标增量；Why: 与旧DBUS鼠标尺度对齐，防止重连时大跳变
 
