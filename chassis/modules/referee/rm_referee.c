@@ -25,6 +25,8 @@ static DaemonInstance *referee_daemon; // 裁判系统守护进程
 static referee_info_t referee_info; // 裁判系统数据
 static RefereeRxDiag_s referee_rx_diag; // 裁判链路诊断统计
 static uint32_t referee_parser_warn_tick_ms; // 解析告警限频时间戳
+static uint32_t referee_custom_client_last_update_tick_ms; // What: 记录最近一次0x0306到达时刻；Why: 只用键鼠帧新鲜度判在线，避免被其他裁判帧掩盖
+static uint32_t referee_custom_client_frame_count; // What: 记录有效0x0306累计帧数；Why: 让上层能区分“从未收到过”与“收到后超时”
 
 // 记录“命令码已识别但长度不匹配”，目的是把协议版本不一致和链路损坏区分开，缩短定位路径
 static uint8_t RefereeRecordLengthMismatch(uint16_t cmd_id, uint16_t data_len)
@@ -192,6 +194,8 @@ static uint8_t RefereeDecodeFrameByCmdID(uint16_t cmd_id, const uint8_t *data_pt
     case ID_custom_client_data: // 0x0306(v2)
         if (data_len == LEN_custom_client_data) {
             memcpy(&referee_info.CustomClientData, data_ptr, LEN_custom_client_data);
+            referee_custom_client_last_update_tick_ms = HAL_GetTick(); // What: 标记专属键鼠帧到达时间；Why: 上层要用它做100ms粘键保护
+            referee_custom_client_frame_count++; // What: 累计有效键鼠帧；Why: 便于区分未接线与短时超时两种状态
             return 1u;
         }
         return RefereeRecordLengthMismatch(cmd_id, data_len);
@@ -389,6 +393,8 @@ referee_info_t *RefereeInit(UART_HandleTypeDef *referee_usart_handle)
     memset(&referee_info, 0, sizeof(referee_info));
     memset(&referee_rx_diag, 0, sizeof(referee_rx_diag));
     referee_parser_warn_tick_ms = 0u;
+    referee_custom_client_last_update_tick_ms = 0u;
+    referee_custom_client_frame_count = 0u;
 
     conf.module_callback = RefereeRxCallback;
     conf.usart_handle = referee_usart_handle;
@@ -421,4 +427,14 @@ void RefereeSend(uint8_t *send, uint16_t tx_len)
 const RefereeRxDiag_s *RefereeGetRxDiag(void)
 {
     return &referee_rx_diag;
+}
+
+uint32_t RefereeGetCustomClientLastUpdateTick(void)
+{
+    return referee_custom_client_last_update_tick_ms;
+}
+
+uint32_t RefereeGetCustomClientFrameCount(void)
+{
+    return referee_custom_client_frame_count;
 }

@@ -21,6 +21,7 @@
 #endif
 #include "message_center.h"
 #include "referee_task.h"
+#include "usart.h"
 #include <arm_math.h> // for fabsf
 #include "buzzer.h"
 
@@ -34,11 +35,24 @@
 #define HALF_TRACK_WIDTH (TRACK_WIDTH / 2.0f) // 半轮距
 #define PERIMETER_WHEEL (RADIUS_WHEEL * 2 * PI) // 轮子周长
 #define DEFAULT_TEST_POWER 300.0f // 调试用的基础功率
+#define REFEREE_KEYMOUSE_TIMEOUT_MS 100u // What: 定义键鼠超时窗口；Why: 100ms内无新帧就清零，避免粘键
+#define REFEREE_MOUSE_DELTA_LIMIT 660 // What: 限制单帧鼠标增量；Why: 与旧DBUS鼠标尺度对齐，防止重连时大跳变
+
+typedef struct
+{
+    uint16_t last_x_position; // What: 保存上一帧裁判鼠标绝对X；Why: 用于把0x0306绝对坐标转换成cmd层增量
+    uint16_t last_y_position; // What: 保存上一帧裁判鼠标绝对Y；Why: 用于把0x0306绝对坐标转换成cmd层增量
+    uint32_t last_update_tick_ms; // What: 保存上一帧键鼠专属时间戳；Why: 只在新键鼠帧到达时更新增量，避免重复消费旧值
+    uint8_t baseline_ready; // What: 标记是否已经建立鼠标增量基准；Why: 重连首帧必须归零，避免云台瞬时抽动
+} Referee_KeyMouse_Sync_s;
 
 /* 底盘应用包含的模块和信息存储,底盘是单例模式,因此不需要为底盘建立单独的结构体 */
 #ifdef CHASSIS_BOARD // 如果是底盘板,使用板载IMU获取底盘转动角速度
 #include "can_comm.h"
 #include "ins_task.h"
+// What: 编译期校验底盘上传结构体尺寸；Why: 防止新增键鼠字段后悄悄超过单帧CAN通信上限
+_Static_assert(sizeof(Chassis_Upload_Data_s) <= CAN_COMM_MAX_BUFFSIZE,
+               "Chassis_Upload_Data_s exceeds CAN_COMM_MAX_BUFFSIZE");
 static CANCommInstance *chasiss_can_comm; // 双板通信CAN comm
 attitude_t *Chassis_IMU_data;
 #endif // CHASSIS_BOARD
@@ -76,6 +90,7 @@ static float vt_lf, vt_rf, vt_lb, vt_rb; // 底盘速度解算后的临时输出
 static float real_vx = 0.0f; // 真实前进速度 m/s
 static float real_vy = 0.0f; // 真实横移速度 m/s
 static float real_wz = 0.0f; // 真实旋转速度 deg/s
+static Referee_KeyMouse_Sync_s referee_keymouse_sync; // What: 保存裁判键鼠增量转换状态；Why: 将绝对坐标安全适配成增量输入
 
 // [!code ++]
 // ==========================================
@@ -144,6 +159,78 @@ static float GetVariableSpinBase()
     return wave;
 }
 
+static int16_t ClampRefereeMouseDelta(int32_t raw_delta)
+{
+    // What: 将裁判鼠标单帧位移限幅到旧DBUS鼠标范围；Why: 统一手感并抑制重连/跳帧带来的异常大增量
+    if (raw_delta > REFEREE_MOUSE_DELTA_LIMIT)
+        return REFEREE_MOUSE_DELTA_LIMIT;
+    if (raw_delta < -REFEREE_MOUSE_DELTA_LIMIT)
+        return -REFEREE_MOUSE_DELTA_LIMIT;
+    return (int16_t)raw_delta;
+}
+
+static void ClearRefereeKeyMouseUpload(void)
+{
+    // What: 清空当前待上传的裁判键鼠状态；Why: 超时或未接线时必须显式归零，避免cmd层继续使用旧输入
+    chassis_feedback_data.referee_keymouse.key_value = 0u;
+    chassis_feedback_data.referee_keymouse.mouse_dx = 0;
+    chassis_feedback_data.referee_keymouse.mouse_dy = 0;
+    chassis_feedback_data.referee_keymouse.mouse_left = 0u;
+    chassis_feedback_data.referee_keymouse.mouse_right = 0u;
+    chassis_feedback_data.referee_keymouse.online = 0u;
+}
+
+static void UpdateRefereeKeyMouseUpload(void)
+{
+    uint32_t now_tick = HAL_GetTick();
+    uint32_t custom_client_tick = 0u;
+    const ext_custom_client_data_t *custom_client = NULL;
+
+    // What: 每个控制周期先把鼠标增量归零；Why: 增量只允许消费一次，避免在cmd层重复施加同一帧位移
+    chassis_feedback_data.referee_keymouse.mouse_dx = 0;
+    chassis_feedback_data.referee_keymouse.mouse_dy = 0;
+
+    if (referee_data == NULL) {
+        ClearRefereeKeyMouseUpload();
+        referee_keymouse_sync.baseline_ready = 0u;
+        return;
+    }
+
+    custom_client_tick = RefereeGetCustomClientLastUpdateTick();
+    if (RefereeGetCustomClientFrameCount() == 0u) {
+        ClearRefereeKeyMouseUpload();
+        referee_keymouse_sync.baseline_ready = 0u;
+        return;
+    }
+
+    if ((uint32_t)(now_tick - custom_client_tick) > REFEREE_KEYMOUSE_TIMEOUT_MS) {
+        ClearRefereeKeyMouseUpload();
+        referee_keymouse_sync.baseline_ready = 0u;
+        return;
+    }
+
+    custom_client = &referee_data->CustomClientData;
+    chassis_feedback_data.referee_keymouse.online = 1u;
+    chassis_feedback_data.referee_keymouse.key_value = custom_client->key_value;
+    chassis_feedback_data.referee_keymouse.mouse_left = (uint8_t)(custom_client->mouse_left != 0u);
+    chassis_feedback_data.referee_keymouse.mouse_right = (uint8_t)(custom_client->mouse_right != 0u);
+
+    if (custom_client_tick != referee_keymouse_sync.last_update_tick_ms ||
+        referee_keymouse_sync.baseline_ready == 0u) {
+        if (referee_keymouse_sync.baseline_ready != 0u) {
+            chassis_feedback_data.referee_keymouse.mouse_dx =
+                ClampRefereeMouseDelta((int32_t)custom_client->x_position - (int32_t)referee_keymouse_sync.last_x_position);
+            chassis_feedback_data.referee_keymouse.mouse_dy =
+                ClampRefereeMouseDelta((int32_t)custom_client->y_position - (int32_t)referee_keymouse_sync.last_y_position);
+        }
+
+        referee_keymouse_sync.last_x_position = custom_client->x_position;
+        referee_keymouse_sync.last_y_position = custom_client->y_position;
+        referee_keymouse_sync.last_update_tick_ms = custom_client_tick;
+        referee_keymouse_sync.baseline_ready = 1u;
+    }
+}
+
 void ChassisInit()
 {
     Chassis_IMU_data = INS_Init();
@@ -189,7 +276,12 @@ void ChassisInit()
     chassis_motor_config.controller_setting_init_config.motor_reverse_flag = MOTOR_DIRECTION_REVERSE;
     motor_lb = PowerControlInit(&chassis_motor_config);
 
-    // referee_data = UITaskInit(&huart6, &ui_data); // 裁判系统初始化,会同时初始化UI
+    ClearRefereeKeyMouseUpload(); // What: 上电先清空键鼠上传缓存；Why: 避免CAN另一侧在首帧前读到脏数据
+    referee_keymouse_sync.last_x_position = 0u;
+    referee_keymouse_sync.last_y_position = 0u;
+    referee_keymouse_sync.last_update_tick_ms = 0u;
+    referee_keymouse_sync.baseline_ready = 0u;
+    referee_data = RefereeInit(&huart6); // What: 初始化底盘板裁判接收；Why: 双板方案下0x0306需要先在底盘侧解析再经CAN回传
     PowerControl_EnableSlopeComp(1);
 
 #ifdef USE_SUPER_CAP
@@ -583,6 +675,7 @@ void ChassisTask()
     // // 当前只做了17mm热量的数据获取,后续根据robot_def中的宏切换双枪管和英雄42mm的情况
     // chassis_feedback_data.bullet_speed = referee_data->GameRobotState.shooter_id1_17mm_speed_limit;
     // chassis_feedback_data.rest_heat = referee_data->PowerHeatData.shooter_heat0;
+    UpdateRefereeKeyMouseUpload(); // What: 刷新裁判键鼠上传内容；Why: 让云台cmd层直接复用现有底盘反馈链路拿到键鼠输入
 
     // 推送反馈消息
 #ifdef ONE_BOARD

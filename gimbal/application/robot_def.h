@@ -181,6 +181,16 @@ typedef struct
     float chassis_power_mx;
 } Chassis_Power_Data_s;
 
+typedef struct
+{
+    uint16_t key_value; // What: 保存裁判0x0306原始键盘位；Why: 直接复用云台侧Key_t位定义，避免双板键位枚举漂移
+    int16_t mouse_dx; // What: 保存相邻有效裁判帧的鼠标X增量；Why: 将裁判绝对坐标适配为cmd层现有增量视角输入
+    int16_t mouse_dy; // What: 保存相邻有效裁判帧的鼠标Y增量；Why: 在键鼠重连时可以用首帧归零避免云台瞬时跳变
+    uint8_t mouse_left; // What: 透传裁判鼠标左键电平；Why: 为后续绑定发射/交互动作保留统一入口
+    uint8_t mouse_right; // What: 透传裁判鼠标右键电平；Why: 为后续绑定瞄准/模式动作保留统一入口
+    uint8_t online; // What: 标记裁判键鼠是否在新鲜度窗口内；Why: 防止0x0306超时后出现粘键或残余鼠标增量
+} Referee_KeyMouse_Data_s;
+
 /* ----------------CMD应用发布的控制数据,应当由gimbal/chassis/shoot订阅---------------- */
 /**
  * @brief 对于双板情况,遥控器和pc在云台,裁判系统在底盘
@@ -243,6 +253,7 @@ typedef struct
 
     uint8_t rest_heat; // 剩余枪口热量
     Bullet_Speed_e bullet_speed; // 弹速限制
+    Referee_KeyMouse_Data_s referee_keymouse; // What: 通过现有底盘上传链路回传裁判键鼠；Why: 复用双板CAN数据面，避免额外消息通道
 } Chassis_Upload_Data_s;
 
 typedef struct

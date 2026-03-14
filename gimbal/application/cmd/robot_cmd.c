@@ -13,7 +13,7 @@
 #include "bmi088.h"
 #include "buzzer.h"
 #include "auto_gimbal.h"
-#include "remote_control.h"
+#include "std_cmd.h"
 
 // bsp
 #include "bsp_dwt.h"
@@ -34,6 +34,9 @@
 /* cmd应用包含的模块实例指针和交互信息存储*/
 #ifdef GIMBAL_BOARD // 对双板的兼容,条件编译
 #include "can_comm.h"
+// What: 编译期校验底盘反馈结构体尺寸；Why: 防止新增键鼠字段后悄悄超过单帧CAN通信上限
+_Static_assert(sizeof(Chassis_Upload_Data_s) <= CAN_COMM_MAX_BUFFSIZE,
+               "Chassis_Upload_Data_s exceeds CAN_COMM_MAX_BUFFSIZE");
 static CANCommInstance *cmd_can_comm; // 双板通信
 
 #endif
@@ -511,94 +514,6 @@ static void RemoteControlSet()
     last_switch_right = current_switch_right;
 }
 
-/**
- * @brief 输入为键鼠时模式和控制量设置
- *
- */
-static void MouseKeySet()
-{
-    // 如果觉得键盘太快，可以乘以 0.5f (半速)
-    float key_scale = 1.0f;
-
-    // W-S 控制前后，A-D 控制左右
-    chassis_cmd_send.vx = (rc_data[TEMP].key[KEY_PRESS].w - rc_data[TEMP].key[KEY_PRESS].s) * key_scale;
-    chassis_cmd_send.vy = (rc_data[TEMP].key[KEY_PRESS].a - rc_data[TEMP].key[KEY_PRESS].d) * key_scale;
-
-    gimbal_cmd_send.yaw += (float)rc_data[TEMP].mouse.x / 660 * 10; // 系数待测
-    gimbal_cmd_send.pitch += (float)rc_data[TEMP].mouse.y / 660 * 10;
-
-    switch (rc_data[TEMP].key_count[KEY_PRESS][Key_Z] % 3) // Z键设置弹速
-    {
-    case 0:
-        shoot_cmd_send.bullet_speed = 15;
-        break;
-    case 1:
-        shoot_cmd_send.bullet_speed = 18;
-        break;
-    default:
-        shoot_cmd_send.bullet_speed = 30;
-        break;
-    }
-    switch (rc_data[TEMP].key_count[KEY_PRESS][Key_E] % 4) // E键设置发射模式
-    {
-    case 0:
-        shoot_cmd_send.load_mode = LOAD_STOP;
-        break;
-    case 1:
-        shoot_cmd_send.load_mode = LOAD_1_BULLET;
-        break;
-    case 2:
-        shoot_cmd_send.load_mode = LOAD_3_BULLET;
-        break;
-    default:
-        shoot_cmd_send.load_mode = LOAD_BURSTFIRE;
-        break;
-    }
-    switch (rc_data[TEMP].key_count[KEY_PRESS][Key_R] % 2) // R键开关弹舱
-    {
-    case 0:
-        shoot_cmd_send.lid_mode = LID_OPEN;
-        break;
-    default:
-        shoot_cmd_send.lid_mode = LID_CLOSE;
-        break;
-    }
-    switch (rc_data[TEMP].key_count[KEY_PRESS][Key_F] % 2) // F键开关摩擦轮
-    {
-    case 0:
-        shoot_cmd_send.friction_mode = FRICTION_OFF;
-        break;
-    default:
-        shoot_cmd_send.friction_mode = FRICTION_ON;
-        break;
-    }
-    switch (rc_data[TEMP].key_count[KEY_PRESS][Key_C] % 4) // C键设置底盘速度
-    {
-    case 0:
-        chassis_cmd_send.chassis_speed_buff = 40;
-        break;
-    case 1:
-        chassis_cmd_send.chassis_speed_buff = 60;
-        break;
-    case 2:
-        chassis_cmd_send.chassis_speed_buff = 80;
-        break;
-    default:
-        chassis_cmd_send.chassis_speed_buff = 100;
-        break;
-    }
-    switch (rc_data[TEMP].key[KEY_PRESS].shift) // 待添加 按shift允许超功率 消耗缓冲能量
-    {
-    case 1:
-
-        break;
-
-    default:
-
-        break;
-    }
-}
-
 /* 机器人核心控制任务,200Hz频率运行(必须高于视觉发送频率) */
 void RobotCMDTask()
 {
@@ -618,8 +533,12 @@ void RobotCMDTask()
     // 根据遥控器左侧开关,确定当前使用的控制模式为遥控器调试还是键鼠
     // if (switch_is_down(rc_data[TEMP].rc.switch_left)) // 遥控器左侧开关状态为[下],遥控器控制
     RemoteControlSet();
+    StdCmdApplyRefereeKeyMouseOverlay(&chassis_fetch_data.referee_keymouse,
+                                      robot_state,
+                                      &chassis_cmd_send,
+                                      &gimbal_cmd_send); // What: 通过std_cmd模块叠加裁判WSAD/鼠标；Why: 让主程序只保留状态机和模块调用
     // else if (switch_is_up(rc_data[TEMP].rc.switch_left)) // 遥控器左侧开关状态为[上],键盘控制
-    //     MouseKeySet();
+    //     StdCmdApplyRemoteMouseKey(rc_data, &chassis_cmd_send, &gimbal_cmd_send);
 
     // EmergencyHandler(); // 处理模块离线和遥控器急停等紧急情况
 

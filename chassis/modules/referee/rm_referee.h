@@ -147,4 +147,18 @@ void RefereeSend(uint8_t *send, uint16_t tx_len);
  */
 const RefereeRxDiag_s *RefereeGetRxDiag(void);
 
+/**
+ * @brief 获取最近一次收到裁判0x0306键鼠帧的时间戳
+ *
+ * @return uint32_t 最近一次有效0x0306到达的HAL tick，未收到过则为0
+ */
+uint32_t RefereeGetCustomClientLastUpdateTick(void);
+
+/**
+ * @brief 获取累计收到的裁判0x0306键鼠帧数量
+ *
+ * @return uint32_t 有效0x0306帧计数
+ */
+uint32_t RefereeGetCustomClientFrameCount(void);
+
 #endif // !REFEREE_H
