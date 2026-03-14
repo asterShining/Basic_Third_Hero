@@ -68,6 +68,9 @@ BMI088Instance *bmi088_test; // 云台IMU
 BMI088_Data_t bmi088_data;
 // 定义一个静态变量来保存上一次的开关状态，初始化为下（急停/停止状态）
 static uint16_t last_switch_right = RC_SW_DOWN;
+// 记录当前用于底盘跟随的 Yaw 对齐基准角。
+// 默认沿用机械安装零位，手动 DM 校零后切换为运行时零位，避免校零后 offset 仍然减旧机械角。
+static float yaw_align_offset_deg = YAW_ALIGN_ANGLE;
 
 // --- 新增的静态变量，用于长按计时 ---
 static uint32_t inner_eight_cnt = 0; // 内八计时器
@@ -79,6 +82,8 @@ static AutoAim_State_e auto_aim_state = AUTO_AIM_IDLE;
 
 void RobotCMDInit()
 {
+    // 初始化时先使用机械安装零位，原因是上电后在未执行手动校零前仍需保持老车参数兼容。
+    yaw_align_offset_deg = YAW_ALIGN_ANGLE;
     rc_data = RemoteControlInit(&huart3); // 修改为对应串口,注意如果是自研板dbus协议串口需选用添加了反相器的那个
     // vision_recv_data = VisionInit(&huart1); // 视觉通信串口
     Buzzer_config_s hint_config = {
@@ -156,8 +161,9 @@ static void CalcOffsetAngle()
     // 获取你在 gimbal.c 中计算出的 0~360 度角度
     float gimbal_angle = gimbal_fetch_data.yaw_motor_single_round_angle;
 
-    // 这里使用机械对齐角作为虚拟中值，作用是让底盘跟随围绕真实安装零位闭环，避免长期存在固定虚位。
-    float align_offset = YAW_ALIGN_ANGLE;
+    // 使用当前生效的对齐基准角计算 offset。
+    // 这样手动 DM 校零后，底盘跟随会立即围绕新的零位闭环，而不是继续减旧的机械安装角。
+    float align_offset = yaw_align_offset_deg;
 
     // 1. 计算原始偏差
     float error = gimbal_angle - align_offset;
@@ -230,6 +236,12 @@ static void RemoteControlSet()
             if (cali_triggered == 0) {
                 // 1. 调用校准
                 GimbalCalibrate();
+                // 手动 DM 校零后，将底盘跟随基准切到运行时零位。
+                // 原因是当前 yaw_motor_single_round_angle 会围绕 0 反馈，继续减旧机械角会让校零看起来“没生效”。
+                yaw_align_offset_deg = 0.0f;
+                // 同步刷新云台目标到当前 IMU 姿态，避免退出急停后沿用旧参考值导致瞬时回拉。
+                gimbal_cmd_send.yaw = gimbal_fetch_data.gimbal_imu_data.YawTotalAngle;
+                gimbal_cmd_send.pitch = current_real_pitch;
 
                 // 2. 【新增】开启蜂鸣器提示
                 if (hint_buzzer != NULL) {
@@ -259,12 +271,13 @@ static void RemoteControlSet()
 
         robot_state = ROBOT_READY;
         // [用户要求] 注释掉原有逻辑 (User request: Comment out original logic)
-        chassis_cmd_send.chassis_mode = CHASSIS_NO_FOLLOW;
+        // chassis_cmd_send.chassis_mode = CHASSIS_NO_FOLLOW;
         // gimbal_cmd_send.gimbal_mode = GIMBAL_FREE_MODE;
 
         // [新增] 小陀螺模式配置 (New Configuration: Little Top Mode)
-        // 底盘进入自旋模式 (wz=4000，由chassis.c控制)
-        // chassis_cmd_send.chassis_mode = CHASSIS_ROTATE;
+        // 这里明确下发 CHASSIS_ROTATE，作用是让底盘侧进入小陀螺分支。
+        // 之前该行被注释后，发送出去的一直是 CHASSIS_NO_FOLLOW，所以底盘永远不会自旋。
+        chassis_cmd_send.chassis_mode = CHASSIS_ROTATE;
         // 云台切换至陀螺仪模式以保持世界坐标系下的稳定瞄准
         gimbal_cmd_send.gimbal_mode = GIMBAL_GYRO_MODE;
 

@@ -82,7 +82,7 @@ static float real_wz = 0.0f; // 真实旋转速度 deg/s
 // [新增] 小陀螺模式配置
 // ==========================================
 #define VARIABLE_SPIN_ENABLED 1 // 1: 启用变速小陀螺; 0: 启用优化后的匀速小陀螺
-#define SPIN_TOP_MAX_SPEED 500.0f // 小陀螺最大旋转速度 (deg/s) 降低转速以防电机过度饱和发生偏航漂移
+#define SPIN_TOP_MAX_SPEED 2000.0f // 小陀螺最大旋转速度 (deg/s) 降低转速以防电机过度饱和发生偏航漂移
 #define TRANSLATION_PRIORITY_RATIO 0.6f // 平移优先系数 (0~1)，越大则平移时旋转降速越明显
 
 /**
@@ -151,7 +151,7 @@ void ChassisInit()
     Motor_Init_Config_s chassis_motor_config = {
         .controller_param_init_config = {
             .speed_PID = {
-                .Kp = 3.1, // 4.5 3.7
+                .Kp = 3.7, // 4.5 3.7
                 .Ki = 0.0, // 0.2
                 .Kd = 0.0, // 0
                 .Improve = PID_Trapezoid_Intergral | PID_Integral_Limit | PID_Derivative_On_Measurement,
