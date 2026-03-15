@@ -30,6 +30,13 @@
 #define RC_TRIGGER_TH 500
 // Yaw 死区漂移低通锁定系数: 0.90~0.98，值越小锁定越快，0.95 约 0.5s 平滑锁定
 #define YAW_DRIFT_LOCK_COEF 0.95f
+// 鼠标灵敏度沿用旧工程的量级并换算成角度制，作用是保持手感接近原车；
+// 原因是当前云台目标量使用 degree，直接搬旧工程的 rad 系数会让鼠标控制失真。
+#define MOUSE_YAW_SENSITIVITY_DEG (0.00033f * RAD_2_DEGREE)
+#define MOUSE_PITCH_SENSITIVITY_DEG (-0.000046f * RAD_2_DEGREE)
+// 键鼠长按连发速率单独定义，作用是让鼠标连发不依赖遥控拨杆分支；
+// 原因是本轮需要让键鼠和遥控器并行控制，不能复用函数内局部宏。
+#define MOUSE_BURST_FIRE_RATE 8.0f
 
 /* cmd应用包含的模块实例指针和交互信息存储*/
 #ifdef GIMBAL_BOARD // 对双板的兼容,条件编译
@@ -79,6 +86,72 @@ static uint32_t outer_eight_cnt = 0; // 外八计时器
 static uint8_t cali_triggered = 0; // 触发状态：0-无，1-内八触发，2-外八触发
 // [新增] 自瞄状态变量
 static AutoAim_State_e auto_aim_state = AUTO_AIM_IDLE;
+// 键鼠射击锁存状态，作用是记住“鼠标已请求开火后保持摩擦轮开启”；
+// 原因是本轮只接 mouse.press_l，没有单独停摩擦轮按键，必须靠锁存保证后续连发稳定。
+static uint8_t mouse_fire_friction_latched = 0;
+// 鼠标左键上一拍电平，作用是检测单发上升沿；
+// 原因是 `shoot` 应用的单发事务是边沿触发，不能把电平直接长期送成 `LOAD_1_BULLET`。
+static uint8_t mouse_left_last = 0;
+// 鼠标是否已进入长按连发，作用是区分短按单发和长按连发；
+// 原因是松手后需要自动退出 burst，而不能影响遥控器本身的发射命令。
+static uint8_t mouse_left_burst_active = 0;
+// 鼠标左键按下时间戳，作用是计算长按阈值；
+// 原因是任务存在调度抖动，用绝对时间比按周期计数更稳。
+static uint32_t mouse_left_press_start_ms = 0;
+
+/**
+ * @brief 将 pitch 目标统一限幅到机构安全范围
+ *
+ */
+static void LimitGimbalPitchTarget()
+{
+    // 这里统一约束 pitch 目标，作用是让遥控器和鼠标共用同一份限位；
+    // 原因是两个输入源都会改写 pitch，分散限位容易出现一边忘记限位导致撞机构。
+    if (gimbal_cmd_send.pitch > PITCH_MAX_ANGLE) {
+        gimbal_cmd_send.pitch = PITCH_MAX_ANGLE;
+    } else if (gimbal_cmd_send.pitch < PITCH_MIN_ANGLE) {
+        gimbal_cmd_send.pitch = PITCH_MIN_ANGLE;
+    }
+}
+
+/**
+ * @brief 清空键鼠射击锁存状态
+ *
+ */
+static void ResetMouseFireState()
+{
+    // 这里把键鼠开火状态全部清零，作用是急停后不残留摩擦轮和连发锁存；
+    // 原因是键鼠改成并行输入后，若不清状态，恢复出急停时会把上一次鼠标意图带回来。
+    mouse_fire_friction_latched = 0;
+    mouse_left_last = 0;
+    mouse_left_burst_active = 0;
+    mouse_left_press_start_ms = 0;
+}
+
+/**
+ * @brief 每周期先把控制量恢复到安全基线
+ *
+ */
+static void PrepareControlCommandBase()
+{
+    // 这里先清理瞬态控制量，作用是阻断上一拍残留的速度和发射命令；
+    // 原因是键鼠接入后同一份指令会被多源叠加，若不先回到安全基线会出现“松手后还在沿用旧命令”。
+    chassis_cmd_send.vx = 0.0f;
+    chassis_cmd_send.vy = 0.0f;
+    chassis_cmd_send.wz = 0.0f;
+    chassis_cmd_send.gimbal_cmd_wz = 0.0f;
+    chassis_cmd_send.calibrate_imu = 0;
+    chassis_cmd_send.chassis_mode = CHASSIS_ZERO_FORCE;
+
+    gimbal_cmd_send.gimbal_mode = GIMBAL_ZERO_FORCE;
+
+    shoot_cmd_send.shoot_mode = SHOOT_OFF;
+    shoot_cmd_send.load_mode = LOAD_STOP;
+    shoot_cmd_send.friction_mode = FRICTION_OFF;
+    shoot_cmd_send.shoot_rate = 0.0f;
+
+    auto_aim_state = AUTO_AIM_IDLE;
+}
 
 void RobotCMDInit()
 {
@@ -349,14 +422,7 @@ static void RemoteControlSet()
                                   (1.0f - YAW_DRIFT_LOCK_COEF) * gimbal_fetch_data.gimbal_imu_data.YawTotalAngle;
         }
 
-        // ==================== [新增] 软件限幅逻辑 ====================
-
-        // 1. Pitch 轴限幅 (最重要，防止撞击)
-        if (gimbal_cmd_send.pitch > PITCH_MAX_ANGLE) {
-            gimbal_cmd_send.pitch = PITCH_MAX_ANGLE;
-        } else if (gimbal_cmd_send.pitch < PITCH_MIN_ANGLE) {
-            gimbal_cmd_send.pitch = PITCH_MIN_ANGLE;
-        }
+        LimitGimbalPitchTarget();
     }
 
     // ==========================================
@@ -517,86 +583,69 @@ static void RemoteControlSet()
  */
 static void MouseKeySet()
 {
-    // 如果觉得键盘太快，可以乘以 0.5f (半速)
-    float key_scale = 1.0f;
+    int8_t keyboard_vx = (int8_t)rc_data[TEMP].key[KEY_PRESS].w - (int8_t)rc_data[TEMP].key[KEY_PRESS].s;
+    int8_t keyboard_vy = (int8_t)rc_data[TEMP].key[KEY_PRESS].d - (int8_t)rc_data[TEMP].key[KEY_PRESS].a;
+    uint8_t mouse_left_pressed = rc_data[TEMP].mouse.press_l;
+    uint32_t now_ms = DWT_GetTimeline_ms();
 
-    // W-S 控制前后，A-D 控制左右
-    chassis_cmd_send.vx = (rc_data[TEMP].key[KEY_PRESS].w - rc_data[TEMP].key[KEY_PRESS].s) * key_scale;
-    chassis_cmd_send.vy = (rc_data[TEMP].key[KEY_PRESS].a - rc_data[TEMP].key[KEY_PRESS].d) * key_scale;
+    // 遇到急停或零力模式时直接清空键鼠锁存，作用是确保任何鼠标残留命令都不会越过急停；
+    // 原因是键鼠现在和遥控器并行输入，停机优先级必须最高。
+    if (robot_state == ROBOT_STOP ||
+        gimbal_cmd_send.gimbal_mode == GIMBAL_ZERO_FORCE ||
+        chassis_cmd_send.chassis_mode == CHASSIS_ZERO_FORCE) {
+        ResetMouseFireState();
+        return;
+    }
 
-    gimbal_cmd_send.yaw += (float)rc_data[TEMP].mouse.x / 660 * 10; // 系数待测
-    gimbal_cmd_send.pitch += (float)rc_data[TEMP].mouse.y / 660 * 10;
+    // 键盘只覆盖自己按下的轴，作用是让 WSAD 和遥控器能够同时控制不同自由度；
+    // 原因是用户明确要求键鼠和遥控器并行，而不是左拨杆切独占模式。
+    if (keyboard_vx != 0) {
+        chassis_cmd_send.vx = (float)keyboard_vx * MAX_CHASSIS_VX_SPEED;
+    }
+    if (keyboard_vy != 0) {
+        chassis_cmd_send.vy = (float)keyboard_vy * MAX_CHASSIS_VY_SPEED;
+    }
 
-    switch (rc_data[TEMP].key_count[KEY_PRESS][Key_Z] % 3) // Z键设置弹速
-    {
-    case 0:
-        shoot_cmd_send.bullet_speed = 15;
-        break;
-    case 1:
-        shoot_cmd_send.bullet_speed = 18;
-        break;
-    default:
-        shoot_cmd_send.bullet_speed = 30;
-        break;
-    }
-    switch (rc_data[TEMP].key_count[KEY_PRESS][Key_E] % 4) // E键设置发射模式
-    {
-    case 0:
-        shoot_cmd_send.load_mode = LOAD_STOP;
-        break;
-    case 1:
-        shoot_cmd_send.load_mode = LOAD_1_BULLET;
-        break;
-    case 2:
-        shoot_cmd_send.load_mode = LOAD_3_BULLET;
-        break;
-    default:
-        shoot_cmd_send.load_mode = LOAD_BURSTFIRE;
-        break;
-    }
-    switch (rc_data[TEMP].key_count[KEY_PRESS][Key_R] % 2) // R键开关弹舱
-    {
-    case 0:
-        shoot_cmd_send.lid_mode = LID_OPEN;
-        break;
-    default:
-        shoot_cmd_send.lid_mode = LID_CLOSE;
-        break;
-    }
-    switch (rc_data[TEMP].key_count[KEY_PRESS][Key_F] % 2) // F键开关摩擦轮
-    {
-    case 0:
-        shoot_cmd_send.friction_mode = FRICTION_OFF;
-        break;
-    default:
+    // 鼠标在遥控器目标上继续叠加云台增量，作用是保留遥控微调同时给电脑端快速修正；
+    // 原因是旧工程的键鼠本来就是通过 DBUS 叠加进来，本轮需要恢复这种混控手感。
+    gimbal_cmd_send.yaw -= (float)rc_data[TEMP].mouse.x * MOUSE_YAW_SENSITIVITY_DEG;
+    gimbal_cmd_send.pitch += (float)rc_data[TEMP].mouse.y * MOUSE_PITCH_SENSITIVITY_DEG;
+    LimitGimbalPitchTarget();
+
+    // 鼠标首次请求开火时锁存摩擦轮开启，作用是让后续短按/长按都不需要额外按键预热；
+    // 原因是你本轮只要求接入 mouse.press_l，不能再依赖 F/Q/E 之类的旧调试键位。
+    if (mouse_left_pressed && !mouse_left_last) {
+        mouse_fire_friction_latched = 1;
+        mouse_left_burst_active = 0;
+        mouse_left_press_start_ms = now_ms;
+        shoot_cmd_send.shoot_mode = SHOOT_ON;
         shoot_cmd_send.friction_mode = FRICTION_ON;
-        break;
+        shoot_cmd_send.bullet_speed = BIG_AMU_12;
+        shoot_cmd_send.load_mode = LOAD_1_BULLET;
+    } else if (mouse_left_pressed && ((now_ms - mouse_left_press_start_ms) >= LOAD_TRIGGER_DELAY)) {
+        mouse_left_burst_active = 1;
+    } else if (!mouse_left_pressed) {
+        mouse_left_burst_active = 0;
     }
-    switch (rc_data[TEMP].key_count[KEY_PRESS][Key_C] % 4) // C键设置底盘速度
-    {
-    case 0:
-        chassis_cmd_send.chassis_speed_buff = 40;
-        break;
-    case 1:
-        chassis_cmd_send.chassis_speed_buff = 60;
-        break;
-    case 2:
-        chassis_cmd_send.chassis_speed_buff = 80;
-        break;
-    default:
-        chassis_cmd_send.chassis_speed_buff = 100;
-        break;
+
+    // 只要键鼠曾经请求过开火，就持续维持摩擦轮开启，作用是让鼠标短按之后可立即继续点射或转连发；
+    // 原因是当前版本没有显式“关闭键鼠摩擦轮”按键，掉电/急停前应保持 ready 状态。
+    if (mouse_fire_friction_latched) {
+        shoot_cmd_send.shoot_mode = SHOOT_ON;
+        shoot_cmd_send.friction_mode = FRICTION_ON;
+        if (shoot_cmd_send.bullet_speed == BULLET_SPEED_NONE) {
+            shoot_cmd_send.bullet_speed = BIG_AMU_12;
+        }
     }
-    switch (rc_data[TEMP].key[KEY_PRESS].shift) // 待添加 按shift允许超功率 消耗缓冲能量
-    {
-    case 1:
 
-        break;
-
-    default:
-
-        break;
+    // 长按进入连发，作用是让 mouse.press_l 兼顾点射和持续火力；
+    // 原因是 `shoot` 应用对 `LOAD_BURSTFIRE` 是电平语义，必须在长按期间持续下发。
+    if (mouse_left_burst_active) {
+        shoot_cmd_send.load_mode = LOAD_BURSTFIRE;
+        shoot_cmd_send.shoot_rate = MOUSE_BURST_FIRE_RATE;
     }
+
+    mouse_left_last = mouse_left_pressed;
 }
 
 /* 机器人核心控制任务,200Hz频率运行(必须高于视觉发送频率) */
@@ -613,13 +662,15 @@ void RobotCMDTask()
     SubGetMessage(shoot_feed_sub, &shoot_fetch_data);
     SubGetMessage(gimbal_feed_sub, &gimbal_fetch_data);
 
+    // 每拍先清理一次瞬态控制量，作用是让后续遥控器和键鼠都从同一安全基线开始叠加；
+    // 原因是当前 `robot_cmd` 已经不是互斥控制源，直接沿用上拍结果会产生残留指令。
+    PrepareControlCommandBase();
     // 根据gimbal的反馈值计算云台和底盘正方向的夹角,不需要传参,通过static私有变量完成
     CalcOffsetAngle();
-    // 根据遥控器左侧开关,确定当前使用的控制模式为遥控器调试还是键鼠
-    // if (switch_is_down(rc_data[TEMP].rc.switch_left)) // 遥控器左侧开关状态为[下],遥控器控制
+    // 先执行遥控器基础映射，再叠加键鼠输入，作用是实现“同周期混控”；
+    // 原因是用户要求键盘鼠标和遥控器能够同时控制，而不是走左拨杆互斥切换。
     RemoteControlSet();
-    // else if (switch_is_up(rc_data[TEMP].rc.switch_left)) // 遥控器左侧开关状态为[上],键盘控制
-    //     MouseKeySet();
+    MouseKeySet();
 
     // EmergencyHandler(); // 处理模块离线和遥控器急停等紧急情况
 
@@ -627,12 +678,12 @@ void RobotCMDTask()
     // 注: 四元数和姿态由 ins_task.c 的 INS_Task() 以 1kHz 频率直接设置
     //     (VisionSetQuaternion + VisionSetAltitude), 使用 EKF 解算的真实四元数
     // 此处只需补充机器人状态并触发发送
-    VisionSetStatus(
-        (uint8_t)gimbal_cmd_send.gimbal_mode, // 当前模式
-        (float)shoot_cmd_send.bullet_speed, // 弹速
-        shoot_fetch_data.fire_count // 累计发弹数
-    );
-    VisionSend(); // 通过 USB VCP 发送给上位机
+    // VisionSetStatus(
+    //     (uint8_t)gimbal_cmd_send.gimbal_mode, // 当前模式
+    //     (float)shoot_cmd_send.bullet_speed, // 弹速
+    //     shoot_fetch_data.fire_count // 累计发弹数
+    // );
+    // VisionSend(); // 通过 USB VCP 发送给上位机
 
     // 推送消息,双板通信,视觉通信等
     // 其他应用所需的控制数据在remotecontrolsetmode和mousekeysetmode中完成设置
