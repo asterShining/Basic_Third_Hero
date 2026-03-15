@@ -64,6 +64,7 @@ typedef struct
     CANInstance *motor_can_instace;
     DaemonInstance *motor_daemon;
     uint32_t lost_cnt;
+    uint8_t enable_cmd_cnt; // [新增] 用于保活指令降频计数
 } DMMotorInstance;
 
 typedef enum {

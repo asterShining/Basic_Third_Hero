@@ -9,6 +9,15 @@
 #include "bsp_log.h"
 #include <math.h>
 
+// What: 固定 DM 控制任务周期为 5ms；Why: 在当前 1kHz RTOS tick 下把主控制发送频率压到 200Hz，从而连带把反馈触发频率降到约 200Hz，降低底盘 CAN 负载
+#define DM_CONTROL_TASK_PERIOD_MS 5U
+// What: 固定低扭矩判定阈值为 1.0Nm；Why: 复用现有软失能保活逻辑，同时把阈值集中管理，避免后续改频率时漏改分支常量
+#define DM_ENABLE_KEEPALIVE_TORQUE_THRESHOLD 1.0f
+// What: 低扭矩场景下每 25ms 发送一次模式保活帧；Why: 主链路降到 200Hz 后继续优先降低总线负载，不额外把保活帧抬回 200Hz
+#define DM_ENABLE_KEEPALIVE_PERIOD_MS 25U
+// What: 由周期常量推导保活计数门限；Why: 保证任务周期再调整时，保活节拍会随之联动，避免再次写死循环次数
+#define DM_ENABLE_KEEPALIVE_CYCLE_COUNT (DM_ENABLE_KEEPALIVE_PERIOD_MS / DM_CONTROL_TASK_PERIOD_MS)
+
 static uint8_t idx;
 static DMMotorInstance *dm_motor_instance[DM_MOTOR_CNT];
 static osThreadId dm_task_handle[DM_MOTOR_CNT];
@@ -143,6 +152,7 @@ DMMotorInstance *DMMotorInit(Motor_Init_Config_s *config)
     DMMotorEnable(motor);
     DMMotorSetMode(DM_CMD_MOTOR_MODE, motor);
     DWT_Delay(0.1);
+    // Do not recalibrate on boot: this project trusts the DM driver's saved hardware zero.
     // DMMotorCaliEncoder(motor);
     DWT_Delay(0.1);
     dm_motor_instance[idx++] = motor;
@@ -184,6 +194,20 @@ void DMMotorTask(void const *argument)
     // uint16_t tmp;
     DMMotor_Send_s motor_send_mailbox;
     while (1) {
+        // ================= [新增] 自动监测与快速复位逻辑 =================
+        if (motor->stop_flag == MOTOR_ENALBED) {
+            // What: 在低扭矩阶段继续发送模式保活帧；Why: DM 可能在轻载时进入软失能，保活帧用于维持在线但不追求更高总线占用
+            if (fabs(motor->measure.torque) < DM_ENABLE_KEEPALIVE_TORQUE_THRESHOLD) {
+                motor->enable_cmd_cnt++;
+                if (motor->enable_cmd_cnt >= DM_ENABLE_KEEPALIVE_CYCLE_COUNT) {
+                    DMMotorSetMode(DM_CMD_MOTOR_MODE, motor);
+                    motor->enable_cmd_cnt = 0;
+                }
+            } else {
+                motor->enable_cmd_cnt = 0;
+            }
+        }
+        // ===============================================================
         // ================= 1. 反馈源选择与处理 =================
         // 角度反馈
         if (setting->angle_feedback_source == OTHER_FEED && motor->other_angle_feedback_ptr)
@@ -301,9 +325,10 @@ void DMMotorTask(void const *argument)
         motor->motor_can_instace->tx_buff[6] = (uint8_t)(((motor_send_mailbox.Kd & 0xF) << 4) | (motor_send_mailbox.torque_des >> 8));
         motor->motor_can_instace->tx_buff[7] = (uint8_t)(motor_send_mailbox.torque_des);
 
-        CANTransmit(motor->motor_can_instace, 2);
+        CANTransmit(motor->motor_can_instace, 4);
 
-        osDelay(2); // 500Hz 控制频率
+        // What: 控制任务按 5ms 固定节拍运行；Why: 主控制帧和由其触发的电机反馈都需要统一降到约 200Hz
+        osDelay(DM_CONTROL_TASK_PERIOD_MS);
     }
 }
 void DMMotorControlInit()

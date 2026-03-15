@@ -30,6 +30,10 @@
 #define RC_TRIGGER_TH 500
 // Yaw 死区漂移低通锁定系数: 0.90~0.98，值越小锁定越快，0.95 约 0.5s 平滑锁定
 #define YAW_DRIFT_LOCK_COEF 0.95f
+#define BURST_FIRE_RATE 8.0f // What: 定义连发默认射频；Why: 保持原有发射体验，不把本轮改动扩散到射击参数
+#define FRONT_TRACK_SPEED_REF_DEFAULT 40.0f // What: 定义前履带默认速度目标；Why: 先打通前履带速度闭环链路，后续再按实车调参
+#define AUX_DIAL_INPUT_MAX 660.0f // What: 定义拨轮归一化满量程；Why: 与DBUS量程保持一致，双板两侧都能统一解释输入
+#define AUX_DIAL_INPUT_DEADZONE 50.0f // What: 定义抬升拨轮死区；Why: 加大中位防抖范围，避免拨轮机械抖动或手指轻碰时误触发抬升
 
 /* cmd应用包含的模块实例指针和交互信息存储*/
 #ifdef GIMBAL_BOARD // 对双板的兼容,条件编译
@@ -37,6 +41,9 @@
 // What: 编译期校验底盘反馈结构体尺寸；Why: 防止新增键鼠字段后悄悄超过单帧CAN通信上限
 _Static_assert(sizeof(Chassis_Upload_Data_s) <= CAN_COMM_MAX_BUFFSIZE,
                "Chassis_Upload_Data_s exceeds CAN_COMM_MAX_BUFFSIZE");
+// What: 编译期校验底盘下发结构体尺寸；Why: 新增履带/抬升字段后必须继续保证单帧CAN通信能装下
+_Static_assert(sizeof(Chassis_Ctrl_Cmd_s) <= CAN_COMM_MAX_BUFFSIZE,
+               "Chassis_Ctrl_Cmd_s exceeds CAN_COMM_MAX_BUFFSIZE");
 static CANCommInstance *cmd_can_comm; // 双板通信
 
 #endif
@@ -71,9 +78,14 @@ BMI088Instance *bmi088_test; // 云台IMU
 BMI088_Data_t bmi088_data;
 // 定义一个静态变量来保存上一次的开关状态，初始化为下（急停/停止状态）
 static uint16_t last_switch_right = RC_SW_DOWN;
+static uint16_t last_switch_left = RC_SW_DOWN; // What: 保存左拨杆上一帧状态；Why: 只在中位切档瞬间触发功能翻转，避免保持档位时重复触发
 // 记录当前用于底盘跟随的 Yaw 对齐基准角。
 // 当前设计默认信任 DM 已保存的硬件零点，因此开机直接以 0 度作为软件对齐基准。
 static float yaw_align_offset_deg = 0.0f;
+static uint8_t friction_switch_state = 0; // What: 保存摩擦轮开关状态；Why: 使用边沿触发实现“一拨一切换”，避免保持上档时来回翻转
+static uint8_t fire_mode_state = 0; // What: 保存当前发射模式；Why: 复用现有单发/二连发/连发状态机，不在本轮改动射击模式设计
+static uint8_t front_track_switch_state = 0; // What: 保存前履带开关状态；Why: 在摩擦轮关闭时通过左拨杆下档边沿切换履带
+static uint8_t lift_mode_switch_state = 0; // What: 保存抬升模式开关状态；Why: 让抬升进入/退出与拨轮调高解耦，退出后仍保持当前位置
 
 // --- 新增的静态变量，用于长按计时 ---
 static uint32_t inner_eight_cnt = 0; // 内八计时器
@@ -82,6 +94,43 @@ static uint32_t outer_eight_cnt = 0; // 外八计时器
 static uint8_t cali_triggered = 0; // 触发状态：0-无，1-内八触发，2-外八触发
 // [新增] 自瞄状态变量
 static AutoAim_State_e auto_aim_state = AUTO_AIM_IDLE;
+
+/**
+ * @brief 将遥控器拨轮原始值归一化为抬升控制输入。
+ * @param raw_dial 遥控器原始拨轮值，量程沿用 DBUS 默认定义。
+ * @return 归一化后的抬升输入，范围为 [-1.0f, 1.0f]，死区内返回 0.0f。
+ * @note What: 统一把“拨轮上拨”转换为正向抬升输入，并在云台板先完成死区和限幅处理。
+ * @note Why: 这样底盘板只需要消费稳定的标准化指令，能避免中位抖动持续积分，也能避免双板两侧各自解释符号导致方向不一致。
+ */
+static float NormalizeLiftDialInput(int16_t raw_dial)
+{
+    float normalized = -((float)raw_dial) / AUX_DIAL_INPUT_MAX;
+    float deadzone = AUX_DIAL_INPUT_DEADZONE / AUX_DIAL_INPUT_MAX;
+
+    // What: 将拨轮“上拨”映射为正方向并做死区/限幅；Why: 统一抬升手感，避免中位抖动在底盘侧持续积累高度目标
+    if (normalized > -deadzone && normalized < deadzone)
+        return 0.0f;
+
+    LIMIT_MIN_MAX(normalized, -1.0f, 1.0f);
+    return normalized;
+}
+
+/**
+ * @brief 复位底盘辅助机构的模式状态和下发命令。
+ * @return 无。
+ * @note What: 一次性清空前履带开关、抬升模式以及对应的速度/拨轮指令，恢复到底盘辅助机构的安全缺省状态。
+ * @note Why: 急停、掉模式或摩擦轮逻辑切换后若继续保留旧命令，底盘板会沿用上一次状态执行，存在恢复后误动作风险，因此这里集中收口复位。
+ */
+static void ResetChassisAuxState(void)
+{
+    // What: 同时复位履带与抬升状态以及下发值；Why: 急停或安全关闭时必须清空辅助机构命令，防止恢复后沿用旧状态
+    front_track_switch_state = 0u;
+    lift_mode_switch_state = 0u;
+    chassis_cmd_send.front_track_mode = FRONT_TRACK_OFF;
+    chassis_cmd_send.lift_mode = LIFT_OFF;
+    chassis_cmd_send.front_track_speed_ref = 0.0f;
+    chassis_cmd_send.lift_dial_input = 0.0f;
+}
 
 void RobotCMDInit()
 {
@@ -203,6 +252,8 @@ static void EmergencyHandler()
     shoot_cmd_send.friction_mode = FRICTION_OFF;
     shoot_cmd_send.load_mode = LOAD_STOP;
     shoot_cmd_send.friction_mode = FRICTION_OFF;
+    friction_switch_state = 0u;
+    ResetChassisAuxState();
     // }
     // 遥控器右侧开关为[上],恢复正常运行
     // if (switch_is_up(rc_data[TEMP].rc.switch_right)) {
@@ -221,8 +272,16 @@ static void RemoteControlSet()
     // 1. 获取当前开关状态
     uint16_t current_switch_right = rc_data[TEMP].rc.switch_right;
     uint16_t current_switch_left = rc_data[TEMP].rc.switch_left;
+    uint8_t left_mid_to_up = switch_is_up(current_switch_left) && switch_is_mid(last_switch_left);
+    uint8_t left_mid_to_down = switch_is_down(current_switch_left) && switch_is_mid(last_switch_left);
 
     float current_real_pitch = gimbal_fetch_data.gimbal_imu_data.Pitch; // [轴互换后] Pitch 字段即物理 Pitch
+
+    // What: 每个控制周期先清空辅助执行机构瞬时输入；Why: 防止模式关闭后底盘侧继续消费上一帧的履带速度和拨轮增量
+    chassis_cmd_send.front_track_mode = front_track_switch_state ? FRONT_TRACK_ON : FRONT_TRACK_OFF;
+    chassis_cmd_send.lift_mode = LIFT_OFF;
+    chassis_cmd_send.front_track_speed_ref = 0.0f;
+    chassis_cmd_send.lift_dial_input = 0.0f;
 
     // --- 状态机逻辑 ---
 
@@ -420,41 +479,34 @@ static void RemoteControlSet()
         };
     }
 
-    static uint8_t friction_switch_state = 0; // 0-关, 1-开
-    static uint16_t last_switch_left = RC_SW_DOWN;
-
-    // 【修改点1】定义默认发射模式
-    // 0:单发, 1:二连发, 2:连发
-    // 您可以在这里修改初始值，或者通过键盘 Key_E 来修改它
-    static uint8_t fire_mode_state = 0;
-
-// [新增] 连发射频
-#define BURST_FIRE_RATE 8.0f // 连发每秒8发，可自行调整
-
     // ==============================================================
-    // [新增] 安全逻辑: 仅在非急停状态下允许开启摩擦轮和射击
+    // [新增] 安全逻辑: 仅在非急停状态下允许开启摩擦轮、履带和抬升
     // ==============================================================
     if (!switch_is_down(current_switch_right)) {
-        // ==============================================================
-        // 逻辑 A: 摩擦轮开关控制 (左拨杆 中 -> 上)
-        // ==============================================================
-        // 检测从【中】拨到【上】的瞬间 (上升沿)
-        if (switch_is_up(current_switch_left) && switch_is_mid(last_switch_left)) {
-            // 无论当前是什么模式，直接取反状态
-            friction_switch_state = !friction_switch_state;
-
-            // 可选：为了安全，每次关闭摩擦轮时，重置发射模式为单发
-            /*
-            if (friction_switch_state == 0) {
-                fire_mode_state = 0;
+        // What: 左拨杆中位上翻时先判断当前功能域；Why: 摩擦轮与履带/抬升共用同一拨杆，必须先按状态决定这次边沿属于哪个系统
+        if (left_mid_to_up) {
+            if (friction_switch_state != 0u) {
+                friction_switch_state = 0u;
+            } else if (front_track_switch_state != 0u) {
+                lift_mode_switch_state = !lift_mode_switch_state;
+            } else {
+                friction_switch_state = 1u;
             }
-            */
         }
 
-        // ==============================================================
-        // 逻辑 B: 执行发射逻辑
-        // ==============================================================
-        if (friction_switch_state == 1) {
+        // What: 仅在摩擦轮关闭时响应中位下翻履带切换；Why: 保留原有“摩擦轮开后下档开火”的交互，不让履带逻辑抢占发射指令
+        if (friction_switch_state == 0u && left_mid_to_down) {
+            front_track_switch_state = !front_track_switch_state;
+            if (front_track_switch_state == 0u)
+                lift_mode_switch_state = 0u;
+        }
+
+        // What: 履带关闭时强制退出抬升模式；Why: 抬升是履带工作态下的附属动作，履带停用后继续保留抬升态会让交互失真
+        if (front_track_switch_state == 0u)
+            lift_mode_switch_state = 0u;
+
+        // What: 维持原有发射逻辑，仅在摩擦轮开启时执行；Why: 新增履带/抬升后仍需保持原有射击行为不回归
+        if (friction_switch_state == 1u) {
             // 1. 开启摩擦轮
             shoot_cmd_send.friction_mode = FRICTION_ON;
             shoot_cmd_send.bullet_speed = BIG_AMU_12;
@@ -501,12 +553,23 @@ static void RemoteControlSet()
             shoot_cmd_send.shoot_rate = 0.0f;
         }
 
+        // What: 独立下发履带与抬升控制命令；Why: 让辅助机构在摩擦轮状态变化后仍可保持自身开关与目标，不互相覆盖
+        chassis_cmd_send.front_track_mode = front_track_switch_state ? FRONT_TRACK_ON : FRONT_TRACK_OFF;
+        if (front_track_switch_state != 0u) {
+            float lift_dial_input = NormalizeLiftDialInput(rc_data[TEMP].rc.dial);
+
+            chassis_cmd_send.front_track_speed_ref = FRONT_TRACK_SPEED_REF_DEFAULT;
+            chassis_cmd_send.lift_dial_input = lift_dial_input;
+            chassis_cmd_send.lift_mode = (lift_mode_switch_state == 0u) ? LIFT_OFF : (lift_dial_input == 0.0f ? LIFT_HOLD : LIFT_ADJUST);
+        }
+
     } else {
-        // [新增] 急停状态下的强制关闭
-        friction_switch_state = 0; // 强制关闭摩擦轮开关状态
+        // What: 急停时强制关闭全部边沿开关状态；Why: 避免解除急停后立即沿用旧的摩擦轮/履带/抬升状态继续动作
+        friction_switch_state = 0u;
         shoot_cmd_send.friction_mode = FRICTION_OFF;
         shoot_cmd_send.load_mode = LOAD_STOP;
         shoot_cmd_send.shoot_rate = 0.0f;
+        ResetChassisAuxState();
     }
 
     // 更新历史状态

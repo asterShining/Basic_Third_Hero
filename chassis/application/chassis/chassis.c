@@ -16,6 +16,7 @@
 #include "motor_def.h"
 #include "robot_def.h"
 #include "power_control.h"
+#include "dmmotor.h"
 #ifdef USE_SUPER_CAP
 #include "super_cap.h" // [条件编译] 仅在启用超电时包含此头文件
 #endif
@@ -34,9 +35,13 @@
 #define HALF_WHEEL_BASE (WHEEL_BASE / 2.0f) // 半轴距
 #define HALF_TRACK_WIDTH (TRACK_WIDTH / 2.0f) // 半轮距
 #define PERIMETER_WHEEL (RADIUS_WHEEL * 2 * PI) // 轮子周长
-#define DEFAULT_TEST_POWER 60.0f // 调试用的基础功率
+#define DEFAULT_TEST_POWER 300.0f // 调试用的基础功率
 #define REFEREE_KEYMOUSE_TIMEOUT_MS 100u // What: 定义键鼠超时窗口；Why: 100ms内无新帧就清零，避免粘键
 #define REFEREE_MOUSE_DELTA_LIMIT 660 // What: 限制单帧鼠标增量；Why: 与旧DBUS鼠标尺度对齐，防止重连时大跳变
+#define LIFT_DIAL_MAX_SPEED_DPS 65.0f // What: 定义抬升拨轮映射后的最大调节角速度；Why: 提高拨轮调高响应速度，让抬升更跟手，但仍保持位置环可控范围
+#define LIFT_RELATIVE_MIN_ANGLE -20.0f // What: 定义相对进入点的最小抬升角；Why: 给机构保留回落空间，同时避免误操作撞下限
+#define LIFT_RELATIVE_MAX_ANGLE 80.0f // What: 定义相对进入点的最大抬升角；Why: 先用保守软件限位保护机构，后续再按实车行程放宽
+#define CHASSIS_TASK_DT_FALLBACK 0.005f // What: 定义底盘任务积分后备周期；Why: DWT异常时仍按200Hz近似积分，避免抬升目标突变
 
 typedef struct
 {
@@ -53,6 +58,9 @@ typedef struct
 // What: 编译期校验底盘上传结构体尺寸；Why: 防止新增键鼠字段后悄悄超过单帧CAN通信上限
 _Static_assert(sizeof(Chassis_Upload_Data_s) <= CAN_COMM_MAX_BUFFSIZE,
                "Chassis_Upload_Data_s exceeds CAN_COMM_MAX_BUFFSIZE");
+// What: 编译期校验底盘接收结构体尺寸；Why: 新增履带/抬升控制字段后仍要保证单帧CAN通信可以完整传输
+_Static_assert(sizeof(Chassis_Ctrl_Cmd_s) <= CAN_COMM_MAX_BUFFSIZE,
+               "Chassis_Ctrl_Cmd_s exceeds CAN_COMM_MAX_BUFFSIZE");
 static CANCommInstance *chasiss_can_comm; // 双板通信CAN comm
 attitude_t *Chassis_IMU_data;
 #endif // CHASSIS_BOARD
@@ -70,6 +78,8 @@ static Referee_Interactive_info_t ui_data; // UI数据，将底盘中的数据�
 static SuperCapInstance *cap = { NULL }; // [条件编译] 超级电容实例指针
 #endif
 static DJIMotorInstance *motor_lf, *motor_rf, *motor_lb, *motor_rb; // left right forward back
+static DMMotorInstance *front_track_motor_left, *front_track_motor_right; // What: 保存前履带DM实例；Why: 底盘任务需要直接下发速度闭环参考并处理启停
+static DJIMotorInstance *lift_motor_left, *lift_motor_right; // What: 保存后抬升3508实例；Why: 底盘任务需要基于真实角度执行双环位置控制
 
 // 方案二，陀螺仪针对全麦纠偏PID
 static PIDInstance yaw_lock_pid; // 航向锁定专用PID
@@ -91,6 +101,11 @@ static float real_vx = 0.0f; // 真实前进速度 m/s
 static float real_vy = 0.0f; // 真实横移速度 m/s
 static float real_wz = 0.0f; // 真实旋转速度 deg/s
 static Referee_KeyMouse_Sync_s referee_keymouse_sync; // What: 保存裁判键鼠增量转换状态；Why: 将绝对坐标安全适配成增量输入
+static float lift_target_angle = 0.0f; // What: 保存抬升机构当前机械目标角；Why: 退出抬升模式后仍需保持最后高度而不是失控回落
+static float lift_entry_angle = 0.0f; // What: 保存本次进入抬升模式时的机械零位；Why: 软件限位以进入点为参考，避免依赖固定机械绝对零点
+static uint8_t lift_ref_ready = 0u; // What: 标记抬升位置环是否已经建立参考；Why: 等待首帧编码器反馈后再切角度环，避免上电乱冲
+static lift_mode_e last_lift_mode = LIFT_OFF; // What: 保存上一帧抬升模式；Why: 通过边沿检测在进入抬升模式时重建当前零位
+static uint32_t lift_control_dt_cnt = 0u; // What: 保存抬升积分时间戳；Why: 用DWT获取真实任务周期，避免拨轮调高受调度抖动影响
 
 // [!code ++]
 // ==========================================
@@ -231,6 +246,180 @@ static void UpdateRefereeKeyMouseUpload(void)
     }
 }
 
+/**
+ * @brief 读取单个抬升电机的统一机械角度。
+ * @param motor 目标抬升电机实例指针。
+ * @return 已按安装方向折算后的机械角度，单位与 `total_angle` 保持一致。
+ * @note What: 把左右两台安装方向不同的 3508 编码器角度统一换算到同一机械正方向。
+ * @note Why: 双电机抬升必须共享同一个位置目标，若直接使用各自原始反馈，反装电机会把同一高度解释成相反方向，导致位置环相互对冲。
+ */
+static float GetLiftMotorMechanicalAngle(const DJIMotorInstance *motor)
+{
+    float mechanical_angle = motor->measure.total_angle;
+
+    // What: 将带反向安装的3508角度折算回统一机械正方向；Why: 左右抬升电机必须共享同一个目标角，不能直接使用各自原始编码器符号
+    if (motor->motor_settings.motor_reverse_flag == MOTOR_DIRECTION_REVERSE)
+        mechanical_angle = -mechanical_angle;
+
+    return mechanical_angle;
+}
+
+/**
+ * @brief 判断抬升电机是否已经收到可信的编码器反馈。
+ * @return `1u` 表示至少收到过一侧有效反馈，`0u` 表示当前仍不能建立位置参考。
+ * @note What: 通过 `ecd` 和 `total_round` 是否脱离上电初值来判断 3508 反馈是否就绪。
+ * @note Why: 位置外环依赖真实当前位置，若在首帧反馈到来前直接闭环，会把默认零值误当成机械零位，造成上电瞬时回拉。
+ */
+static uint8_t IsLiftFeedbackReady(void)
+{
+    if (lift_motor_left == NULL || lift_motor_right == NULL)
+        return 0u;
+
+    // What: 用编码器首帧反馈作为位置环启用条件；Why: 3508上电瞬间total_angle默认是0，过早切位置环会把抬升误拉回假零点
+    return (uint8_t)(lift_motor_left->measure.ecd != 0u || lift_motor_right->measure.ecd != 0u ||
+                     lift_motor_left->measure.total_round != 0 || lift_motor_right->measure.total_round != 0);
+}
+
+/**
+ * @brief 计算双抬升电机当前的平均机械角度。
+ * @return 左右抬升电机在统一方向下的平均角度。
+ * @note What: 对两台抬升电机的机械角进行平均，得到机构整体当前高度的代表值。
+ * @note Why: 双边联动机构允许存在少量装配误差，直接取平均值比只信任单侧反馈更稳健，也能减小左右编码器微小偏差对目标重建的影响。
+ */
+static float GetLiftAverageMechanicalAngle(void)
+{
+    return 0.5f * (GetLiftMotorMechanicalAngle(lift_motor_left) + GetLiftMotorMechanicalAngle(lift_motor_right));
+}
+
+/**
+ * @brief 将抬升目标角与模式进入参考角同步到当前位置。
+ * @return 无。
+ * @note What: 同时刷新 `lift_target_angle` 和 `lift_entry_angle`，把当前位置作为当前 session 的控制起点。
+ * @note Why: 抬升限位采用“相对本次进入模式的零位”策略，进入模式、急停恢复或失能后都需要重建参考，否则旧目标会跨 session 延续并引发突跳。
+ */
+static void SyncLiftTargetToCurrent(void)
+{
+    lift_target_angle = GetLiftAverageMechanicalAngle();
+    lift_entry_angle = lift_target_angle;
+}
+
+/**
+ * @brief 在抬升反馈就绪后建立位置环参考并切换到角度外环。
+ * @return 无。
+ * @note What: 检测到首帧可信反馈后，初始化抬升目标角、记录当前进入参考角，并把两台 3508 的外环切到角度模式。
+ * @note Why: 抬升初始化阶段必须先静止等待真实编码器值，等参考可靠后再闭位置环，才能避免上电时因假零点造成的突发回零动作。
+ */
+static void EnsureLiftReferenceReady(void)
+{
+    if (lift_ref_ready != 0u || IsLiftFeedbackReady() == 0u)
+        return;
+
+    // What: 收到首帧有效反馈后再切到角度外环；Why: 这样抬升上电先静止，等当前位置可信后再进入位置保持
+    lift_ref_ready = 1u;
+    SyncLiftTargetToCurrent();
+    DJIMotorOuterLoop(lift_motor_left, ANGLE_LOOP);
+    DJIMotorOuterLoop(lift_motor_right, ANGLE_LOOP);
+    DJIMotorSetRef(lift_motor_left, lift_target_angle);
+    DJIMotorSetRef(lift_motor_right, lift_target_angle);
+}
+
+/**
+ * @brief 安全停用前履带与抬升辅助机构。
+ * @return 无。
+ * @note What: 将前履带 DM 速度参考清零并停机，同时让抬升在当前位置重建目标后停机，最后清空抬升模式边沿状态。
+ * @note Why: 急停或零力模式下不仅要切断输出，还要把抬升保持目标更新到当前实际位置，否则重新使能时会追旧目标；履带也必须同步清零避免残余速度指令继续发送。
+ */
+static void StopAuxActuators(void)
+{
+    if (front_track_motor_left != NULL) {
+        DMMotorSetRef(front_track_motor_left, 0.0f);
+        DMMotorStop(front_track_motor_left);
+    }
+    if (front_track_motor_right != NULL) {
+        DMMotorSetRef(front_track_motor_right, 0.0f);
+        DMMotorStop(front_track_motor_right);
+    }
+
+    if (lift_ref_ready != 0u && lift_motor_left != NULL && lift_motor_right != NULL)
+        SyncLiftTargetToCurrent();
+
+    if (lift_motor_left != NULL) {
+        DJIMotorSetRef(lift_motor_left, lift_target_angle);
+        DJIMotorStop(lift_motor_left);
+    }
+    if (lift_motor_right != NULL) {
+        DJIMotorSetRef(lift_motor_right, lift_target_angle);
+        DJIMotorStop(lift_motor_right);
+    }
+
+    // What: 急停后把上一帧抬升模式清零；Why: 解除急停时应先以当前位置重建零位，避免沿用旧session限位窗口突然补偿
+    last_lift_mode = LIFT_OFF;
+}
+
+/**
+ * @brief 按当前底盘命令控制前履带 DM3519 速度闭环。
+ * @return 无。
+ * @note What: 根据 `front_track_mode` 对两台前履带 DM 执行启停和速度参考下发，关闭时立即给零并停机。
+ * @note Why: 前履带的主要需求是速度闭环且目标值可调，单独收口成函数能让它与麦轮底盘功率分配解耦，减少后续调速或换 CAN ID 时的改动面。
+ */
+static void ControlFrontTrackMotors(void)
+{
+    if (front_track_motor_left == NULL || front_track_motor_right == NULL)
+        return;
+
+    if (chassis_cmd_recv.front_track_mode == FRONT_TRACK_ON) {
+        // What: 前履带开启时给两台DM同一机械速度参考；Why: 方向差异交给电机反向标志处理，应用层只维护一套履带速度目标
+        DMMotorEnable(front_track_motor_left);
+        DMMotorEnable(front_track_motor_right);
+        DMMotorSetRef(front_track_motor_left, chassis_cmd_recv.front_track_speed_ref);
+        DMMotorSetRef(front_track_motor_right, chassis_cmd_recv.front_track_speed_ref);
+    } else {
+        DMMotorSetRef(front_track_motor_left, 0.0f);
+        DMMotorSetRef(front_track_motor_right, 0.0f);
+        DMMotorStop(front_track_motor_left);
+        DMMotorStop(front_track_motor_right);
+    }
+}
+
+/**
+ * @brief 按当前辅助模式控制后抬升 3508 的双环位置闭环。
+ * @return 无。
+ * @note What: 在反馈就绪后维护抬升 session 参考角，按拨轮输入积分目标高度，执行相对限位，并将最终角度参考下发到双 3508。
+ * @note Why: 抬升要求“拨轮改高度、松手保持当前位置”，因此需要位置外环和速度内环配合；把积分、建零和限位集中到这里，能保证模式切换、调度抖动和双板命令更新都不会破坏位置保持行为。
+ */
+static void ControlLiftMotors(void)
+{
+    float dt;
+    lift_mode_e requested_lift_mode;
+
+    if (lift_motor_left == NULL || lift_motor_right == NULL)
+        return;
+
+    EnsureLiftReferenceReady();
+    if (lift_ref_ready == 0u)
+        return;
+
+    requested_lift_mode = (chassis_cmd_recv.front_track_mode == FRONT_TRACK_ON) ? chassis_cmd_recv.lift_mode : LIFT_OFF;
+    if (last_lift_mode == LIFT_OFF && requested_lift_mode != LIFT_OFF)
+        SyncLiftTargetToCurrent();
+
+    dt = DWT_GetDeltaT(&lift_control_dt_cnt);
+    if (dt <= 0.0f || dt > 0.05f)
+        dt = CHASSIS_TASK_DT_FALLBACK;
+
+    if (requested_lift_mode == LIFT_ADJUST)
+        lift_target_angle += chassis_cmd_recv.lift_dial_input * LIFT_DIAL_MAX_SPEED_DPS * dt;
+
+    // What: 抬升限位以本次进入模式的当前位置为零点；Why: 不依赖固定机械绝对零位，调试阶段改装机构后也不会立刻失效
+    LIMIT_MIN_MAX(lift_target_angle, lift_entry_angle + LIFT_RELATIVE_MIN_ANGLE, lift_entry_angle + LIFT_RELATIVE_MAX_ANGLE);
+
+    DJIMotorEnable(lift_motor_left);
+    DJIMotorEnable(lift_motor_right);
+    DJIMotorSetRef(lift_motor_left, lift_target_angle);
+    DJIMotorSetRef(lift_motor_right, lift_target_angle);
+    last_lift_mode = requested_lift_mode;
+}
+
 void ChassisInit()
 {
     Chassis_IMU_data = INS_Init();
@@ -238,9 +427,9 @@ void ChassisInit()
     Motor_Init_Config_s chassis_motor_config = {
         .controller_param_init_config = {
             .speed_PID = {
-                .Kp = 3.7, // 4.5 3.7
+                .Kp = 4.2, // 4.5 3.7
                 .Ki = 0.0, // 0.2
-                .Kd = 0.0, // 0
+                .Kd = 0.05, // 0
                 .Improve = PID_Trapezoid_Intergral | PID_Integral_Limit | PID_Derivative_On_Measurement,
                 .MaxOut = 15000,
                 .Output_LPF_RC = 0.1,
@@ -276,13 +465,87 @@ void ChassisInit()
     chassis_motor_config.controller_setting_init_config.motor_reverse_flag = MOTOR_DIRECTION_REVERSE;
     motor_lb = PowerControlInit(&chassis_motor_config);
 
+    Motor_Init_Config_s front_track_motor_config = {
+        .can_init_config = {
+            .can_handle = &hcan1,
+        },
+        .controller_param_init_config = {
+            .speed_PID = {
+                .Kp = 0.9f,
+                .Ki = 0.0f,
+                .Kd = 0.0f,
+                .Improve = PID_Trapezoid_Intergral | PID_Integral_Limit | PID_Derivative_On_Measurement,
+                .IntegralLimit = 6.0f,
+                .MaxOut = 18.0f,
+            },
+        },
+        .controller_setting_init_config = {
+            .angle_feedback_source = MOTOR_FEED,
+            .speed_feedback_source = MOTOR_FEED,
+            .outer_loop_type = SPEED_LOOP,
+            .close_loop_type = SPEED_LOOP,
+        },
+        .motor_type = MOTOR_TYPE_NONE,
+    };
+
+    // What: 前履带使用DM3519速度闭环模板初始化；Why: 复用现有DM封装，只把速度目标作为外部可调参数暴露给cmd层
+    front_track_motor_config.can_init_config.tx_id = 0x07;
+    front_track_motor_config.can_init_config.rx_id = 0x08;
+    front_track_motor_config.controller_setting_init_config.motor_reverse_flag = MOTOR_DIRECTION_NORMAL;
+    front_track_motor_left = DMMotorInit(&front_track_motor_config);
+
+    front_track_motor_config.can_init_config.tx_id = 0x09;
+    front_track_motor_config.can_init_config.rx_id = 0x10;
+    front_track_motor_config.controller_setting_init_config.motor_reverse_flag = MOTOR_DIRECTION_REVERSE;
+    front_track_motor_right = DMMotorInit(&front_track_motor_config);
+
+    Motor_Init_Config_s lift_motor_config = {
+        .can_init_config = {
+            .can_handle = &hcan2,
+        },
+        .controller_param_init_config = {
+            .angle_PID = {
+                .Kp = 12.0f,
+                .Ki = 0.0f,
+                .Kd = 0.0f,
+                .Improve = PID_Integral_Limit,
+                .IntegralLimit = 4000.0f,
+                .MaxOut = 2500.0f,
+            },
+            .speed_PID = {
+                .Kp = 4.5f,
+                .Ki = 0.0f,
+                .Kd = 0.0f,
+                .Improve = PID_Integral_Limit,
+                .IntegralLimit = 4000.0f,
+                .MaxOut = 16000.0f,
+            },
+        },
+        .controller_setting_init_config = {
+            .angle_feedback_source = MOTOR_FEED,
+            .speed_feedback_source = MOTOR_FEED,
+            .outer_loop_type = SPEED_LOOP,
+            .close_loop_type = ANGLE_LOOP | SPEED_LOOP,
+        },
+        .motor_type = M3508,
+    };
+
+    // What: 抬升3508先以上电零速度方式初始化；Why: 等待首帧编码器反馈后再切位置环，避免当前位置未知时上电回零乱冲
+    lift_motor_config.can_init_config.tx_id = 6;
+    lift_motor_config.controller_setting_init_config.motor_reverse_flag = MOTOR_DIRECTION_NORMAL;
+    lift_motor_left = DJIMotorInit(&lift_motor_config);
+
+    lift_motor_config.can_init_config.tx_id = 5;
+    lift_motor_config.controller_setting_init_config.motor_reverse_flag = MOTOR_DIRECTION_REVERSE;
+    lift_motor_right = DJIMotorInit(&lift_motor_config);
+
     ClearRefereeKeyMouseUpload(); // What: 上电先清空键鼠上传缓存；Why: 避免CAN另一侧在首帧前读到脏数据
     referee_keymouse_sync.last_x_position = 0u;
     referee_keymouse_sync.last_y_position = 0u;
     referee_keymouse_sync.last_update_tick_ms = 0u;
     referee_keymouse_sync.baseline_ready = 0u;
-    referee_data = RefereeInit(&huart6); // What: 初始化底盘板裁判接收；Why: 双板方案下0x0306需要先在底盘侧解析再经CAN回传
-    PowerControl_EnableSlopeComp(1);
+    // referee_data = RefereeInit(&huart6); // What: 初始化底盘板裁判接收；Why: 双板方案下0x0306需要先在底盘侧解析再经CAN回传
+    PowerControl_EnableSlopeComp(0);
 
 #ifdef USE_SUPER_CAP
     // [条件编译] 超级电容初始化配置
@@ -455,97 +718,96 @@ static void LimitChassisOutput()
  *
  * @note 此函数应以固定频率(如1kHz)被调用，以保证积分精度
  */
-static void EstimateSpeed()
-{
-    // ===== 1. 获取时间间隔 (秒) =====
-    // 假设 ChassisTask 以固定 1ms 周期运行
-    const float dt = 0.001f; // 1ms，若实际周期不同可使用 DWT 获取
+// static void EstimateSpeed()
+// {
+//     // ===== 1. 获取时间间隔 (秒) =====
+//     // 假设 ChassisTask 以固定 1ms 周期运行
+//     const float dt = 0.001f; // 1ms，若实际周期不同可使用 DWT 获取
 
-    // ===== 2. 从 IMU 直接获取旋转角速度 (更精确) =====
-    // Chassis_IMU_data->Gyro[2] 是 Z 轴角速度 (rad/s)
-    // 转换为 deg/s 以与其他变量统一
-    float imu_wz_dps = Chassis_IMU_data->Gyro[Z] * RAD_2_DEGREE; // Z 轴角速度 (deg/s)
+//     // ===== 2. 从 IMU 直接获取旋转角速度 (更精确) =====
+//     // Chassis_IMU_data->Gyro[2] 是 Z 轴角速度 (rad/s)
+//     // 转换为 deg/s 以与其他变量统一
+//     float imu_wz_dps = Chassis_IMU_data->Gyro[Z] * RAD_2_DEGREE; // Z 轴角速度 (deg/s)
 
-    // ===== 3. 电机编码器逆运动学解算 =====
-    // 获取电机转速 (度/秒)，并根据电机安装方向进行符号修正
-    float v_lf = motor_lf->measure.speed_aps; // LF: NORMAL，保持原样
-    float v_rf = -motor_rf->measure.speed_aps; // RF: REVERSE，取反
-    float v_lb = motor_lb->measure.speed_aps; // LB: NORMAL，保持原样
-    float v_rb = -motor_rb->measure.speed_aps; // RB: REVERSE，取反
+//     // ===== 3. 电机编码器逆运动学解算 =====
+//     // 获取电机转速 (度/秒)，并根据电机安装方向进行符号修正
+//     float v_lf = motor_lf->measure.speed_aps; // LF: NORMAL，保持原样
+//     float v_rf = -motor_rf->measure.speed_aps; // RF: REVERSE，取反
+//     float v_lb = motor_lb->measure.speed_aps; // LB: NORMAL，保持原样
+//     float v_rb = -motor_rb->measure.speed_aps; // RB: REVERSE，取反
 
-    // 麦轮逆运动学公式 (由正解反推):
-    // vx = (v_lf + v_rf + v_lb + v_rb) / 4
-    // vy = (-v_lf + v_rf + v_lb - v_rb) / 4  (X型麦轮)
-    // wz = (-v_lf + v_rf - v_lb + v_rb) / 4 / (R_wheel / geometry_sum)
-    float avg_vx_raw = (v_lf + v_rf + v_lb + v_rb) / 4.0f; // 电机坐标系下的 vx (deg/s)
-    float avg_vy_raw = (-v_lf + v_rf + v_lb - v_rb) / 4.0f; // 电机坐标系下的 vy (deg/s)
-    float avg_wz_raw = (-v_lf + v_rf - v_lb + v_rb) / 4.0f; // 电机逆解算的 wz (deg/s)
+//     // 麦轮逆运动学公式 (由正解反推):
+//     // vx = (v_lf + v_rf + v_lb + v_rb) / 4
+//     // vy = (-v_lf + v_rf + v_lb - v_rb) / 4  (X型麦轮)
+//     // wz = (-v_lf + v_rf - v_lb + v_rb) / 4 / (R_wheel / geometry_sum)
+//     float avg_vx_raw = (v_lf + v_rf + v_lb + v_rb) / 4.0f; // 电机坐标系下的 vx (deg/s)
+//     float avg_vy_raw = (-v_lf + v_rf + v_lb - v_rb) / 4.0f; // 电机坐标系下的 vy (deg/s)
+//     float avg_wz_raw = (-v_lf + v_rf - v_lb + v_rb) / 4.0f; // 电机逆解算的 wz (deg/s)
 
-    // 几何参数：用于从电机转速转换到底盘速度
-    float geometry_sum = HALF_TRACK_WIDTH + HALF_WHEEL_BASE; // 半轮距 + 半轴距 (m)
-    float wheel_radius_ratio = RADIUS_WHEEL * DEGREE_2_RAD; // 轮子半径 (m) * (rad/deg)
+//     // 几何参数：用于从电机转速转换到底盘速度
+//     float geometry_sum = HALF_TRACK_WIDTH + HALF_WHEEL_BASE; // 半轮距 + 半轴距 (m)
+//     float wheel_radius_ratio = RADIUS_WHEEL * DEGREE_2_RAD; // 轮子半径 (m) * (rad/deg)
 
-    // 电机编码器解算的线速度 (m/s)
-    float encoder_vx = avg_vx_raw * wheel_radius_ratio; // 前后方向速度 (m/s)
-    float encoder_vy = avg_vy_raw * wheel_radius_ratio; // 左右方向速度 (m/s)
+//     // 电机编码器解算的线速度 (m/s)
+//     float encoder_vx = avg_vx_raw * wheel_radius_ratio; // 前后方向速度 (m/s)
+//     float encoder_vy = avg_vy_raw * wheel_radius_ratio; // 左右方向速度 (m/s)
 
-    // 电机编码器解算的旋转速度 (deg/s)
-    float encoder_wz = avg_wz_raw * (RADIUS_WHEEL / geometry_sum);
+//     // 电机编码器解算的旋转速度 (deg/s)
+//     float encoder_wz = avg_wz_raw * (RADIUS_WHEEL / geometry_sum);
 
-    // ===== 4. IMU 加速度积分获取线速度 (辅助) =====
-    // Chassis_IMU_data->Accel[X/Y] 是机体系加速度 (m/s²)
-    // 需要去除重力分量影响，这里假设底盘基本水平
-    static float imu_vx = 0.0f; // IMU 积分得到的 vx
-    static float imu_vy = 0.0f; // IMU 积分得到的 vy
+//     // ===== 4. IMU 加速度积分获取线速度 (辅助) =====
+//     // Chassis_IMU_data->Accel[X/Y] 是机体系加速度 (m/s²)
+//     // 需要去除重力分量影响，这里假设底盘基本水平
+//     static float imu_vx = 0.0f; // IMU 积分得到的 vx
+//     static float imu_vy = 0.0f; // IMU 积分得到的 vy
 
-    // 获取机体系加速度，并进行积分
-    // 注意：需要根据 IMU 安装方向调整坐标轴对应关系
-    float accel_x = Chassis_IMU_data->Accel[X]; // 前后方向加速度 (m/s²)
-    float accel_y = Chassis_IMU_data->Accel[Y]; // 左右方向加速度 (m/s²)
+//     // 获取机体系加速度，并进行积分
+//     // 注意：需要根据 IMU 安装方向调整坐标轴对应关系
+//     float accel_x = Chassis_IMU_data->Accel[X]; // 前后方向加速度 (m/s²)
+//     float accel_y = Chassis_IMU_data->Accel[Y]; // 左右方向加速度 (m/s²)
 
-    // 对加速度进行积分得到速度增量
-    imu_vx += accel_x * dt;
-    imu_vy += accel_y * dt;
+//     // 对加速度进行积分得到速度增量
+//     imu_vx += accel_x * dt;
+//     imu_vy += accel_y * dt;
 
-    // ===== 5. 互补滤波融合 =====
-    // 使用互补滤波融合编码器和 IMU 数据
-    // 编码器：低频准确（无漂移），高频噪声大
-    // IMU 积分：高频响应好，但有累积漂移
-    // 策略：以编码器为主，IMU 积分作为高频补偿，并持续向编码器值收敛
-    const float alpha_linear = 0.05f; // 线速度融合系数 (编码器权重较高)
-    const float alpha_wz = 0.8f; // 角速度融合系数 (IMU 权重较高，因为陀螺仪精度高)
+//     // ===== 5. 互补滤波融合 =====
+//     // 使用互补滤波融合编码器和 IMU 数据
+//     // 编码器：低频准确（无漂移），高频噪声大
+//     // IMU 积分：高频响应好，但有累积漂移
+//     // 策略：以编码器为主，IMU 积分作为高频补偿，并持续向编码器值收敛
+//     const float alpha_linear = 0.05f; // 线速度融合系数 (编码器权重较高)
+//     const float alpha_wz = 0.8f; // 角速度融合系数 (IMU 权重较高，因为陀螺仪精度高)
 
-    // 让 IMU 积分值向编码器值收敛，防止累积漂移
-    const float drift_correction = 0.02f; // 漂移修正系数
-    imu_vx = imu_vx * (1.0f - drift_correction) + encoder_vx * drift_correction;
-    imu_vy = imu_vy * (1.0f - drift_correction) + encoder_vy * drift_correction;
+//     // 让 IMU 积分值向编码器值收敛，防止累积漂移
+//     const float drift_correction = 0.02f; // 漂移修正系数
+//     imu_vx = imu_vx * (1.0f - drift_correction) + encoder_vx * drift_correction;
+//     imu_vy = imu_vy * (1.0f - drift_correction) + encoder_vy * drift_correction;
 
-    // 融合线速度：编码器为主 + IMU 高频补偿
-    static float last_vx = 0.0f, last_vy = 0.0f;
-    float fused_vx = encoder_vx * (1.0f - alpha_linear) + imu_vx * alpha_linear;
-    float fused_vy = encoder_vy * (1.0f - alpha_linear) + imu_vy * alpha_linear;
+//     // 融合线速度：编码器为主 + IMU 高频补偿
+//     static float last_vx = 0.0f, last_vy = 0.0f;
+//     float fused_vx = encoder_vx * (1.0f - alpha_linear) + imu_vx * alpha_linear;
+//     float fused_vy = encoder_vy * (1.0f - alpha_linear) + imu_vy * alpha_linear;
 
-    // 融合角速度：IMU 陀螺仪为主，编码器为辅 (陀螺仪精度更高)
-    static float last_wz = 0.0f;
-    float fused_wz = imu_wz_dps * alpha_wz + encoder_wz * (1.0f - alpha_wz);
+//     // 融合角速度：IMU 陀螺仪为主，编码器为辅 (陀螺仪精度更高)
+//     static float last_wz = 0.0f;
+//     float fused_wz = imu_wz_dps * alpha_wz + encoder_wz * (1.0f - alpha_wz);
 
-    // ===== 6. 低通滤波 (平滑输出) =====
-    const float lpf_alpha = 0.3f; // 滤波系数，越小越平滑但滞后
-    real_vx = (1.0f - lpf_alpha) * last_vx + lpf_alpha * fused_vx;
-    real_vy = (1.0f - lpf_alpha) * last_vy + lpf_alpha * fused_vy;
-    real_wz = (1.0f - lpf_alpha) * last_wz + lpf_alpha * fused_wz;
+//     // ===== 6. 低通滤波 (平滑输出) =====
+//     const float lpf_alpha = 0.3f; // 滤波系数，越小越平滑但滞后
+//     real_vx = (1.0f - lpf_alpha) * last_vx + lpf_alpha * fused_vx;
+//     real_vy = (1.0f - lpf_alpha) * last_vy + lpf_alpha * fused_vy;
+//     real_wz = (1.0f - lpf_alpha) * last_wz + lpf_alpha * fused_wz;
 
-    // 保存上一次的值
-    last_vx = real_vx;
-    last_vy = real_vy;
-    last_wz = real_wz;
-}
+//     // 保存上一次的值
+//     last_vx = real_vx;
+//     last_vy = real_vy;
+//     last_wz = real_wz;
+// }
 
 /* 机器人底盘控制核心任务 */
 void ChassisTask()
 {
     float gimbal_wz = 0.0f;
-    gimbal_wz = chassis_cmd_recv.gimbal_gyro_z;
     // 后续增加没收到消息的处理(双板的情况)
     // 获取新的控制信息
 #ifdef ONE_BOARD
@@ -554,6 +816,7 @@ void ChassisTask()
 #ifdef CHASSIS_BOARD
     chassis_cmd_recv = *(Chassis_Ctrl_Cmd_s *)CANCommGet(chasiss_can_comm);
 #endif // CHASSIS_BOARD
+    gimbal_wz = chassis_cmd_recv.gimbal_gyro_z; // What: 使用最新一帧云台角速度前馈；Why: 避免先读旧值再收新命令导致跟随支路固定滞后一个控制周期
 
     /* 功率控制策略 */
     // 1. 获取裁判系统功率限制 (原始最大值)
@@ -607,6 +870,7 @@ void ChassisTask()
         DJIMotorStop(motor_rf);
         DJIMotorStop(motor_lb);
         DJIMotorStop(motor_rb);
+        StopAuxActuators();
     } else { // 正常工作
         DJIMotorEnable(motor_lf);
         DJIMotorEnable(motor_rf);
@@ -618,11 +882,23 @@ void ChassisTask()
     switch (chassis_cmd_recv.chassis_mode) {
     case CHASSIS_NO_FOLLOW: // 底盘不旋转,但维持全向机动,一般用于调整云台姿态
         break;
-    case CHASSIS_FOLLOW_GIMBAL_YAW:
+    case CHASSIS_FOLLOW_GIMBAL_YAW: {
+        const float follow_yaw_kp = 8.0f; // What: 跟随模式位置环比例增益；Why: 直接按角度误差生成回正速度，比二次项更线性且更容易调到“快但不炸”
+        const float follow_yaw_kd = 0.18f; // What: 跟随模式底盘角速度阻尼增益；Why: 使用底盘真实角速度做D项，专门抑制回中穿越和反向摆动
+        const float follow_yaw_kff = 0.85f; // What: 跟随模式云台角速度前馈增益；Why: 云台先动时提前拉动底盘，减少纯靠角度误差追赶带来的滞后
+        const float follow_yaw_deadband = 0.8f; // What: 跟随模式角度死区；Why: 回中附近直接清零小误差，避免机械间隙和噪声触发来回抖动
+        const float follow_yaw_max_wz = 600.0f; // What: 跟随模式角速度输出上限；Why: 防止大角度时给电机速度环过猛目标，降低饱和后再过冲的概率
+        float chassis_wz = Chassis_IMU_data->Gyro[Z] * RAD_2_DEGREE; // What: 读取底盘当前真实角速度；Why: D项必须基于被控对象自身速度才能形成真实阻尼
+        float angle_err = chassis_cmd_recv.offset_angle; // What: 缓存当前底盘相对云台的角度误差；Why: 便于在进入控制律前统一做死区处理
 
-        chassis_cmd_recv.wz = -3.6f * chassis_cmd_recv.offset_angle * abs(chassis_cmd_recv.offset_angle) - 0.7 * gimbal_wz; // 考虑加入pid闭环会更好
-        // chassis_cmd_recv.wz = -1.0 * gimbal_wz;
+        if (fabsf(angle_err) < follow_yaw_deadband) {
+            angle_err = 0.0f; // What: 清零死区内误差；Why: 小角度时让前馈和阻尼接管，避免位置项在零点附近反复翻转
+        }
+
+        chassis_cmd_recv.wz = -follow_yaw_kp * angle_err - follow_yaw_kd * chassis_wz - follow_yaw_kff * gimbal_wz; // What: 生成底盘跟随云台的角速度指令；Why: 用P保证回中速度、用D抑制过冲、用前馈减少跟随滞后
+        LIMIT_MIN_MAX(chassis_cmd_recv.wz, -follow_yaw_max_wz, follow_yaw_max_wz); // What: 限制跟随模式角速度输出；Why: 避免外环瞬时给出过大目标把电机内环推入饱和
         break;
+    }
     case CHASSIS_ROTATE: // 自旋,同时保持全向机动
                          // [修改] 优化小陀螺逻辑：区分变速/匀速，并统一应用平移优先策略
 #if VARIABLE_SPIN_ENABLED
@@ -665,6 +941,12 @@ void ChassisTask()
 
     // 根据裁判系统的反馈数据和电容数据对输出限幅并设定闭环参考值
     LimitChassisOutput();
+
+    if (chassis_cmd_recv.chassis_mode != CHASSIS_ZERO_FORCE) {
+        // What: 在底盘主运动解算后独立控制履带与抬升；Why: 这两套执行机构不参与麦轮功率分配，独立更新能减少耦合风险
+        ControlFrontTrackMotors();
+        ControlLiftMotors();
+    }
 
     // 根据电机的反馈速度和IMU(如果有)计算真实速度
     // EstimateSpeed();

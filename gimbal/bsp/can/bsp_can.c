@@ -198,6 +198,7 @@ static void CANFIFOxCallback(CAN_HandleTypeDef *_hcan, uint32_t fifox)
     uint8_t can_rx_buff[8];
     while (HAL_CAN_GetRxFifoFillLevel(_hcan, fifox)) // FIFO不为空,有可能在其他中断时有多帧数据进入
     {
+        uint8_t frame_handled = 0u; // What: 标记当前帧是否已分发给目标实例；Why: 必须持续清空FIFO，避免高负载时残留报文挤掉后续分包
         HAL_CAN_GetRxMessage(_hcan, fifox, &rxconf, can_rx_buff); // 从FIFO中获取数据
         for (size_t i = 0; i < idx; ++i) { // 两者相等说明这是要找的实例
             if (_hcan == can_instance[i]->can_handle && rxconf.StdId == can_instance[i]->rx_id) {
@@ -207,8 +208,12 @@ static void CANFIFOxCallback(CAN_HandleTypeDef *_hcan, uint32_t fifox)
                     memcpy(can_instance[i]->rx_buff, can_rx_buff, rxconf.DLC); // 消息拷贝到对应实例
                     can_instance[i]->can_module_callback(can_instance[i]); // 触发回调进行数据解析和处理
                 }
-                return;
+                frame_handled = 1u;
+                break;
             }
+        }
+        if (frame_handled == 0u) {
+            continue; // What: 未匹配帧直接继续处理下一帧；Why: 防止未知/过期过滤项阻塞FIFO中的有效报文
         }
     }
 }
