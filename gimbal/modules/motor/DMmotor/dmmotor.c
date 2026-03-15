@@ -143,6 +143,7 @@ DMMotorInstance *DMMotorInit(Motor_Init_Config_s *config)
     DMMotorEnable(motor);
     DMMotorSetMode(DM_CMD_MOTOR_MODE, motor);
     DWT_Delay(0.1);
+    // What: 保持开机不自动发送 DM 零点校准；Why: 当前分支依赖驱动内保存的硬件零点，重复校零会把 yaw 跟随基准再次打乱。
     // DMMotorCaliEncoder(motor);
     DWT_Delay(0.1);
     dm_motor_instance[idx++] = motor;

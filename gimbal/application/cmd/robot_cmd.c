@@ -77,9 +77,8 @@ BMI088Instance *bmi088_test; // 云台IMU
 BMI088_Data_t bmi088_data;
 // 定义一个静态变量来保存上一次的开关状态，初始化为下（急停/停止状态）
 static uint16_t last_switch_right = RC_SW_DOWN;
-// 记录当前用于底盘跟随的 Yaw 对齐基准角。
-// 默认沿用机械安装零位，手动 DM 校零后切换为运行时零位，避免校零后 offset 仍然减旧机械角。
-static float yaw_align_offset_deg = YAW_ALIGN_ANGLE;
+// What: 保存底盘跟随使用的 yaw 软件对齐基准角；Why: 直接信任 DM 已保存的硬件零点，避免开机又减一次机械安装角导致零点偏移。
+static float yaw_align_offset_deg = 0.0f;
 
 // --- 新增的静态变量，用于长按计时 ---
 static uint32_t inner_eight_cnt = 0; // 内八计时器
@@ -175,8 +174,8 @@ static void PrepareControlCommandBase()
 
 void RobotCMDInit()
 {
-    // 初始化时先使用机械安装零位，原因是上电后在未执行手动校零前仍需保持老车参数兼容。
-    yaw_align_offset_deg = YAW_ALIGN_ANGLE;
+    // What: 开机时把 yaw 软件对齐基准直接设为 0 度；Why: 让底盘跟随从第一拍就围绕 DM 硬件零点闭环，避免首帧回到旧机械角。
+    yaw_align_offset_deg = 0.0f;
     rc_data = RemoteControlInit(&huart3); // 修改为对应串口,注意如果是自研板dbus协议串口需选用添加了反相器的那个
     // 这里在 USART1 初始化图传键鼠，作用是按 921600 串口接入官方图传链路；
     // 原因是当前工程视觉走 VCP，USART1 空闲，正好可作为云台板图传入口。
@@ -257,8 +256,7 @@ static void CalcOffsetAngle()
     // 获取你在 gimbal.c 中计算出的 0~360 度角度
     float gimbal_angle = gimbal_fetch_data.yaw_motor_single_round_angle;
 
-    // 使用当前生效的对齐基准角计算 offset。
-    // 这样手动 DM 校零后，底盘跟随会立即围绕新的零位闭环，而不是继续减旧的机械安装角。
+    // What: 使用当前生效的 yaw 软件基准计算底盘跟随偏角；Why: 手动校零后继续围绕 0 度闭环，防止 offset 仍引用旧机械安装角。
     float align_offset = yaw_align_offset_deg;
 
     // 1. 计算原始偏差
