@@ -28,6 +28,9 @@ static USARTInstance *usart_instance[DEVICE_USART_CNT] = {NULL};
  */
 void USARTServiceInit(USARTInstance *_instance)
 {
+    // 这里在重启 DMA 接收前先清零本次长度，作用是避免变长协议误读上一帧长度；
+    // 原因是图传键鼠链路需要读取实际帧长，若长度不清零会把历史值带进新一轮解析。
+    _instance->recv_len = 0u;
     HAL_UARTEx_ReceiveToIdle_DMA(_instance->usart_handle, _instance->recv_buff, _instance->recv_buff_size);
     // 关闭dma half transfer中断防止两次进入HAL_UARTEx_RxEventCallback()
     // 这是HAL库的一个设计失误,发生DMA传输完成/半完成以及串口IDLE中断都会触发HAL_UARTEx_RxEventCallback()
@@ -51,6 +54,7 @@ USARTInstance *USARTRegister(USART_Init_Config_s *init_config)
 
     instance->usart_handle = init_config->usart_handle;
     instance->recv_buff_size = init_config->recv_buff_size;
+    instance->recv_len = 0u;
     instance->module_callback = init_config->module_callback;
 
     usart_instance[idx++] = instance;
@@ -107,6 +111,9 @@ void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t Size)
         { // call the callback function if it is not NULL
             if (usart_instance[i]->module_callback != NULL)
             {
+                // 这里把 HAL 回调给出的真实收包长度保存下来，作用是支持 protobuf 这类变长协议；
+                // 原因是仅靠固定 buffer 大小无法判断本次消息边界，图传键鼠解析必须依赖真实长度。
+                usart_instance[i]->recv_len = Size;
                 usart_instance[i]->module_callback();
                 memset(usart_instance[i]->recv_buff, 0, Size); // 接收结束后清空buffer,对于变长数据是必要的
             }
@@ -130,6 +137,9 @@ void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
     {
         if (huart == usart_instance[i]->usart_handle)
         {
+            // 这里遇到串口错误时把长度清零，作用是阻断错误帧长度影响后续解析；
+            // 原因是图传链路和裁判链路共用同一套 USART BSP，错误回调必须把变长状态一起复位。
+            usart_instance[i]->recv_len = 0u;
             HAL_UARTEx_ReceiveToIdle_DMA(usart_instance[i]->usart_handle, usart_instance[i]->recv_buff, usart_instance[i]->recv_buff_size);
             __HAL_DMA_DISABLE_IT(usart_instance[i]->usart_handle->hdmarx, DMA_IT_HT);
             LOGWARNING("[bsp_usart] USART error callback triggered, instance idx [%d]", i);

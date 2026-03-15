@@ -14,6 +14,7 @@
 #include "buzzer.h"
 #include "auto_gimbal.h"
 #include "remote_control.h"
+#include "video_link_km.h"
 
 // bsp
 #include "bsp_dwt.h"
@@ -53,6 +54,7 @@ static Chassis_Ctrl_Cmd_s chassis_cmd_send; // 发送给底盘应用的信息,�
 static Chassis_Upload_Data_s chassis_fetch_data; // 从底盘应用接收的反馈信息信息,底盘功率枪口热量与底盘运动状态等
 
 static RC_ctrl_t *rc_data; // 遥控器数据,初始化时返回
+static RC_ctrl_t *video_link_data; // 图传键鼠数据,初始化时返回
 static Vision_Recv_s *vision_recv_data; // 视觉接收数据指针,初始化时返回
 static Vision_Send_s vision_send_data; // 视觉发送数据
 
@@ -98,6 +100,9 @@ static uint8_t mouse_left_burst_active = 0;
 // 鼠标左键按下时间戳，作用是计算长按阈值；
 // 原因是任务存在调度抖动，用绝对时间比按周期计数更稳。
 static uint32_t mouse_left_press_start_ms = 0;
+// 记录图传链路上一次在线状态，作用是做离线边沿清零；
+// 原因是图传优先级高于 DBUS 键鼠，断链时必须主动丢弃旧的鼠标锁存。
+static uint8_t last_video_link_online = 0;
 
 /**
  * @brief 将 pitch 目标统一限幅到机构安全范围
@@ -126,6 +131,21 @@ static void ResetMouseFireState()
     mouse_left_last = 0;
     mouse_left_burst_active = 0;
     mouse_left_press_start_ms = 0;
+}
+
+/**
+ * @brief 选择当前生效的键鼠输入源
+ *
+ * @return const RC_ctrl_t* 当前键鼠输入源
+ */
+static const RC_ctrl_t *GetActiveMouseKeySource(void)
+{
+    // 这里优先返回图传键鼠数据，作用是让官方图传链路覆盖 DBUS 内嵌键鼠；
+    // 原因是用户明确要求把 2026 图传控制入口接到云台板，当前实现必须以图传为主源。
+    if (video_link_data != NULL && VideoLinkKMIsOnline()) {
+        return &video_link_data[TEMP];
+    }
+    return &rc_data[TEMP];
 }
 
 /**
@@ -158,6 +178,9 @@ void RobotCMDInit()
     // 初始化时先使用机械安装零位，原因是上电后在未执行手动校零前仍需保持老车参数兼容。
     yaw_align_offset_deg = YAW_ALIGN_ANGLE;
     rc_data = RemoteControlInit(&huart3); // 修改为对应串口,注意如果是自研板dbus协议串口需选用添加了反相器的那个
+    // 这里在 USART1 初始化图传键鼠，作用是按 921600 串口接入官方图传链路；
+    // 原因是当前工程视觉走 VCP，USART1 空闲，正好可作为云台板图传入口。
+    video_link_data = VideoLinkKMInit(&huart1);
     // vision_recv_data = VisionInit(&huart1); // 视觉通信串口
     Buzzer_config_s hint_config = {
         .alarm_level = ALARM_LEVEL_MEDIUM, // 优先级
@@ -583,10 +606,19 @@ static void RemoteControlSet()
  */
 static void MouseKeySet()
 {
-    int8_t keyboard_vx = (int8_t)rc_data[TEMP].key[KEY_PRESS].w - (int8_t)rc_data[TEMP].key[KEY_PRESS].s;
-    int8_t keyboard_vy = (int8_t)rc_data[TEMP].key[KEY_PRESS].d - (int8_t)rc_data[TEMP].key[KEY_PRESS].a;
-    uint8_t mouse_left_pressed = rc_data[TEMP].mouse.press_l;
+    const RC_ctrl_t *mouse_key_source = GetActiveMouseKeySource();
+    uint8_t video_link_online = (video_link_data != NULL) && VideoLinkKMIsOnline();
+    int8_t keyboard_vx = (int8_t)mouse_key_source->key[KEY_PRESS].w - (int8_t)mouse_key_source->key[KEY_PRESS].s;
+    int8_t keyboard_vy = (int8_t)mouse_key_source->key[KEY_PRESS].d - (int8_t)mouse_key_source->key[KEY_PRESS].a;
+    uint8_t mouse_left_pressed = mouse_key_source->mouse.press_l;
     uint32_t now_ms = DWT_GetTimeline_ms();
+
+    // 这里检测图传离线边沿，作用是第一时间清掉键鼠锁存和残留发射意图；
+    // 原因是图传断链后会回退到 DBUS 源，若不在切换瞬间清理状态，旧图传命令会被继续沿用。
+    if (last_video_link_online && !video_link_online) {
+        ResetMouseFireState();
+    }
+    last_video_link_online = video_link_online;
 
     // 遇到急停或零力模式时直接清空键鼠锁存，作用是确保任何鼠标残留命令都不会越过急停；
     // 原因是键鼠现在和遥控器并行输入，停机优先级必须最高。
@@ -608,8 +640,8 @@ static void MouseKeySet()
 
     // 鼠标在遥控器目标上继续叠加云台增量，作用是保留遥控微调同时给电脑端快速修正；
     // 原因是旧工程的键鼠本来就是通过 DBUS 叠加进来，本轮需要恢复这种混控手感。
-    gimbal_cmd_send.yaw -= (float)rc_data[TEMP].mouse.x * MOUSE_YAW_SENSITIVITY_DEG;
-    gimbal_cmd_send.pitch += (float)rc_data[TEMP].mouse.y * MOUSE_PITCH_SENSITIVITY_DEG;
+    gimbal_cmd_send.yaw -= (float)mouse_key_source->mouse.x * MOUSE_YAW_SENSITIVITY_DEG;
+    gimbal_cmd_send.pitch += (float)mouse_key_source->mouse.y * MOUSE_PITCH_SENSITIVITY_DEG;
     LimitGimbalPitchTarget();
 
     // 鼠标首次请求开火时锁存摩擦轮开启，作用是让后续短按/长按都不需要额外按键预热；

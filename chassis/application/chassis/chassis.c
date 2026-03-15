@@ -181,12 +181,12 @@ void ChassisInit()
 
     chassis_motor_config.can_init_config.can_handle = &hcan2;
     chassis_motor_config.can_init_config.tx_id = 3;
-    chassis_motor_config.controller_setting_init_config.motor_reverse_flag = MOTOR_DIRECTION_NORMAL;
+    chassis_motor_config.controller_setting_init_config.motor_reverse_flag = MOTOR_DIRECTION_REVERSE;
     motor_rb = PowerControlInit(&chassis_motor_config);
 
     chassis_motor_config.can_init_config.can_handle = &hcan2;
     chassis_motor_config.can_init_config.tx_id = 4;
-    chassis_motor_config.controller_setting_init_config.motor_reverse_flag = MOTOR_DIRECTION_REVERSE;
+    chassis_motor_config.controller_setting_init_config.motor_reverse_flag = MOTOR_DIRECTION_NORMAL;
     motor_lb = PowerControlInit(&chassis_motor_config);
 
     // referee_data = UITaskInit(&huart6, &ui_data); // 裁判系统初始化,会同时初始化UI
