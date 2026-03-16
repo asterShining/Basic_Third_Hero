@@ -1035,7 +1035,7 @@ void ShootTask()
         switch (shoot_cmd_recv.bullet_speed) {
         case BIG_AMU_12:
             // 目标12m/s：一级给11.5，二级给12.0
-            ShootSetSpeedDual(11.0f, 12.0f);
+            ShootSetSpeedDual(12.5f, 13.8f);
             break;
         case BIG_AMU_16:
             // 目标16.5m/s：一级给15.5，二级给16.5

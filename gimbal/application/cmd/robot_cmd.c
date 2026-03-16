@@ -31,10 +31,22 @@
 #define RC_TRIGGER_TH 500
 // Yaw 死区漂移低通锁定系数: 0.90~0.98，值越小锁定越快，0.95 约 0.5s 平滑锁定
 #define YAW_DRIFT_LOCK_COEF 0.95f
-// 鼠标灵敏度沿用旧工程的量级并换算成角度制，作用是保持手感接近原车；
-// 原因是当前云台目标量使用 degree，直接搬旧工程的 rad 系数会让鼠标控制失真。
-#define MOUSE_YAW_SENSITIVITY_DEG (0.00033f * RAD_2_DEGREE)
-#define MOUSE_PITCH_SENSITIVITY_DEG (-0.000046f * RAD_2_DEGREE)
+// 鼠标灵敏度按当前车体手感分别调整，作用是让 yaw 更跟手、pitch 方向与实际操控一致；
+// 原因是用户反馈 yaw 偏慢且 pitch 反向，因此这里同时上调 yaw 系数并翻转 pitch 符号。
+#define MOUSE_YAW_SENSITIVITY_DEG (0.00011f * RAD_2_DEGREE)
+#define MOUSE_PITCH_SENSITIVITY_DEG (0.000018f * RAD_2_DEGREE)
+// 键盘底盘指令沿用当前摇杆分支的量纲，作用是让 WSAD 和摇杆给到底盘的速度处于同一数量级；
+// 原因是底盘侧现在仍按“摇杆值×10”的历史量纲做解算，直接发 6.0f 会小到几乎看不出运动。
+#define KEYBOARD_CHASSIS_CMD_SCALE 6600.0f
+// 键盘平移斜坡加速率，作用是把 WSAD 从阶跃输入改成渐变输入；
+// 原因是当前满幅键盘指令一拍就冲到目标值，底盘体感会像“瞬间踹一脚”。
+#define KEYBOARD_CHASSIS_RAMP_UP_PER_SEC 22000.0f
+// 键盘平移斜坡减速率，作用是松键后更快回零但仍保持平滑；
+// 原因是只做慢加速会让停车拖泥带水，因此减速单独设得略快。
+#define KEYBOARD_CHASSIS_RAMP_DOWN_PER_SEC 30000.0f
+// 键盘平移状态归零阈值，作用是避免斜坡尾巴长期残留极小数值；
+// 原因是 CAN 下发浮点微小残值也会让底盘低速爬行，看起来像没停干净。
+#define KEYBOARD_CHASSIS_CMD_EPSILON 1.0f
 // 键鼠长按连发速率单独定义，作用是让鼠标连发不依赖遥控拨杆分支；
 // 原因是本轮需要让键鼠和遥控器并行控制，不能复用函数内局部宏。
 #define MOUSE_BURST_FIRE_RATE 8.0f
@@ -102,6 +114,16 @@ static uint32_t mouse_left_press_start_ms = 0;
 // 记录图传链路上一次在线状态，作用是做离线边沿清零；
 // 原因是图传优先级高于 DBUS 键鼠，断链时必须主动丢弃旧的鼠标锁存。
 static uint8_t last_video_link_online = 0;
+// 键盘摩擦轮开关键上一拍电平，作用是检测 F 键上升沿；
+// 原因是摩擦轮开关应该是“按一下切换一次”，而不是按住期间每拍反复翻转。
+static uint8_t keyboard_friction_toggle_last = 0;
+// 键盘平移当前平滑输出，作用是保存斜坡状态跨周期延续；
+// 原因是 `PrepareControlCommandBase()` 每拍都会清零瞬态命令，平滑状态必须独立保存。
+static float keyboard_vx_smoothed = 0.0f;
+static float keyboard_vy_smoothed = 0.0f;
+// 键盘平移上一次更新时间戳，作用是按真实控制周期计算每拍允许变化量；
+// 原因是任务调度并非绝对恒定 5ms，直接写死步长会让不同负载下手感漂移。
+static uint32_t keyboard_ramp_last_ms = 0;
 
 /**
  * @brief 将 pitch 目标统一限幅到机构安全范围
@@ -130,6 +152,54 @@ static void ResetMouseFireState()
     mouse_left_last = 0;
     mouse_left_burst_active = 0;
     mouse_left_press_start_ms = 0;
+    keyboard_friction_toggle_last = 0;
+}
+
+/**
+ * @brief 清空键盘平移斜坡状态
+ *
+ */
+static void ResetKeyboardMotionState()
+{
+    // 这里把键盘平移斜坡状态清零，作用是急停/断链后不保留上一拍的加减速尾巴；
+    // 原因是平滑状态本身是跨周期记忆量，不主动复位就会在恢复控制时带出历史速度。
+    keyboard_vx_smoothed = 0.0f;
+    keyboard_vy_smoothed = 0.0f;
+    keyboard_ramp_last_ms = 0u;
+}
+
+/**
+ * @brief 按斜坡限速把当前值推进到目标值
+ *
+ * @param current 当前输出
+ * @param target 目标输出
+ * @param dt_s 本拍时间
+ * @return float 平滑后的输出
+ */
+static float RampKeyboardAxis(float current, float target, float dt_s)
+{
+    float max_step;
+
+    // 这里根据“加速/减速/反向”场景选择不同步长，作用是让起步柔和但松键更干脆；
+    // 原因是底盘平移最怕的就是起步突兀和停车拖尾，两种手感不能共用一套斜率。
+    if (target == 0.0f || (current > 0.0f && target < current) || (current < 0.0f && target > current)) {
+        max_step = KEYBOARD_CHASSIS_RAMP_DOWN_PER_SEC * dt_s;
+    } else {
+        max_step = KEYBOARD_CHASSIS_RAMP_UP_PER_SEC * dt_s;
+    }
+
+    if (target > current + max_step) {
+        current += max_step;
+    } else if (target < current - max_step) {
+        current -= max_step;
+    } else {
+        current = target;
+    }
+
+    if (current < KEYBOARD_CHASSIS_CMD_EPSILON && current > -KEYBOARD_CHASSIS_CMD_EPSILON && target == 0.0f) {
+        current = 0.0f;
+    }
+    return current;
 }
 
 /**
@@ -141,7 +211,7 @@ static const RC_ctrl_t *GetActiveMouseKeySource(void)
 {
     // 这里优先返回图传键鼠数据，作用是让官方图传链路覆盖 DBUS 内嵌键鼠；
     // 原因是用户明确要求把 2026 图传控制入口接到云台板，当前实现必须以图传为主源。
-    if (video_link_data != NULL && VideoLinkKMIsOnline()) {
+    if (video_link_data != NULL && VideoLinkKMIsOnline() && VideoLinkKMHasValidFrame()) {
         return &video_link_data[TEMP];
     }
     return &rc_data[TEMP];
@@ -365,15 +435,15 @@ static void RemoteControlSet()
 
         robot_state = ROBOT_READY;
         // [用户要求] 注释掉原有逻辑 (User request: Comment out original logic)
-        // chassis_cmd_send.chassis_mode = CHASSIS_NO_FOLLOW;
-        // gimbal_cmd_send.gimbal_mode = GIMBAL_FREE_MODE;
+        chassis_cmd_send.chassis_mode = CHASSIS_NO_FOLLOW;
+        gimbal_cmd_send.gimbal_mode = GIMBAL_FREE_MODE;
 
         // [新增] 小陀螺模式配置 (New Configuration: Little Top Mode)
         // 这里明确下发 CHASSIS_ROTATE，作用是让底盘侧进入小陀螺分支。
         // 之前该行被注释后，发送出去的一直是 CHASSIS_NO_FOLLOW，所以底盘永远不会自旋。
-        chassis_cmd_send.chassis_mode = CHASSIS_ROTATE;
+        // chassis_cmd_send.chassis_mode = CHASSIS_ROTATE;
         // 云台切换至陀螺仪模式以保持世界坐标系下的稳定瞄准
-        gimbal_cmd_send.gimbal_mode = GIMBAL_GYRO_MODE;
+        // gimbal_cmd_send.gimbal_mode = GIMBAL_GYRO_MODE;
 
         shoot_cmd_send.shoot_mode = SHOOT_ON;
 
@@ -605,18 +675,32 @@ static void RemoteControlSet()
 static void MouseKeySet()
 {
     const RC_ctrl_t *mouse_key_source = GetActiveMouseKeySource();
-    uint8_t video_link_online = (video_link_data != NULL) && VideoLinkKMIsOnline();
-    int8_t keyboard_vx = (int8_t)mouse_key_source->key[KEY_PRESS].w - (int8_t)mouse_key_source->key[KEY_PRESS].s;
-    int8_t keyboard_vy = (int8_t)mouse_key_source->key[KEY_PRESS].d - (int8_t)mouse_key_source->key[KEY_PRESS].a;
+    uint8_t video_link_online = (video_link_data != NULL) && VideoLinkKMIsOnline() && VideoLinkKMHasValidFrame();
+    uint16_t key_bits = mouse_key_source->key[KEY_PRESS].keys;
+    uint8_t friction_toggle_pressed = (uint8_t)((key_bits >> Key_F) & 0x1u);
+    int8_t keyboard_vx = (int8_t)((key_bits >> Key_W) & 0x1u) - (int8_t)((key_bits >> Key_S) & 0x1u);
+    int8_t keyboard_vy = (int8_t)((key_bits >> Key_D) & 0x1u) - (int8_t)((key_bits >> Key_A) & 0x1u);
     uint8_t mouse_left_pressed = mouse_key_source->mouse.press_l;
     uint32_t now_ms = DWT_GetTimeline_ms();
+    float dt_s = 0.005f;
+    float keyboard_target_vx = (float)keyboard_vx * KEYBOARD_CHASSIS_CMD_SCALE;
+    float keyboard_target_vy = (float)keyboard_vy * KEYBOARD_CHASSIS_CMD_SCALE;
 
     // 这里检测图传离线边沿，作用是第一时间清掉键鼠锁存和残留发射意图；
     // 原因是图传断链后会回退到 DBUS 源，若不在切换瞬间清理状态，旧图传命令会被继续沿用。
     if (last_video_link_online && !video_link_online) {
         ResetMouseFireState();
+        ResetKeyboardMotionState();
     }
     last_video_link_online = video_link_online;
+
+    if (keyboard_ramp_last_ms != 0u) {
+        uint32_t dt_ms = now_ms - keyboard_ramp_last_ms;
+        if (dt_ms > 0u && dt_ms < 20u) {
+            dt_s = (float)dt_ms * 0.001f;
+        }
+    }
+    keyboard_ramp_last_ms = now_ms;
 
     // 遇到急停或零力模式时直接清空键鼠锁存，作用是确保任何鼠标残留命令都不会越过急停；
     // 原因是键鼠现在和遥控器并行输入，停机优先级必须最高。
@@ -624,16 +708,20 @@ static void MouseKeySet()
         gimbal_cmd_send.gimbal_mode == GIMBAL_ZERO_FORCE ||
         chassis_cmd_send.chassis_mode == CHASSIS_ZERO_FORCE) {
         ResetMouseFireState();
+        ResetKeyboardMotionState();
         return;
     }
 
-    // 键盘只覆盖自己按下的轴，作用是让 WSAD 和遥控器能够同时控制不同自由度；
-    // 原因是用户明确要求键鼠和遥控器并行，而不是左拨杆切独占模式。
-    if (keyboard_vx != 0) {
-        chassis_cmd_send.vx = (float)keyboard_vx * MAX_CHASSIS_VX_SPEED;
+    // 这里把键盘目标值通过斜坡推进到输出，作用是让起步和停车都不是阶跃命令；
+    // 原因是底盘动力链对阶跃输入很敏感，直接满量纲切换会表现成前后左右猛冲。
+    keyboard_vx_smoothed = RampKeyboardAxis(keyboard_vx_smoothed, keyboard_target_vx, dt_s);
+    keyboard_vy_smoothed = RampKeyboardAxis(keyboard_vy_smoothed, keyboard_target_vy, dt_s);
+
+    if (keyboard_vx != 0 || keyboard_vx_smoothed != 0.0f) {
+        chassis_cmd_send.vx = keyboard_vx_smoothed;
     }
-    if (keyboard_vy != 0) {
-        chassis_cmd_send.vy = (float)keyboard_vy * MAX_CHASSIS_VY_SPEED;
+    if (keyboard_vy != 0 || keyboard_vy_smoothed != 0.0f) {
+        chassis_cmd_send.vy = keyboard_vy_smoothed;
     }
 
     // 鼠标在遥控器目标上继续叠加云台增量，作用是保留遥控微调同时给电脑端快速修正；
@@ -641,6 +729,22 @@ static void MouseKeySet()
     gimbal_cmd_send.yaw -= (float)mouse_key_source->mouse.x * MOUSE_YAW_SENSITIVITY_DEG;
     gimbal_cmd_send.pitch += (float)mouse_key_source->mouse.y * MOUSE_PITCH_SENSITIVITY_DEG;
     LimitGimbalPitchTarget();
+
+    // 这里把 F 定义成键鼠摩擦轮开关键，作用是给电脑端一个显式的预热/关闭入口；
+    // 原因是当前版本只有鼠标左键会隐式拉起摩擦轮，没有独立关断键，调试和行进中都不方便。
+    if (friction_toggle_pressed && !keyboard_friction_toggle_last) {
+        if (mouse_fire_friction_latched) {
+            ResetMouseFireState();
+            shoot_cmd_send.friction_mode = FRICTION_OFF;
+            shoot_cmd_send.load_mode = LOAD_STOP;
+            shoot_cmd_send.shoot_rate = 0.0f;
+        } else {
+            mouse_fire_friction_latched = 1;
+            mouse_left_burst_active = 0;
+            mouse_left_press_start_ms = now_ms;
+        }
+    }
+    keyboard_friction_toggle_last = friction_toggle_pressed;
 
     // 鼠标首次请求开火时锁存摩擦轮开启，作用是让后续短按/长按都不需要额外按键预热；
     // 原因是你本轮只要求接入 mouse.press_l，不能再依赖 F/Q/E 之类的旧调试键位。
@@ -650,7 +754,7 @@ static void MouseKeySet()
         mouse_left_press_start_ms = now_ms;
         shoot_cmd_send.shoot_mode = SHOOT_ON;
         shoot_cmd_send.friction_mode = FRICTION_ON;
-        shoot_cmd_send.bullet_speed = BIG_AMU_12;
+        shoot_cmd_send.bullet_speed = BIG_AMU_16;
         shoot_cmd_send.load_mode = LOAD_1_BULLET;
     } else if (mouse_left_pressed && ((now_ms - mouse_left_press_start_ms) >= LOAD_TRIGGER_DELAY)) {
         mouse_left_burst_active = 1;
@@ -664,7 +768,7 @@ static void MouseKeySet()
         shoot_cmd_send.shoot_mode = SHOOT_ON;
         shoot_cmd_send.friction_mode = FRICTION_ON;
         if (shoot_cmd_send.bullet_speed == BULLET_SPEED_NONE) {
-            shoot_cmd_send.bullet_speed = BIG_AMU_12;
+            shoot_cmd_send.bullet_speed = BIG_AMU_16;
         }
     }
 

@@ -30,6 +30,13 @@ RC_ctrl_t *VideoLinkKMInit(UART_HandleTypeDef *video_link_usart_handle);
 uint8_t VideoLinkKMIsOnline(void);
 
 /**
+ * @brief 检查图传键鼠是否已经成功解析过有效帧
+ *
+ * @return uint8_t 1:已有有效帧 0:尚无有效帧
+ */
+uint8_t VideoLinkKMHasValidFrame(void);
+
+/**
  * @brief 获取图传键鼠链路诊断信息
  *
  * @return const VideoLinkKM_Diag_s* 诊断信息指针

@@ -8,7 +8,7 @@
 // 摩擦轮半径 (单位: 米), 例如 30mm = 0.03m
 #define FRICTION_WHEEL_RADIUS 0.03f
 // 打滑补偿系数 (需要实测微调, 通常在 1.0 - 1.2 之间)
-#define SLIP_COMPENSATION 1.14f
+#define SLIP_COMPENSATION 1.01f
 
 // [新增] 摩擦轮软启动步长 (deg/loop)
 // 假设 200Hz 控制频率，15m/s (约28000dps)

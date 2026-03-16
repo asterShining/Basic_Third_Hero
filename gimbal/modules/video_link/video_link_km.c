@@ -25,6 +25,7 @@ static USARTInstance *video_link_usart_instance;
 static DaemonInstance *video_link_daemon_instance;
 static VideoLinkKM_Diag_s video_link_diag;
 static uint8_t video_link_init_flag = 0;
+static uint8_t video_link_has_valid_frame = 0u;
 
 /**
  * @brief 将 32 位整型限制到 RC 鼠标字段可承载的范围
@@ -298,20 +299,22 @@ static void VideoLinkApplyDecodedState(const VideoLinkKM_Decode_s *decode)
     video_link_ctrl[TEMP].mouse.press_l = decode->left_button_down;
     video_link_ctrl[TEMP].mouse.press_r = decode->right_button_down;
     *(uint16_t *)&video_link_ctrl[TEMP].key[KEY_PRESS] = (uint16_t)(decode->keyboard_value & 0xFFFFu);
+    key_now = video_link_ctrl[TEMP].key[KEY_PRESS].keys;
 
-    if (video_link_ctrl[TEMP].key[KEY_PRESS].ctrl) {
+    // 这里同样按协议 bit 位判断 Ctrl/Shift，作用是让图传和 DBUS 共用同一套稳定语义；
+    // 原因是图传键鼠本质也是键位掩码，继续依赖位域顺序会把协议兼容性押在编译器实现上。
+    if ((key_now & (1u << Key_Ctrl)) != 0u) {
         video_link_ctrl[TEMP].key[KEY_PRESS_WITH_CTRL] = video_link_ctrl[TEMP].key[KEY_PRESS];
     } else {
         memset(&video_link_ctrl[TEMP].key[KEY_PRESS_WITH_CTRL], 0, sizeof(Key_t));
     }
 
-    if (video_link_ctrl[TEMP].key[KEY_PRESS].shift) {
+    if ((key_now & (1u << Key_Shift)) != 0u) {
         video_link_ctrl[TEMP].key[KEY_PRESS_WITH_SHIFT] = video_link_ctrl[TEMP].key[KEY_PRESS];
     } else {
         memset(&video_link_ctrl[TEMP].key[KEY_PRESS_WITH_SHIFT], 0, sizeof(Key_t));
     }
 
-    key_now = video_link_ctrl[TEMP].key[KEY_PRESS].keys;
     key_last = video_link_ctrl[LAST].key[KEY_PRESS].keys;
     key_with_ctrl = video_link_ctrl[TEMP].key[KEY_PRESS_WITH_CTRL].keys;
     key_with_shift = video_link_ctrl[TEMP].key[KEY_PRESS_WITH_SHIFT].keys;
@@ -354,7 +357,6 @@ static void VideoLinkKMRxCallback(void)
     recv_len = video_link_usart_instance->recv_len;
     video_link_diag.rx_frame_count++;
     video_link_diag.last_frame_len = recv_len;
-    DaemonReload(video_link_daemon_instance);
 
     VideoLinkClearCurrentControl();
 
@@ -363,6 +365,10 @@ static void VideoLinkKMRxCallback(void)
         // 原因是下游已经以 RC_ctrl_t 为统一输入层，复用该结构能把修改面控制在最小范围。
         VideoLinkApplyDecodedState(&decode);
         video_link_diag.decode_success_count++;
+        video_link_has_valid_frame = 1u;
+        // 这里仅在成功解码后喂狗，作用是让“图传在线”严格等于“确实收到过有效键鼠包”；
+        // 原因是 USART1 浮空或噪声会触发串口回调，若失败帧也喂狗，会把 DBUS 键鼠错误屏蔽掉。
+        DaemonReload(video_link_daemon_instance);
     } else {
         video_link_diag.decode_fail_count++;
         memcpy(&video_link_ctrl[LAST], &video_link_ctrl[TEMP], sizeof(RC_ctrl_t));
@@ -386,6 +392,7 @@ static void VideoLinkKMOfflineCallback(void *id)
     // 这里掉线时直接清空图传键鼠状态，作用是让 robot_cmd 在下一拍拿到全零输入；
     // 原因是图传控车最怕断链后残留旧命令继续执行，必须在模块层先做安全兜底。
     memset(video_link_ctrl, 0, sizeof(video_link_ctrl));
+    video_link_has_valid_frame = 0u;
     video_link_diag.last_mouse_z = 0;
     video_link_diag.last_mid_button = 0u;
     USARTServiceInit(video_link_usart_instance);
@@ -399,6 +406,7 @@ RC_ctrl_t *VideoLinkKMInit(UART_HandleTypeDef *video_link_usart_handle)
 
     memset(&video_link_diag, 0, sizeof(video_link_diag));
     memset(video_link_ctrl, 0, sizeof(video_link_ctrl));
+    video_link_has_valid_frame = 0u;
 
     usart_conf.recv_buff_size = VIDEO_LINK_KM_RX_BUFFER_SIZE;
     usart_conf.usart_handle = video_link_usart_handle;
@@ -424,6 +432,11 @@ uint8_t VideoLinkKMIsOnline(void)
         return 0u;
     }
     return DaemonIsOnline(video_link_daemon_instance);
+}
+
+uint8_t VideoLinkKMHasValidFrame(void)
+{
+    return video_link_has_valid_frame;
 }
 
 const VideoLinkKM_Diag_s *VideoLinkKMGetDiag(void)

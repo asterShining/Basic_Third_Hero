@@ -34,6 +34,13 @@ static void RectifyRCjoystick()
  */
 static void sbus_to_rc(const uint8_t *sbus_buf)
 {
+    uint16_t key_now;
+    uint16_t key_last;
+    uint16_t key_with_ctrl;
+    uint16_t key_with_shift;
+    uint16_t key_last_with_ctrl;
+    uint16_t key_last_with_shift;
+
     // 摇杆,直接解算时减去偏置
     rc_ctrl[TEMP].rc.rocker_r_ = ((sbus_buf[0] | (sbus_buf[1] << 8)) & 0x07ff) - RC_CH_VALUE_OFFSET;                              //!< Channel 0
     rc_ctrl[TEMP].rc.rocker_r1 = (((sbus_buf[1] >> 3) | (sbus_buf[2] << 5)) & 0x07ff) - RC_CH_VALUE_OFFSET;                       //!< Channel 1
@@ -53,21 +60,24 @@ static void sbus_to_rc(const uint8_t *sbus_buf)
 
     //  位域的按键值解算,直接memcpy即可,注意小端低字节在前,即lsb在第一位,msb在最后
     *(uint16_t *)&rc_ctrl[TEMP].key[KEY_PRESS] = (uint16_t)(sbus_buf[14] | (sbus_buf[15] << 8));
-    if (rc_ctrl[TEMP].key[KEY_PRESS].ctrl) // ctrl键按下
+    key_now = rc_ctrl[TEMP].key[KEY_PRESS].keys;
+    key_last = rc_ctrl[LAST].key[KEY_PRESS].keys;
+
+    // 这里改用显式位掩码判断 Ctrl/Shift，作用是避免依赖编译器位域布局；
+    // 原因是 DBUS 键盘值是按协议固定 bit 位定义的，直接按位判断比读位域更稳。
+    if ((key_now & (1u << Key_Ctrl)) != 0u)
         rc_ctrl[TEMP].key[KEY_PRESS_WITH_CTRL] = rc_ctrl[TEMP].key[KEY_PRESS];
     else
         memset(&rc_ctrl[TEMP].key[KEY_PRESS_WITH_CTRL], 0, sizeof(Key_t));
-    if (rc_ctrl[TEMP].key[KEY_PRESS].shift) // shift键按下
+    if ((key_now & (1u << Key_Shift)) != 0u)
         rc_ctrl[TEMP].key[KEY_PRESS_WITH_SHIFT] = rc_ctrl[TEMP].key[KEY_PRESS];
     else
         memset(&rc_ctrl[TEMP].key[KEY_PRESS_WITH_SHIFT], 0, sizeof(Key_t));
 
-    uint16_t key_now = rc_ctrl[TEMP].key[KEY_PRESS].keys,                   // 当前按键是否按下
-        key_last = rc_ctrl[LAST].key[KEY_PRESS].keys,                       // 上一次按键是否按下
-        key_with_ctrl = rc_ctrl[TEMP].key[KEY_PRESS_WITH_CTRL].keys,        // 当前ctrl组合键是否按下
-        key_with_shift = rc_ctrl[TEMP].key[KEY_PRESS_WITH_SHIFT].keys,      //  当前shift组合键是否按下
-        key_last_with_ctrl = rc_ctrl[LAST].key[KEY_PRESS_WITH_CTRL].keys,   // 上一次ctrl组合键是否按下
-        key_last_with_shift = rc_ctrl[LAST].key[KEY_PRESS_WITH_SHIFT].keys; // 上一次shift组合键是否按下
+    key_with_ctrl = rc_ctrl[TEMP].key[KEY_PRESS_WITH_CTRL].keys;
+    key_with_shift = rc_ctrl[TEMP].key[KEY_PRESS_WITH_SHIFT].keys;
+    key_last_with_ctrl = rc_ctrl[LAST].key[KEY_PRESS_WITH_CTRL].keys;
+    key_last_with_shift = rc_ctrl[LAST].key[KEY_PRESS_WITH_SHIFT].keys;
 
     for (uint16_t i = 0, j = 0x1; i < 16; j <<= 1, i++)
     {

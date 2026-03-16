@@ -33,7 +33,7 @@
 #define HALF_WHEEL_BASE (WHEEL_BASE / 2.0f) // 半轴距
 #define HALF_TRACK_WIDTH (TRACK_WIDTH / 2.0f) // 半轮距
 #define PERIMETER_WHEEL (RADIUS_WHEEL * 2 * PI) // 轮子周长
-#define DEFAULT_TEST_POWER 300.0f // 调试用的基础功率
+#define DEFAULT_TEST_POWER 80.0f // 调试用的基础功率
 
 /* 底盘应用包含的模块和信息存储,底盘是单例模式,因此不需要为底盘建立单独的结构体 */
 #ifdef CHASSIS_BOARD // 如果是底盘板,使用板载IMU获取底盘转动角速度
@@ -181,12 +181,12 @@ void ChassisInit()
 
     chassis_motor_config.can_init_config.can_handle = &hcan2;
     chassis_motor_config.can_init_config.tx_id = 3;
-    chassis_motor_config.controller_setting_init_config.motor_reverse_flag = MOTOR_DIRECTION_REVERSE;
+    chassis_motor_config.controller_setting_init_config.motor_reverse_flag = MOTOR_DIRECTION_NORMAL;
     motor_rb = PowerControlInit(&chassis_motor_config);
 
     chassis_motor_config.can_init_config.can_handle = &hcan2;
     chassis_motor_config.can_init_config.tx_id = 4;
-    chassis_motor_config.controller_setting_init_config.motor_reverse_flag = MOTOR_DIRECTION_NORMAL;
+    chassis_motor_config.controller_setting_init_config.motor_reverse_flag = MOTOR_DIRECTION_REVERSE;
     motor_lb = PowerControlInit(&chassis_motor_config);
 
     // referee_data = UITaskInit(&huart6, &ui_data); // 裁判系统初始化,会同时初始化UI
@@ -528,7 +528,7 @@ void ChassisTask()
         break;
     case CHASSIS_FOLLOW_GIMBAL_YAW:
 
-        chassis_cmd_recv.wz = -3.6f * chassis_cmd_recv.offset_angle * abs(chassis_cmd_recv.offset_angle) - 0.7 * gimbal_wz; // 考虑加入pid闭环会更好
+        chassis_cmd_recv.wz = -3.2f * chassis_cmd_recv.offset_angle * abs(chassis_cmd_recv.offset_angle) - 0.7 * gimbal_wz; // 考虑加入pid闭环会更好
         // chassis_cmd_recv.wz = -1.0 * gimbal_wz;
         break;
     case CHASSIS_ROTATE: // 自旋,同时保持全向机动

@@ -60,7 +60,7 @@ void GimbalInit()
         },
         .controller_param_init_config = {
             .angle_PID = {
-                .Kp = 0.71, // 0.71
+                .Kp = 0.67, // 0.71
                 .Ki = 0,
                 .Kd = 0,
 
@@ -70,7 +70,7 @@ void GimbalInit()
                 .MaxOut = 21,
             },
             .speed_PID = {
-                .Kp = 2.4, // 2.1
+                .Kp = 2.1, // 2.1
                 .Ki = 0.0, // 0.1 //最好增加速度环ki,小陀螺的时候可以抑制云台偏移
                 .Kd = 0,
                 .Improve = PID_Trapezoid_Intergral | PID_Integral_Limit | PID_Derivative_On_Measurement,
