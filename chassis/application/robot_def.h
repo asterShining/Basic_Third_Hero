@@ -157,6 +157,17 @@ typedef enum {
 } friction_mode_e;
 
 typedef enum {
+    FRONT_TRACK_OFF = 0, // 前履带关闭
+    FRONT_TRACK_ON, // 前履带开启
+} front_track_mode_e;
+
+typedef enum {
+    LIFT_OFF = 0, // 抬升关闭
+    LIFT_HOLD, // 抬升保持当前位置
+    LIFT_ADJUST, // 抬升根据拨轮调整目标高度
+} lift_mode_e;
+
+typedef enum {
     LID_OPEN = 0, // 弹舱盖打开
     LID_CLOSE, // 弹舱盖关闭
 } lid_mode_e;
@@ -205,6 +216,10 @@ typedef struct
     chassis_mode_e chassis_mode;
     int chassis_speed_buff;
     super_cap_mode_e cap_mode;
+    front_track_mode_e front_track_mode; // What: 独立描述前履带开关状态；Why: 避免复用底盘主模式后让跟随与上岛辅助机构互相覆盖
+    lift_mode_e lift_mode; // What: 独立描述抬升状态机；Why: 让抬升保持与调高语义在双板两侧都保持一致
+    float front_track_speed_ref; // What: 下发前履带速度参考；Why: 把履带调速接口预留在双板协议里，底盘侧不再硬编码启停外的行为
+    float lift_dial_input; // What: 下发抬升拨轮归一化输入；Why: 底盘侧基于真实电机反馈积分目标高度，避免云台板盲算位置
     // UI部分
     //  ...
 

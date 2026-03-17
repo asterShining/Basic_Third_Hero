@@ -31,6 +31,14 @@
 #define RC_TRIGGER_TH 500
 // Yaw 死区漂移低通锁定系数: 0.90~0.98，值越小锁定越快，0.95 约 0.5s 平滑锁定
 #define YAW_DRIFT_LOCK_COEF 0.95f
+// What: 定义遥控器连发射频；Why: 保持当前遥控器发射手感，不把这次上岛迁移扩散成发射参数重调。
+#define BURST_FIRE_RATE 8.0f
+// What: 定义前履带默认速度参考；Why: 先打通履带速度闭环链路，后续实车调速只需改这一处。
+#define FRONT_TRACK_SPEED_REF_DEFAULT 40.0f
+// What: 定义抬升拨轮归一化满量程；Why: 与DBUS拨轮量程保持一致，让双板两侧都使用同一套输入解释。
+#define AUX_DIAL_INPUT_MAX 660.0f
+// What: 定义抬升拨轮死区；Why: 机械中位抖动和手指轻碰都不应该持续积分抬升目标。
+#define AUX_DIAL_INPUT_DEADZONE 50.0f
 // 鼠标灵敏度按当前车体手感分别调整，作用是让 yaw 更跟手、pitch 方向与实际操控一致；
 // 原因是用户反馈 yaw 偏慢且 pitch 反向，因此这里同时上调 yaw 系数并翻转 pitch 符号。
 #define MOUSE_YAW_SENSITIVITY_DEG (0.00011f * RAD_2_DEGREE)
@@ -54,6 +62,12 @@
 /* cmd应用包含的模块实例指针和交互信息存储*/
 #ifdef GIMBAL_BOARD // 对双板的兼容,条件编译
 #include "can_comm.h"
+// What: 在编译期校验底盘反馈结构体尺寸；Why: 双板通信仍需保证单帧CAN可以装下完整反馈。
+_Static_assert(sizeof(Chassis_Upload_Data_s) <= CAN_COMM_MAX_BUFFSIZE,
+               "Chassis_Upload_Data_s exceeds CAN_COMM_MAX_BUFFSIZE");
+// What: 在编译期校验底盘控制结构体尺寸；Why: 新增上岛字段后必须继续保证命令帧不会溢出CANComm缓冲区。
+_Static_assert(sizeof(Chassis_Ctrl_Cmd_s) <= CAN_COMM_MAX_BUFFSIZE,
+               "Chassis_Ctrl_Cmd_s exceeds CAN_COMM_MAX_BUFFSIZE");
 static CANCommInstance *cmd_can_comm; // 双板通信
 
 #endif
@@ -89,8 +103,13 @@ BMI088Instance *bmi088_test; // 云台IMU
 BMI088_Data_t bmi088_data;
 // 定义一个静态变量来保存上一次的开关状态，初始化为下（急停/停止状态）
 static uint16_t last_switch_right = RC_SW_DOWN;
+static uint16_t last_switch_left = RC_SW_DOWN; // What: 保存左拨杆上一拍状态；Why: 上岛逻辑依赖中位切换边沿，不能把持续保持误判成重复触发。
 // What: 保存底盘跟随使用的 yaw 软件对齐基准角；Why: 直接信任 DM 已保存的硬件零点，避免开机又减一次机械安装角导致零点偏移。
 static float yaw_align_offset_deg = 0.0f;
+static uint8_t friction_switch_state = 0u; // What: 记录遥控器摩擦轮锁存状态；Why: 左拨杆上拨需要做一次一切换而不是按住就反复翻转。
+static uint8_t fire_mode_state = 0u; // What: 记录当前遥控器发射模式；Why: 保留现有单发/二连发/连发切换状态，不把上岛迁移变成发射重构。
+static uint8_t front_track_switch_state = 0u; // What: 记录前履带开关状态；Why: 上岛辅助机构需要跨控制周期保持启停状态。
+static uint8_t lift_mode_switch_state = 0u; // What: 记录抬升模式锁存状态；Why: 拨轮松手后仍需保持当前位置，而不是自动退出抬升会话。
 
 // --- 新增的静态变量，用于长按计时 ---
 static uint32_t inner_eight_cnt = 0; // 内八计时器
@@ -169,6 +188,40 @@ static void ResetKeyboardMotionState()
 }
 
 /**
+ * @brief 将拨轮原始值归一化为抬升输入
+ *
+ * @param raw_dial 遥控器原始拨轮值
+ * @return float 归一化后的抬升输入
+ */
+static float NormalizeLiftDialInput(int16_t raw_dial)
+{
+    float normalized = -((float)raw_dial) / AUX_DIAL_INPUT_MAX;
+    float deadzone = AUX_DIAL_INPUT_DEADZONE / AUX_DIAL_INPUT_MAX;
+
+    // What: 统一把拨轮上拨解释成正向抬升并做死区与限幅；Why: 底盘侧只消费稳定标准化命令，避免双板两边各自解释方向和抖动。
+    if (normalized > -deadzone && normalized < deadzone)
+        return 0.0f;
+
+    LIMIT_MIN_MAX(normalized, -1.0f, 1.0f);
+    return normalized;
+}
+
+/**
+ * @brief 清空上岛辅助机构状态
+ *
+ */
+static void ResetChassisAuxState()
+{
+    // What: 一次性复位前履带与抬升状态及下发值；Why: 急停或退出上岛时不能沿用上一拍辅助机构命令继续动作。
+    front_track_switch_state = 0u;
+    lift_mode_switch_state = 0u;
+    chassis_cmd_send.front_track_mode = FRONT_TRACK_OFF;
+    chassis_cmd_send.lift_mode = LIFT_OFF;
+    chassis_cmd_send.front_track_speed_ref = 0.0f;
+    chassis_cmd_send.lift_dial_input = 0.0f;
+}
+
+/**
  * @brief 按斜坡限速把当前值推进到目标值
  *
  * @param current 当前输出
@@ -231,6 +284,12 @@ static void PrepareControlCommandBase()
     chassis_cmd_send.gimbal_cmd_wz = 0.0f;
     chassis_cmd_send.calibrate_imu = 0;
     chassis_cmd_send.chassis_mode = CHASSIS_ZERO_FORCE;
+    chassis_cmd_send.cap_mode = SUPER_CAP_OFF;
+    chassis_cmd_send.chassis_speed_buff = 0;
+    chassis_cmd_send.front_track_mode = FRONT_TRACK_OFF;
+    chassis_cmd_send.lift_mode = LIFT_OFF;
+    chassis_cmd_send.front_track_speed_ref = 0.0f;
+    chassis_cmd_send.lift_dial_input = 0.0f;
 
     gimbal_cmd_send.gimbal_mode = GIMBAL_ZERO_FORCE;
 
@@ -364,6 +423,8 @@ static void EmergencyHandler()
     shoot_cmd_send.friction_mode = FRICTION_OFF;
     shoot_cmd_send.load_mode = LOAD_STOP;
     shoot_cmd_send.friction_mode = FRICTION_OFF;
+    friction_switch_state = 0u;
+    ResetChassisAuxState();
     // }
     // 遥控器右侧开关为[上],恢复正常运行
     // if (switch_is_up(rc_data[TEMP].rc.switch_right)) {
@@ -382,8 +443,16 @@ static void RemoteControlSet()
     // 1. 获取当前开关状态
     uint16_t current_switch_right = rc_data[TEMP].rc.switch_right;
     uint16_t current_switch_left = rc_data[TEMP].rc.switch_left;
+    uint8_t left_mid_to_up = switch_is_up(current_switch_left) && switch_is_mid(last_switch_left);
+    uint8_t left_mid_to_down = switch_is_down(current_switch_left) && switch_is_mid(last_switch_left);
 
     float current_real_pitch = gimbal_fetch_data.gimbal_imu_data.Pitch; // [轴互换后] Pitch 字段即物理 Pitch
+
+    // What: 每拍先清空辅助机构瞬态命令；Why: 上岛开关是锁存状态，但履带速度和抬升拨轮输入都不应该沿用旧值。
+    chassis_cmd_send.front_track_mode = front_track_switch_state ? FRONT_TRACK_ON : FRONT_TRACK_OFF;
+    chassis_cmd_send.lift_mode = LIFT_OFF;
+    chassis_cmd_send.front_track_speed_ref = 0.0f;
+    chassis_cmd_send.lift_dial_input = 0.0f;
 
     // --- 状态机逻辑 ---
 
@@ -574,41 +643,32 @@ static void RemoteControlSet()
         };
     }
 
-    static uint8_t friction_switch_state = 0; // 0-关, 1-开
-    static uint16_t last_switch_left = RC_SW_DOWN;
-
-    // 【修改点1】定义默认发射模式
-    // 0:单发, 1:二连发, 2:连发
-    // 您可以在这里修改初始值，或者通过键盘 Key_E 来修改它
-    static uint8_t fire_mode_state = 0;
-
-// [新增] 连发射频
-#define BURST_FIRE_RATE 8.0f // 连发每秒8发，可自行调整
-
     // ==============================================================
-    // [新增] 安全逻辑: 仅在非急停状态下允许开启摩擦轮和射击
+    // [新增] 安全逻辑: 仅在非急停状态下允许开启摩擦轮、前履带和抬升
     // ==============================================================
     if (!switch_is_down(current_switch_right)) {
-        // ==============================================================
-        // 逻辑 A: 摩擦轮开关控制 (左拨杆 中 -> 上)
-        // ==============================================================
-        // 检测从【中】拨到【上】的瞬间 (上升沿)
-        if (switch_is_up(current_switch_left) && switch_is_mid(last_switch_left)) {
-            // 无论当前是什么模式，直接取反状态
-            friction_switch_state = !friction_switch_state;
-
-            // 可选：为了安全，每次关闭摩擦轮时，重置发射模式为单发
-            /*
-            if (friction_switch_state == 0) {
-                fire_mode_state = 0;
+        if (left_mid_to_up) {
+            // What: 左拨杆上翻优先处理当前功能域；Why: 同一个拨杆要在摩擦轮与上岛辅助机构之间复用，必须按当前锁存状态解释边沿。
+            if (friction_switch_state != 0u) {
+                friction_switch_state = 0u;
+            } else if (front_track_switch_state != 0u) {
+                lift_mode_switch_state = !lift_mode_switch_state;
+            } else {
+                friction_switch_state = 1u;
             }
-            */
         }
 
-        // ==============================================================
-        // 逻辑 B: 执行发射逻辑
-        // ==============================================================
-        if (friction_switch_state == 1) {
+        if (friction_switch_state == 0u && left_mid_to_down) {
+            // What: 仅在摩擦轮关闭时响应履带切换；Why: 保留原有左拨杆下拨开火语义，不让上岛逻辑抢占发射入口。
+            front_track_switch_state = !front_track_switch_state;
+            if (front_track_switch_state == 0u)
+                lift_mode_switch_state = 0u;
+        }
+
+        if (front_track_switch_state == 0u)
+            lift_mode_switch_state = 0u;
+
+        if (friction_switch_state == 1u) {
             // 1. 开启摩擦轮
             shoot_cmd_send.friction_mode = FRICTION_ON;
             shoot_cmd_send.bullet_speed = BIG_AMU_12;
@@ -655,12 +715,23 @@ static void RemoteControlSet()
             shoot_cmd_send.shoot_rate = 0.0f;
         }
 
+        chassis_cmd_send.front_track_mode = front_track_switch_state ? FRONT_TRACK_ON : FRONT_TRACK_OFF;
+        if (front_track_switch_state != 0u) {
+            float lift_dial_input = NormalizeLiftDialInput(rc_data[TEMP].rc.dial);
+
+            // What: 履带开启时下发固定速度与抬升拨轮输入；Why: 先保持原提交的实车语义，底盘侧再基于真实反馈完成保持与调高。
+            chassis_cmd_send.front_track_speed_ref = FRONT_TRACK_SPEED_REF_DEFAULT;
+            chassis_cmd_send.lift_dial_input = lift_dial_input;
+            chassis_cmd_send.lift_mode = (lift_mode_switch_state == 0u) ? LIFT_OFF : (lift_dial_input == 0.0f ? LIFT_HOLD : LIFT_ADJUST);
+        }
+
     } else {
-        // [新增] 急停状态下的强制关闭
-        friction_switch_state = 0; // 强制关闭摩擦轮开关状态
+        // What: 急停时强制清空所有遥控器锁存状态；Why: 解除急停后必须从安全基线重新进入，而不是继续沿用旧会话。
+        friction_switch_state = 0u;
         shoot_cmd_send.friction_mode = FRICTION_OFF;
         shoot_cmd_send.load_mode = LOAD_STOP;
         shoot_cmd_send.shoot_rate = 0.0f;
+        ResetChassisAuxState();
     }
 
     // 更新历史状态

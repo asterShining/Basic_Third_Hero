@@ -16,6 +16,7 @@
 #include "motor_def.h"
 #include "robot_def.h"
 #include "power_control.h"
+#include "dmmotor.h"
 #ifdef USE_SUPER_CAP
 #include "super_cap.h" // [条件编译] 仅在启用超电时包含此头文件
 #endif
@@ -34,11 +35,21 @@
 #define HALF_TRACK_WIDTH (TRACK_WIDTH / 2.0f) // 半轮距
 #define PERIMETER_WHEEL (RADIUS_WHEEL * 2 * PI) // 轮子周长
 #define DEFAULT_TEST_POWER 80.0f // 调试用的基础功率
+#define LIFT_DIAL_MAX_SPEED_DPS 65.0f // What: 定义抬升拨轮映射后的最大调节角速度；Why: 提高抬升跟手性同时保持位置环仍在可控范围内
+#define LIFT_RELATIVE_MIN_ANGLE -20.0f // What: 定义相对进入点的最小抬升角；Why: 给机构保留回落空间并避免误操作顶到底部极限
+#define LIFT_RELATIVE_MAX_ANGLE 80.0f // What: 定义相对进入点的最大抬升角；Why: 用保守软件限位先保护机构，后续可按实车行程再放宽
+#define CHASSIS_TASK_DT_FALLBACK 0.005f // What: 定义底盘任务积分后备周期；Why: DWT异常时仍按200Hz近似积分，避免抬升目标突变
 
 /* 底盘应用包含的模块和信息存储,底盘是单例模式,因此不需要为底盘建立单独的结构体 */
 #ifdef CHASSIS_BOARD // 如果是底盘板,使用板载IMU获取底盘转动角速度
 #include "can_comm.h"
 #include "ins_task.h"
+// What: 在编译期校验底盘反馈结构体尺寸；Why: 双板通信仍需保证单帧CAN可以装下完整反馈数据。
+_Static_assert(sizeof(Chassis_Upload_Data_s) <= CAN_COMM_MAX_BUFFSIZE,
+               "Chassis_Upload_Data_s exceeds CAN_COMM_MAX_BUFFSIZE");
+// What: 在编译期校验底盘控制结构体尺寸；Why: 新增上岛字段后必须继续保证命令帧不会溢出CANComm缓冲区。
+_Static_assert(sizeof(Chassis_Ctrl_Cmd_s) <= CAN_COMM_MAX_BUFFSIZE,
+               "Chassis_Ctrl_Cmd_s exceeds CAN_COMM_MAX_BUFFSIZE");
 static CANCommInstance *chasiss_can_comm; // 双板通信CAN comm
 attitude_t *Chassis_IMU_data;
 #endif // CHASSIS_BOARD
@@ -56,6 +67,8 @@ static Referee_Interactive_info_t ui_data; // UI数据，将底盘中的数据�
 static SuperCapInstance *cap = { NULL }; // [条件编译] 超级电容实例指针
 #endif
 static DJIMotorInstance *motor_lf, *motor_rf, *motor_lb, *motor_rb; // left right forward back
+static DMMotorInstance *front_track_motor_left, *front_track_motor_right; // What: 保存前履带DM实例；Why: 底盘任务需要独立控制履带启停与速度参考
+static DJIMotorInstance *lift_motor_left, *lift_motor_right; // What: 保存后抬升3508实例；Why: 抬升机构需要基于真实角度做双环位置保持
 
 // 方案二，陀螺仪针对全麦纠偏PID
 static PIDInstance yaw_lock_pid; // 航向锁定专用PID
@@ -76,6 +89,11 @@ static float vt_lf, vt_rf, vt_lb, vt_rb; // 底盘速度解算后的临时输出
 static float real_vx = 0.0f; // 真实前进速度 m/s
 static float real_vy = 0.0f; // 真实横移速度 m/s
 static float real_wz = 0.0f; // 真实旋转速度 deg/s
+static float lift_target_angle = 0.0f; // What: 保存抬升当前机械目标角；Why: 拨轮松手后需要保持最后高度而不是失控回落
+static float lift_entry_angle = 0.0f; // What: 保存本次进入抬升模式时的机械零位；Why: 软件限位按会话起点计算，避免依赖固定绝对零点
+static uint8_t lift_ref_ready = 0u; // What: 标记抬升位置环参考是否已建立；Why: 等到首帧编码器反馈后再切角度环，避免上电乱冲
+static lift_mode_e last_lift_mode = LIFT_OFF; // What: 保存上一拍抬升模式；Why: 通过边沿检测在进入抬升模式时重建当前位置参考
+static uint32_t lift_control_dt_cnt = 0u; // What: 保存抬升积分时间戳；Why: 用真实任务周期积分拨轮输入，减少调度抖动带来的高度漂移
 
 // [!code ++]
 // ==========================================
@@ -144,6 +162,168 @@ static float GetVariableSpinBase()
     return wave;
 }
 
+/**
+ * @brief 读取单个抬升电机的统一机械角度
+ *
+ * @param motor 抬升电机实例
+ * @return float 统一方向后的机械角度
+ */
+static float GetLiftMotorMechanicalAngle(const DJIMotorInstance *motor)
+{
+    float mechanical_angle = motor->measure.total_angle;
+
+    // What: 将反向安装的3508角度折算回统一机械正方向；Why: 双抬升电机必须共享同一目标角，否则位置环会相互对冲。
+    if (motor->motor_settings.motor_reverse_flag == MOTOR_DIRECTION_REVERSE)
+        mechanical_angle = -mechanical_angle;
+
+    return mechanical_angle;
+}
+
+/**
+ * @brief 判断抬升电机是否已经收到有效反馈
+ *
+ * @return uint8_t 反馈就绪标志
+ */
+static uint8_t IsLiftFeedbackReady(void)
+{
+    if (lift_motor_left == NULL || lift_motor_right == NULL)
+        return 0u;
+
+    // What: 以编码器首帧反馈作为位置环启用条件；Why: 上电默认零值并不代表真实机械位置，过早闭环会把抬升误拉回假零点。
+    return (uint8_t)(lift_motor_left->measure.ecd != 0u || lift_motor_right->measure.ecd != 0u ||
+                     lift_motor_left->measure.total_round != 0 || lift_motor_right->measure.total_round != 0);
+}
+
+/**
+ * @brief 获取双抬升机构当前平均机械角度
+ *
+ * @return float 平均机械角度
+ */
+static float GetLiftAverageMechanicalAngle(void)
+{
+    return 0.5f * (GetLiftMotorMechanicalAngle(lift_motor_left) + GetLiftMotorMechanicalAngle(lift_motor_right));
+}
+
+/**
+ * @brief 将抬升目标角同步到当前位置
+ *
+ */
+static void SyncLiftTargetToCurrent(void)
+{
+    // What: 同步刷新抬升目标角与本次会话零位；Why: 进入抬升会话或解除急停后都要从当前位置重新建立限位参考。
+    lift_target_angle = GetLiftAverageMechanicalAngle();
+    lift_entry_angle = lift_target_angle;
+}
+
+/**
+ * @brief 在反馈就绪后建立抬升位置环参考
+ *
+ */
+static void EnsureLiftReferenceReady(void)
+{
+    if (lift_ref_ready != 0u || IsLiftFeedbackReady() == 0u)
+        return;
+
+    // What: 收到首帧可信反馈后再切到角度外环；Why: 这样抬升上电先静止，参考可靠后再进入位置保持。
+    lift_ref_ready = 1u;
+    SyncLiftTargetToCurrent();
+    DJIMotorOuterLoop(lift_motor_left, ANGLE_LOOP);
+    DJIMotorOuterLoop(lift_motor_right, ANGLE_LOOP);
+    DJIMotorSetRef(lift_motor_left, lift_target_angle);
+    DJIMotorSetRef(lift_motor_right, lift_target_angle);
+}
+
+/**
+ * @brief 安全停用前履带与抬升辅助机构
+ *
+ */
+static void StopAuxActuators(void)
+{
+    if (front_track_motor_left != NULL) {
+        DMMotorSetRef(front_track_motor_left, 0.0f);
+        DMMotorStop(front_track_motor_left);
+    }
+    if (front_track_motor_right != NULL) {
+        DMMotorSetRef(front_track_motor_right, 0.0f);
+        DMMotorStop(front_track_motor_right);
+    }
+
+    if (lift_ref_ready != 0u && lift_motor_left != NULL && lift_motor_right != NULL)
+        SyncLiftTargetToCurrent();
+
+    if (lift_motor_left != NULL) {
+        DJIMotorSetRef(lift_motor_left, lift_target_angle);
+        DJIMotorStop(lift_motor_left);
+    }
+    if (lift_motor_right != NULL) {
+        DJIMotorSetRef(lift_motor_right, lift_target_angle);
+        DJIMotorStop(lift_motor_right);
+    }
+
+    // What: 清空上一拍抬升模式记录；Why: 解除急停后应重新以当前位置建立上岛会话零位。
+    last_lift_mode = LIFT_OFF;
+}
+
+/**
+ * @brief 按当前命令控制前履带DM速度闭环
+ *
+ */
+static void ControlFrontTrackMotors(void)
+{
+    if (front_track_motor_left == NULL || front_track_motor_right == NULL)
+        return;
+
+    if (chassis_cmd_recv.front_track_mode == FRONT_TRACK_ON) {
+        // What: 前履带开启时对两台DM下发同一机械速度参考；Why: 安装方向差异交给反向标志处理，应用层只维护一套履带速度目标。
+        DMMotorEnable(front_track_motor_left);
+        DMMotorEnable(front_track_motor_right);
+        DMMotorSetRef(front_track_motor_left, chassis_cmd_recv.front_track_speed_ref);
+        DMMotorSetRef(front_track_motor_right, chassis_cmd_recv.front_track_speed_ref);
+    } else {
+        DMMotorSetRef(front_track_motor_left, 0.0f);
+        DMMotorSetRef(front_track_motor_right, 0.0f);
+        DMMotorStop(front_track_motor_left);
+        DMMotorStop(front_track_motor_right);
+    }
+}
+
+/**
+ * @brief 按当前模式控制抬升3508位置闭环
+ *
+ */
+static void ControlLiftMotors(void)
+{
+    float dt;
+    lift_mode_e requested_lift_mode;
+
+    if (lift_motor_left == NULL || lift_motor_right == NULL)
+        return;
+
+    EnsureLiftReferenceReady();
+    if (lift_ref_ready == 0u)
+        return;
+
+    requested_lift_mode = (chassis_cmd_recv.front_track_mode == FRONT_TRACK_ON) ? chassis_cmd_recv.lift_mode : LIFT_OFF;
+    if (last_lift_mode == LIFT_OFF && requested_lift_mode != LIFT_OFF)
+        SyncLiftTargetToCurrent();
+
+    dt = DWT_GetDeltaT(&lift_control_dt_cnt);
+    if (dt <= 0.0f || dt > 0.05f)
+        dt = CHASSIS_TASK_DT_FALLBACK;
+
+    if (requested_lift_mode == LIFT_ADJUST)
+        lift_target_angle += chassis_cmd_recv.lift_dial_input * LIFT_DIAL_MAX_SPEED_DPS * dt;
+
+    // What: 抬升限位以本次进入模式的当前位置为零位；Why: 调试阶段机构改装后也能继续使用，不依赖固定绝对机械零点。
+    LIMIT_MIN_MAX(lift_target_angle, lift_entry_angle + LIFT_RELATIVE_MIN_ANGLE, lift_entry_angle + LIFT_RELATIVE_MAX_ANGLE);
+
+    DJIMotorEnable(lift_motor_left);
+    DJIMotorEnable(lift_motor_right);
+    DJIMotorSetRef(lift_motor_left, lift_target_angle);
+    DJIMotorSetRef(lift_motor_right, lift_target_angle);
+    last_lift_mode = requested_lift_mode;
+}
+
 void ChassisInit()
 {
     Chassis_IMU_data = INS_Init();
@@ -188,6 +368,80 @@ void ChassisInit()
     chassis_motor_config.can_init_config.tx_id = 4;
     chassis_motor_config.controller_setting_init_config.motor_reverse_flag = MOTOR_DIRECTION_REVERSE;
     motor_lb = PowerControlInit(&chassis_motor_config);
+
+    Motor_Init_Config_s front_track_motor_config = {
+        .can_init_config = {
+            .can_handle = &hcan1,
+        },
+        .controller_param_init_config = {
+            .speed_PID = {
+                .Kp = 0.9f,
+                .Ki = 0.0f,
+                .Kd = 0.0f,
+                .Improve = PID_Trapezoid_Intergral | PID_Integral_Limit | PID_Derivative_On_Measurement,
+                .IntegralLimit = 6.0f,
+                .MaxOut = 18.0f,
+            },
+        },
+        .controller_setting_init_config = {
+            .angle_feedback_source = MOTOR_FEED,
+            .speed_feedback_source = MOTOR_FEED,
+            .outer_loop_type = SPEED_LOOP,
+            .close_loop_type = SPEED_LOOP,
+        },
+        .motor_type = MOTOR_TYPE_NONE,
+    };
+
+    // What: 前履带使用DM3519速度闭环模板初始化；Why: 复用现有DM封装，只把履带速度目标暴露给上层命令链路。
+    front_track_motor_config.can_init_config.tx_id = 0x07;
+    front_track_motor_config.can_init_config.rx_id = 0x08;
+    front_track_motor_config.controller_setting_init_config.motor_reverse_flag = MOTOR_DIRECTION_NORMAL;
+    front_track_motor_left = DMMotorInit(&front_track_motor_config);
+
+    front_track_motor_config.can_init_config.tx_id = 0x09;
+    front_track_motor_config.can_init_config.rx_id = 0x10;
+    front_track_motor_config.controller_setting_init_config.motor_reverse_flag = MOTOR_DIRECTION_REVERSE;
+    front_track_motor_right = DMMotorInit(&front_track_motor_config);
+
+    Motor_Init_Config_s lift_motor_config = {
+        .can_init_config = {
+            .can_handle = &hcan2,
+        },
+        .controller_param_init_config = {
+            .angle_PID = {
+                .Kp = 12.0f,
+                .Ki = 0.0f,
+                .Kd = 0.0f,
+                .Improve = PID_Integral_Limit,
+                .IntegralLimit = 4000.0f,
+                .MaxOut = 2500.0f,
+            },
+            .speed_PID = {
+                .Kp = 4.5f,
+                .Ki = 0.0f,
+                .Kd = 0.0f,
+                .Improve = PID_Integral_Limit,
+                .IntegralLimit = 4000.0f,
+                .MaxOut = 16000.0f,
+            },
+        },
+        .controller_setting_init_config = {
+            .angle_feedback_source = MOTOR_FEED,
+            .speed_feedback_source = MOTOR_FEED,
+            .outer_loop_type = SPEED_LOOP,
+            .close_loop_type = ANGLE_LOOP | SPEED_LOOP,
+        },
+        .motor_type = M3508,
+    };
+
+    // What: 抬升3508先以上电零速度方式初始化；Why: 等待首帧编码器反馈后再切位置环，避免当前位置未知时上电回零乱冲。
+    lift_motor_config.can_init_config.tx_id = 6;
+    lift_motor_config.controller_setting_init_config.motor_reverse_flag = MOTOR_DIRECTION_NORMAL;
+    lift_motor_left = DJIMotorInit(&lift_motor_config);
+
+    lift_motor_config.can_init_config.tx_id = 5;
+    lift_motor_config.controller_setting_init_config.motor_reverse_flag = MOTOR_DIRECTION_REVERSE;
+    lift_motor_right = DJIMotorInit(&lift_motor_config);
 
     // referee_data = UITaskInit(&huart6, &ui_data); // 裁判系统初始化,会同时初始化UI
     PowerControl_EnableSlopeComp(1);
@@ -453,7 +707,6 @@ static void EstimateSpeed()
 void ChassisTask()
 {
     float gimbal_wz = 0.0f;
-    gimbal_wz = chassis_cmd_recv.gimbal_gyro_z;
     // 后续增加没收到消息的处理(双板的情况)
     // 获取新的控制信息
 #ifdef ONE_BOARD
@@ -462,6 +715,7 @@ void ChassisTask()
 #ifdef CHASSIS_BOARD
     chassis_cmd_recv = *(Chassis_Ctrl_Cmd_s *)CANCommGet(chasiss_can_comm);
 #endif // CHASSIS_BOARD
+    gimbal_wz = chassis_cmd_recv.gimbal_gyro_z; // What: 使用最新一帧云台角速度前馈；Why: 避免先读取旧值再更新命令导致跟随支路固定滞后一个控制周期。
 
     /* 功率控制策略 */
     // 1. 获取裁判系统功率限制 (原始最大值)
@@ -515,6 +769,7 @@ void ChassisTask()
         DJIMotorStop(motor_rf);
         DJIMotorStop(motor_lb);
         DJIMotorStop(motor_rb);
+        StopAuxActuators();
     } else { // 正常工作
         DJIMotorEnable(motor_lf);
         DJIMotorEnable(motor_rf);
@@ -585,6 +840,12 @@ void ChassisTask()
 
     // 根据裁判系统的反馈数据和电容数据对输出限幅并设定闭环参考值
     LimitChassisOutput();
+
+    if (chassis_cmd_recv.chassis_mode != CHASSIS_ZERO_FORCE) {
+        // What: 在底盘主运动解算后独立控制履带与抬升；Why: 上岛辅助机构不参与麦轮功率分配，独立更新可以减少耦合风险。
+        ControlFrontTrackMotors();
+        ControlLiftMotors();
+    }
 
     // 根据电机的反馈速度和IMU(如果有)计算真实速度
     // EstimateSpeed();

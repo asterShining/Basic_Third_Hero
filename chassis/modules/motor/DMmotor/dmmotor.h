@@ -64,6 +64,7 @@ typedef struct
     CANInstance *motor_can_instace;
     DaemonInstance *motor_daemon;
     uint32_t lost_cnt;
+    uint8_t enable_cmd_cnt; // What: 记录低扭矩保活计数；Why: 低载时按更低频率补发使能帧，避免DM软失能又不把总线打满
 } DMMotorInstance;
 
 typedef enum {

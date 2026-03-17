@@ -9,6 +9,15 @@
 #include "bsp_log.h"
 #include <math.h>
 
+// What: 固定DM控制任务周期为5ms；Why: 将前履带闭环发送频率稳定在200Hz，给双板CAN与轮组总线留下余量
+#define DM_CONTROL_TASK_PERIOD_MS 5U
+// What: 定义低扭矩保活阈值；Why: 只有轻载时才降频补发模式帧，避免正常输出阶段额外占用CAN带宽
+#define DM_ENABLE_KEEPALIVE_TORQUE_THRESHOLD 1.0f
+// What: 定义低扭矩保活周期；Why: 低载时每25ms补发一次模式帧即可维持在线，不需要每拍都刷
+#define DM_ENABLE_KEEPALIVE_PERIOD_MS 25U
+// What: 由控制周期推导保活门限；Why: 后续调整任务周期时保活频率会自动联动，避免魔法数字分散
+#define DM_ENABLE_KEEPALIVE_CYCLE_COUNT (DM_ENABLE_KEEPALIVE_PERIOD_MS / DM_CONTROL_TASK_PERIOD_MS)
+
 static uint8_t idx;
 static DMMotorInstance *dm_motor_instance[DM_MOTOR_CNT];
 static osThreadId dm_task_handle[DM_MOTOR_CNT];
@@ -143,6 +152,7 @@ DMMotorInstance *DMMotorInit(Motor_Init_Config_s *config)
     DMMotorEnable(motor);
     DMMotorSetMode(DM_CMD_MOTOR_MODE, motor);
     DWT_Delay(0.1);
+    // What: 保持信任DM内部保存的硬件零点；Why: 上岛机构需要上电后直接围绕既有零点运行，避免每次启动重新校零打乱机械基准
     // DMMotorCaliEncoder(motor);
     DWT_Delay(0.1);
     dm_motor_instance[idx++] = motor;
@@ -184,6 +194,19 @@ void DMMotorTask(void const *argument)
     // uint16_t tmp;
     DMMotor_Send_s motor_send_mailbox;
     while (1) {
+        if (motor->stop_flag == MOTOR_ENALBED) {
+            // What: 轻载时按较低频率补发模式帧；Why: DM在小扭矩阶段容易软失能，保活能维持在线同时避免每拍都占用总线
+            if (fabsf(motor->measure.torque) < DM_ENABLE_KEEPALIVE_TORQUE_THRESHOLD) {
+                motor->enable_cmd_cnt++;
+                if (motor->enable_cmd_cnt >= DM_ENABLE_KEEPALIVE_CYCLE_COUNT) {
+                    DMMotorSetMode(DM_CMD_MOTOR_MODE, motor);
+                    motor->enable_cmd_cnt = 0u;
+                }
+            } else {
+                motor->enable_cmd_cnt = 0u;
+            }
+        }
+
         // ================= 1. 反馈源选择与处理 =================
         // 角度反馈
         if (setting->angle_feedback_source == OTHER_FEED && motor->other_angle_feedback_ptr)
@@ -303,7 +326,7 @@ void DMMotorTask(void const *argument)
 
         CANTransmit(motor->motor_can_instace, 2);
 
-        osDelay(2); // 500Hz 控制频率
+        osDelay(DM_CONTROL_TASK_PERIOD_MS); // What: 按固定5ms节拍发送DM控制报文；Why: 把履带闭环频率稳定在200Hz并降低CAN占用
     }
 }
 void DMMotorControlInit()

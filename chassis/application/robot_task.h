@@ -9,6 +9,7 @@
 #include "robot.h"
 #include "ins_task.h"
 #include "motor_task.h"
+#include "dmmotor.h"
 #include "referee_task.h"
 #include "daemon.h"
 #include "HT04.h"
@@ -48,7 +49,7 @@ void OSTaskInit()
 
     // osThreadDef(uitask, StartUITASK, osPriorityNormal, 0, 512);
     // uiTaskHandle = osThreadCreate(osThread(uitask), NULL);
-
+    DMMotorControlInit(); // What: 启动底盘侧全部DM控制任务；Why: 前履带使用独立DM线程闭环，不初始化任务只会注册实例不会真正输出
     // HTMotorControlInit(); // 没有注册HT电机则不会执行
 }
 
