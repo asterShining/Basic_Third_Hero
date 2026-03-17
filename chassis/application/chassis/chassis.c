@@ -86,11 +86,11 @@ static float real_wz = 0.0f; // 真实旋转速度 deg/s
 #define TRANSLATION_PRIORITY_RATIO 0.6f // 平移优先系数 (0~1)，越大则平移时旋转降速越明显
 
 /**
- * @brief 计算小陀螺的旋转目标速度 (核心优化逻辑：平移优先)
+ * @brief 计算小陀螺的旋转目标速度
  *
  * @param base_target_wz 基础目标旋转速度 (如果是变速模式，这里输入的是随时间变化的值)
- * @param vx_cmd 当前的前进指令 (来自摇杆解析，范围对应最大如 6600)
- * @param vy_cmd 当前的横移指令 (来自摇杆解析，范围对应最大如 6600)
+ * @param vx_cmd 当前的前进指令 
+ * @param vy_cmd 当前的横移指令
  * @return float 最终的旋转速度 target_wz
  */
 static float OptimizedSpinSpeed(float base_target_wz, float vx_cmd, float vy_cmd)
@@ -526,11 +526,23 @@ void ChassisTask()
     switch (chassis_cmd_recv.chassis_mode) {
     case CHASSIS_NO_FOLLOW: // 底盘不旋转,但维持全向机动,一般用于调整云台姿态
         break;
-    case CHASSIS_FOLLOW_GIMBAL_YAW:
+    case CHASSIS_FOLLOW_GIMBAL_YAW: {
+        const float follow_yaw_kp = 24.0f; // What: 跟随模式位置环比例增益；Why: 直接按角度误差生成回正速度，比二次项更线性且更容易调到“快但不炸”
+        const float follow_yaw_kd = 0.1f; // What: 跟随模式底盘角速度阻尼增益；Why: 使用底盘真实角速度做D项，专门抑制回中穿越和反向摆动
+        const float follow_yaw_kff = 1.2f; // What: 跟随模式云台角速度前馈增益；Why: 云台先动时提前拉动底盘，减少纯靠角度误差追赶带来的滞后
+        const float follow_yaw_deadband = 0.5f; // What: 跟随模式角度死区；Why: 回中附近直接清零小误差，避免机械间隙和噪声触发来回抖动
+        const float follow_yaw_max_wz = 3500.0f; // What: 跟随模式角速度输出上限；Why: 防止大角度时给电机速度环过猛目标，降低饱和后再过冲的概率
+        float chassis_wz = Chassis_IMU_data->Gyro[Z] * RAD_2_DEGREE; // What: 读取底盘当前真实角速度；Why: D项必须基于被控对象自身速度才能形成真实阻尼
+        float angle_err = chassis_cmd_recv.offset_angle; // What: 缓存当前底盘相对云台的角度误差；Why: 便于在进入控制律前统一做死区处理
 
-        chassis_cmd_recv.wz = -3.2f * chassis_cmd_recv.offset_angle * abs(chassis_cmd_recv.offset_angle) - 0.7 * gimbal_wz; // 考虑加入pid闭环会更好
-        // chassis_cmd_recv.wz = -1.0 * gimbal_wz;
+        if (fabsf(angle_err) < follow_yaw_deadband) {
+            angle_err = 0.0f; // What: 清零死区内误差；Why: 小角度时让前馈和阻尼接管，避免位置项在零点附近反复翻转
+        }
+
+        chassis_cmd_recv.wz = -follow_yaw_kp * angle_err - follow_yaw_kd * chassis_wz - follow_yaw_kff * gimbal_wz; // What: 生成底盘跟随云台的角速度指令；Why: 用P保证回中速度、用D抑制过冲、用前馈减少跟随滞后
+        LIMIT_MIN_MAX(chassis_cmd_recv.wz, -follow_yaw_max_wz, follow_yaw_max_wz); // What: 限制跟随模式角速度输出；Why: 避免外环瞬时给出过大目标把电机内环推入饱和
         break;
+    }
     case CHASSIS_ROTATE: // 自旋,同时保持全向机动
                          // [修改] 优化小陀螺逻辑：区分变速/匀速，并统一应用平移优先策略
 #if VARIABLE_SPIN_ENABLED
