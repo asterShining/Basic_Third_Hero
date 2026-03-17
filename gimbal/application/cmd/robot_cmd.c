@@ -504,13 +504,13 @@ static void RemoteControlSet()
 
         robot_state = ROBOT_READY;
         // [用户要求] 注释掉原有逻辑 (User request: Comment out original logic)
-        // chassis_cmd_send.chassis_mode = CHASSIS_NO_FOLLOW;
+        chassis_cmd_send.chassis_mode = CHASSIS_NO_FOLLOW;
         gimbal_cmd_send.gimbal_mode = GIMBAL_FREE_MODE;
 
         // [新增] 小陀螺模式配置 (New Configuration: Little Top Mode)
         // 这里明确下发 CHASSIS_ROTATE，作用是让底盘侧进入小陀螺分支。
         // 之前该行被注释后，发送出去的一直是 CHASSIS_NO_FOLLOW，所以底盘永远不会自旋。
-        chassis_cmd_send.chassis_mode = CHASSIS_ROTATE;
+        // chassis_cmd_send.chassis_mode = CHASSIS_ROTATE;
         // 云台切换至陀螺仪模式以保持世界坐标系下的稳定瞄准
         // gimbal_cmd_send.gimbal_mode = GIMBAL_GYRO_MODE;
 
