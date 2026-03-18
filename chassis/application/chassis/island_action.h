@@ -11,8 +11,9 @@ void IslandActionInit(void);
 /**
  * @brief 控制上岛机构动作
  * @param cmd_recv 接收到的底盘控制指令
+ * @param chassis_pitch_deg 底盘IMU当前pitch角度(度)，用于自动调平闭环
  */
-void IslandActionControl(const Chassis_Ctrl_Cmd_s *cmd_recv);
+void IslandActionControl(const Chassis_Ctrl_Cmd_s *cmd_recv, float chassis_pitch_deg);
 
 /**
  * @brief 紧急停止或底盘模式为ZERO_FORCE时停止辅助机构

@@ -23,7 +23,6 @@
 #include "message_center.h"
 #include "referee_task.h"
 #include <arm_math.h> // for fabsf
-#include "buzzer.h"
 
 #include "general_def.h"
 #include "bsp_dwt.h"
@@ -75,8 +74,6 @@ static PIDInstance yaw_lock_pid; // 航向锁定专用PID
 static float lock_target_yaw = 0.0f; // 锁定的目标角度
 static uint8_t is_manual_rotating = 0; // 标记是否正在手动旋转
 
-// 底盘蜂鸣器初始化 [!code ++]
-static BuzzzerInstance *chassis_buzzer = NULL; // [!code ++]
 static uint8_t last_cali_flag = 0; // 上一次的校准标志位
 
 /* 用于自旋变速策略的时间变量 */
@@ -218,15 +215,6 @@ void ChassisInit()
     };
     cap = SuperCapInit(&cap_conf); // 初始化超级电容模块
 #endif // USE_SUPER_CAP
-
-    // 底盘蜂鸣器初始化 [!code ++]
-    Buzzer_config_s buzzer_config = {
-        .alarm_level = ALARM_LEVEL_ABOVE_MEDIUM,
-        .octave = OCTAVE_4, // 使用中音，区别于云台的高音
-        .loudness = 0.5f, // 音量
-    };
-    chassis_buzzer = BuzzerRegister(&buzzer_config); // [!code ++]
-    // 底盘跟随云台
 
     // 发布订阅初始化,如果为双板,则需要can comm来传递消息
 #ifdef CHASSIS_BOARD
@@ -591,8 +579,8 @@ void ChassisTask()
     LimitChassisOutput();
 
     if (chassis_cmd_recv.chassis_mode != CHASSIS_ZERO_FORCE) {
-        // What: 在底盘主运动解算后独立控制履带与抬升；Why: 上岛辅助机构不参与麦轮功率分配，独立更新可以减少耦合风险。
-        IslandActionControl(&chassis_cmd_recv);
+        // What: 在底盘主运动解算后独立控制履带与抬升，同时传入IMU pitch角度；Why: 上岛辅助机构不参与麦轮功率分配，自动调平需要实时pitch反馈但不应直接访问底盘IMU全局变量。
+        IslandActionControl(&chassis_cmd_recv, Chassis_IMU_data->Pitch);
     }
 
     // 根据电机的反馈速度和IMU(如果有)计算真实速度

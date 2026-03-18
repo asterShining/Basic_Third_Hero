@@ -165,6 +165,8 @@ typedef enum {
     LIFT_OFF = 0, // 抬升关闭
     LIFT_HOLD, // 抬升保持当前位置
     LIFT_ADJUST, // 抬升根据拨轮调整目标高度
+    LIFT_AUTO_LEVEL, // What: 基于底盘pitch陀螺仪闭环自动调平；Why: 上坡后松开拨轮即可自动抬升后端保持底盘水平
+    LIFT_RETRACT, // What: 快速收腿模式；Why: 左拨杆回中时全速反向收腿，撞限位后自动停止
 } lift_mode_e;
 
 typedef enum {
