@@ -33,8 +33,6 @@
 #define YAW_DRIFT_LOCK_COEF 0.95f
 // What: 定义遥控器连发射频；Why: 保持当前遥控器发射手感，不把这次上岛迁移扩散成发射参数重调。
 #define BURST_FIRE_RATE 8.0f
-// What: 定义前履带默认速度参考；Why: 先打通履带速度闭环链路，后续实车调速只需改这一处。
-#define FRONT_TRACK_SPEED_REF_DEFAULT 40.0f
 // What: 定义抬升拨轮归一化满量程；Why: 与DBUS拨轮量程保持一致，让双板两侧都使用同一套输入解释。
 #define AUX_DIAL_INPUT_MAX 660.0f
 // What: 定义抬升拨轮死区；Why: 机械中位抖动和手指轻碰都不应该持续积分抬升目标。
@@ -659,13 +657,14 @@ static void RemoteControlSet()
         }
 
         if (friction_switch_state == 0u && left_mid_to_down) {
-            // What: 仅在摩擦轮关闭时响应履带切换；Why: 保留原有左拨杆下拨开火语义，不让上岛逻辑抢占发射入口。
+            // What: 仅在摩擦轮关闭时响应前履带切换；Why: 恢复左拨杆下拨锁存开关前履带的原始交互，不让抬升和发射抢占这个入口。
             front_track_switch_state = !front_track_switch_state;
             if (front_track_switch_state == 0u)
                 lift_mode_switch_state = 0u;
         }
 
         if (front_track_switch_state == 0u)
+            // What: 前履带关闭时同步退出抬升模式；Why: 恢复“只有前履带已开启时才允许进入抬升模式”的原始上岛流程。
             lift_mode_switch_state = 0u;
 
         if (friction_switch_state == 1u) {
@@ -719,8 +718,10 @@ static void RemoteControlSet()
         if (front_track_switch_state != 0u) {
             float lift_dial_input = NormalizeLiftDialInput(rc_data[TEMP].rc.dial);
 
-            // What: 履带开启时下发固定速度与抬升拨轮输入；Why: 先保持原提交的实车语义，底盘侧再基于真实反馈完成保持与调高。
+            // What: 前履带开启时下发用户可配的履带目标速度；Why: 履带速度现在从 robot_def.h 配置项读取，便于你自己按实车需求直接修改。
             chassis_cmd_send.front_track_speed_ref = FRONT_TRACK_SPEED_REF_DEFAULT;
+
+            // What: 恢复抬升模式门控后的拨轮下发；Why: 只有左拨杆上拨进入抬升模式后，拨轮才应该驱动后抬升上下运动。
             chassis_cmd_send.lift_dial_input = lift_dial_input;
             chassis_cmd_send.lift_mode = (lift_mode_switch_state == 0u) ? LIFT_OFF : (lift_dial_input == 0.0f ? LIFT_HOLD : LIFT_ADJUST);
         }
