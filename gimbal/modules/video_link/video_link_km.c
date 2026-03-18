@@ -1,50 +1,62 @@
 #include "video_link_km.h"
 #include "bsp_log.h"
 #include "bsp_usart.h"
+#include "crc_ref.h"
 #include "daemon.h"
 #include "memory.h"
-#include "stdbool.h"
-#include "stdlib.h"
+#include <stdbool.h>
 
 #define VIDEO_LINK_KM_RX_BUFFER_SIZE 64u
 #define VIDEO_LINK_KM_LOG_INTERVAL 50u
+#define VIDEO_LINK_KM_FRAME_SIZE 21u
+#define VIDEO_LINK_KM_FRAME_HEADER_0 0xA9u
+#define VIDEO_LINK_KM_FRAME_HEADER_1 0x53u
+
+#define VIDEO_LINK_KM_CH0_BIT_OFFSET 16u
+#define VIDEO_LINK_KM_CH1_BIT_OFFSET 27u
+#define VIDEO_LINK_KM_CH2_BIT_OFFSET 38u
+#define VIDEO_LINK_KM_CH3_BIT_OFFSET 49u
+#define VIDEO_LINK_KM_MODE_SW_BIT_OFFSET 60u
+#define VIDEO_LINK_KM_PAUSE_BIT_OFFSET 62u
+#define VIDEO_LINK_KM_FN_LEFT_BIT_OFFSET 63u
+#define VIDEO_LINK_KM_FN_RIGHT_BIT_OFFSET 64u
+#define VIDEO_LINK_KM_WHEEL_BIT_OFFSET 65u
+#define VIDEO_LINK_KM_TRIGGER_BIT_OFFSET 76u
+#define VIDEO_LINK_KM_MOUSE_X_BIT_OFFSET 80u
+#define VIDEO_LINK_KM_MOUSE_Y_BIT_OFFSET 96u
+#define VIDEO_LINK_KM_MOUSE_Z_BIT_OFFSET 112u
+#define VIDEO_LINK_KM_MOUSE_LEFT_BIT_OFFSET 128u
+#define VIDEO_LINK_KM_MOUSE_RIGHT_BIT_OFFSET 130u
+#define VIDEO_LINK_KM_MOUSE_MID_BIT_OFFSET 132u
+#define VIDEO_LINK_KM_KEYBOARD_BIT_OFFSET 136u
 
 typedef struct
 {
-    int32_t mouse_x;
-    int32_t mouse_y;
-    int32_t mouse_z;
-    uint32_t keyboard_value;
+    int16_t rocker_l_;
+    int16_t rocker_l1;
+    int16_t rocker_r_;
+    int16_t rocker_r1;
+    int16_t dial;
+    int16_t mouse_x;
+    int16_t mouse_y;
+    int16_t mouse_z;
+    uint16_t keyboard_value;
     uint8_t left_button_down;
     uint8_t right_button_down;
     uint8_t mid_button_down;
+    uint8_t mode_sw;
+    uint8_t pause_button_down;
+    uint8_t fn_left_button_down;
+    uint8_t fn_right_button_down;
+    uint8_t trigger_button_down;
 } VideoLinkKM_Decode_s;
 
 static RC_ctrl_t video_link_ctrl[2];
 static USARTInstance *video_link_usart_instance;
 static DaemonInstance *video_link_daemon_instance;
 static VideoLinkKM_Diag_s video_link_diag;
-static uint8_t video_link_init_flag = 0;
+static uint8_t video_link_init_flag = 0u;
 static uint8_t video_link_has_valid_frame = 0u;
-
-/**
- * @brief 将 32 位整型限制到 RC 鼠标字段可承载的范围
- *
- * @param raw_value 原始图传鼠标增量
- * @return int16_t 限幅后的鼠标增量
- */
-static int16_t VideoLinkClampToInt16(int32_t raw_value)
-{
-    // 这里统一把图传的 int32 鼠标增量压到 int16，作用是复用现有 RC_ctrl_t 结构；
-    // 原因是 robot_cmd 已经完全围绕 RC_ctrl_t 写好，直接复用能避免重写下游控制分支。
-    if (raw_value > 32767) {
-        return 32767;
-    }
-    if (raw_value < -32768) {
-        return -32768;
-    }
-    return (int16_t)raw_value;
-}
 
 /**
  * @brief 清空本拍的图传键鼠控制量
@@ -53,231 +65,157 @@ static int16_t VideoLinkClampToInt16(int32_t raw_value)
  */
 static void VideoLinkClearCurrentControl(void)
 {
-    // 这里每拍先清空当前控制态，作用是避免丢字段或解析失败时沿用上一拍残留命令；
-    // 原因是图传链路失真时最重要的是安全回零，而不是继续执行旧输入。
+    // 这里每拍先清空当前控制态，作用是让坏帧和断链都立即回零；
+    // 原因是图传键鼠是高优先级输入，若沿用上一拍残留会直接把旧运动命令带进 `robot_cmd`。
     memset(&video_link_ctrl[TEMP].rc, 0, sizeof(video_link_ctrl[TEMP].rc));
     memset(&video_link_ctrl[TEMP].mouse, 0, sizeof(video_link_ctrl[TEMP].mouse));
     memset(video_link_ctrl[TEMP].key, 0, sizeof(video_link_ctrl[TEMP].key));
 }
 
 /**
- * @brief 解析 protobuf varint
+ * @brief 按小端位序提取无符号字段
  *
- * @param buff 输入缓冲区
- * @param buff_len 输入缓冲区长度
- * @param value 输出值
- * @return uint8_t 已消费字节数,0 表示失败
+ * @param frame 原始 21 字节图传帧
+ * @param bit_offset 起始 bit 偏移
+ * @param bit_length 字段 bit 长度
+ * @return uint32_t 提取出的字段值
  */
-static uint8_t VideoLinkParseVarint(const uint8_t *buff, uint16_t buff_len, uint64_t *value)
+static uint32_t VideoLinkExtractBitsLE(const uint8_t *frame, uint16_t bit_offset, uint8_t bit_length)
 {
-    uint64_t result = 0u;
+    uint32_t value = 0u;
 
-    if (buff == NULL || value == NULL) {
-        return 0u;
+    // 这里显式按 bit 偏移提取字段，作用是摆脱编译器位域布局的不确定性；
+    // 原因是 VT03 官方样例虽然用了位域结构体，但机器人侧更适合用协议表的 bit 偏移做稳定解包。
+    for (uint8_t bit_index = 0u; bit_index < bit_length; ++bit_index) {
+        uint16_t current_bit = (uint16_t)(bit_offset + bit_index);
+        uint8_t byte_index = (uint8_t)(current_bit >> 3);
+        uint8_t bit_in_byte = (uint8_t)(current_bit & 0x07u);
+
+        value |= (uint32_t)(((frame[byte_index] >> bit_in_byte) & 0x01u) << bit_index);
     }
 
-    for (uint8_t i = 0; i < 10u && i < buff_len; ++i) {
-        result |= ((uint64_t)(buff[i] & 0x7Fu)) << (7u * i);
-        if ((buff[i] & 0x80u) == 0u) {
-            *value = result;
-            return (uint8_t)(i + 1u);
-        }
-    }
-    return 0u;
+    return value;
 }
 
 /**
- * @brief 直接按 KeyboardMouseControl protobuf 语义解析负载
+ * @brief 读取小端有符号 16 bit 字段
  *
- * @param payload protobuf 负载
- * @param payload_len 负载长度
- * @param decode_out 解析结果
- * @return uint8_t 1:成功 0:失败
+ * @param frame 原始 21 字节图传帧
+ * @param bit_offset 起始 bit 偏移
+ * @return int16_t 解出的有符号值
  */
-static uint8_t VideoLinkTryDecodePayload(const uint8_t *payload, uint16_t payload_len, VideoLinkKM_Decode_s *decode_out)
+static int16_t VideoLinkExtractSigned16LE(const uint8_t *frame, uint16_t bit_offset)
 {
-    uint16_t offset = 0u;
-    uint8_t recognized_mask = 0u;
+    uint16_t raw_value = (uint16_t)VideoLinkExtractBitsLE(frame, bit_offset, 16u);
 
-    if (payload == NULL || decode_out == NULL || payload_len == 0u) {
+    // 这里统一把鼠标轴按 int16 小端解释，作用是与 VT03 官方 21 字节定义严格一致；
+    // 原因是三个鼠标轴都占整 16 bit，直接转成 `int16_t` 比再做额外符号扩展更直接也更稳。
+    return (int16_t)raw_value;
+}
+
+/**
+ * @brief 校验 VT03 固定长度图传帧
+ *
+ * @param frame 指向 21 字节完整帧
+ * @return uint8_t 1:校验通过 0:校验失败
+ */
+static uint8_t VideoLinkVerifyFrame(const uint8_t *frame)
+{
+    // 这里先校验固定帧头，再走 CRC16，作用是快速排除噪声和错位数据；
+    // 原因是 `USART1` 可能一次收到多帧或杂散字节，必须先用 `0xA9 0x53` 锁住 VT03 真实帧边界。
+    if (frame == NULL || frame[0] != VIDEO_LINK_KM_FRAME_HEADER_0 || frame[1] != VIDEO_LINK_KM_FRAME_HEADER_1) {
+        return 0u;
+    }
+
+    // 这里沿用 DJI 官方 VT03 示例代码同款 CRC16 校验，作用是让机器人侧实现与真链路样例保持一致；
+    // 原因是手册文字描述和样例命名存在差异，而官方给出的数据帧示例代码更贴近实际出帧格式。
+    return (uint8_t)Verify_CRC16_Check_Sum((uint8_t *)frame, VIDEO_LINK_KM_FRAME_SIZE);
+}
+
+/**
+ * @brief 解包一帧 VT03 图传键鼠数据
+ *
+ * @param frame 指向 21 字节完整帧
+ * @param decode_out 输出解包结果
+ * @return uint8_t 1:解包成功 0:字段非法
+ */
+static uint8_t VideoLinkDecodeFrame(const uint8_t *frame, VideoLinkKM_Decode_s *decode_out)
+{
+    uint32_t ch0;
+    uint32_t ch1;
+    uint32_t ch2;
+    uint32_t ch3;
+    uint32_t wheel;
+    uint32_t mode_sw;
+    uint32_t pause_button;
+    uint32_t fn_left_button;
+    uint32_t fn_right_button;
+    uint32_t trigger_button;
+    uint32_t mouse_left_button;
+    uint32_t mouse_right_button;
+    uint32_t mouse_mid_button;
+
+    if (frame == NULL || decode_out == NULL) {
         return 0u;
     }
 
     memset(decode_out, 0, sizeof(*decode_out));
 
-    while (offset < payload_len) {
-        uint64_t tag = 0u;
-        uint64_t raw_value = 0u;
-        uint8_t tag_len = VideoLinkParseVarint(payload + offset, (uint16_t)(payload_len - offset), &tag);
-        uint8_t value_len;
-        uint32_t field_number;
-        uint8_t wire_type;
+    ch0 = VideoLinkExtractBitsLE(frame, VIDEO_LINK_KM_CH0_BIT_OFFSET, 11u);
+    ch1 = VideoLinkExtractBitsLE(frame, VIDEO_LINK_KM_CH1_BIT_OFFSET, 11u);
+    ch2 = VideoLinkExtractBitsLE(frame, VIDEO_LINK_KM_CH2_BIT_OFFSET, 11u);
+    ch3 = VideoLinkExtractBitsLE(frame, VIDEO_LINK_KM_CH3_BIT_OFFSET, 11u);
+    wheel = VideoLinkExtractBitsLE(frame, VIDEO_LINK_KM_WHEEL_BIT_OFFSET, 11u);
+    mode_sw = VideoLinkExtractBitsLE(frame, VIDEO_LINK_KM_MODE_SW_BIT_OFFSET, 2u);
+    pause_button = VideoLinkExtractBitsLE(frame, VIDEO_LINK_KM_PAUSE_BIT_OFFSET, 1u);
+    fn_left_button = VideoLinkExtractBitsLE(frame, VIDEO_LINK_KM_FN_LEFT_BIT_OFFSET, 1u);
+    fn_right_button = VideoLinkExtractBitsLE(frame, VIDEO_LINK_KM_FN_RIGHT_BIT_OFFSET, 1u);
+    trigger_button = VideoLinkExtractBitsLE(frame, VIDEO_LINK_KM_TRIGGER_BIT_OFFSET, 1u);
+    mouse_left_button = VideoLinkExtractBitsLE(frame, VIDEO_LINK_KM_MOUSE_LEFT_BIT_OFFSET, 2u);
+    mouse_right_button = VideoLinkExtractBitsLE(frame, VIDEO_LINK_KM_MOUSE_RIGHT_BIT_OFFSET, 2u);
+    mouse_mid_button = VideoLinkExtractBitsLE(frame, VIDEO_LINK_KM_MOUSE_MID_BIT_OFFSET, 2u);
 
-        if (tag_len == 0u || tag == 0u) {
-            return 0u;
-        }
-        offset = (uint16_t)(offset + tag_len);
-
-        field_number = (uint32_t)(tag >> 3);
-        wire_type = (uint8_t)(tag & 0x07u);
-        if (wire_type != 0u || field_number == 0u || field_number > 7u) {
-            return 0u;
-        }
-
-        value_len = VideoLinkParseVarint(payload + offset, (uint16_t)(payload_len - offset), &raw_value);
-        if (value_len == 0u) {
-            return 0u;
-        }
-        offset = (uint16_t)(offset + value_len);
-
-        switch (field_number) {
-        case 1u:
-            decode_out->mouse_x = (int32_t)raw_value;
-            recognized_mask |= (1u << 0);
-            break;
-        case 2u:
-            decode_out->mouse_y = (int32_t)raw_value;
-            recognized_mask |= (1u << 1);
-            break;
-        case 3u:
-            decode_out->mouse_z = (int32_t)raw_value;
-            recognized_mask |= (1u << 2);
-            break;
-        case 4u:
-            if (raw_value > 1u) {
-                return 0u;
-            }
-            decode_out->left_button_down = (uint8_t)raw_value;
-            recognized_mask |= (1u << 3);
-            break;
-        case 5u:
-            if (raw_value > 1u) {
-                return 0u;
-            }
-            decode_out->right_button_down = (uint8_t)raw_value;
-            recognized_mask |= (1u << 4);
-            break;
-        case 6u:
-            if (raw_value > 0xFFFFu) {
-                return 0u;
-            }
-            decode_out->keyboard_value = (uint32_t)raw_value;
-            recognized_mask |= (1u << 5);
-            break;
-        case 7u:
-            if (raw_value > 1u) {
-                return 0u;
-            }
-            decode_out->mid_button_down = (uint8_t)raw_value;
-            recognized_mask |= (1u << 6);
-            break;
-        default:
-            return 0u;
-        }
-    }
-
-    return recognized_mask != 0u;
-}
-
-/**
- * @brief 尝试处理带长度前缀的 protobuf 帧
- *
- * @param frame 原始帧
- * @param frame_len 原始帧长
- * @param decode_out 解析结果
- * @return uint8_t 1:成功 0:失败
- */
-static uint8_t VideoLinkTryDecodeWithLengthPrefix(const uint8_t *frame, uint16_t frame_len, VideoLinkKM_Decode_s *decode_out)
-{
-    uint64_t declared_len = 0u;
-    uint8_t varint_len = 0u;
-    uint16_t prefix_len_16 = 0u;
-
-    if (frame == NULL || decode_out == NULL || frame_len <= 1u) {
+    // 这里按手册给出的物理量范围做一次字段合法性检查，作用是在 CRC 通过后继续挡掉异常组合帧；
+    // 原因是真机串口偶发错位时仍可能碰巧撞上 CRC，通过范围过滤能降低把坏帧映射成运动命令的概率。
+    if (ch0 < RC_CH_VALUE_MIN || ch0 > RC_CH_VALUE_MAX ||
+        ch1 < RC_CH_VALUE_MIN || ch1 > RC_CH_VALUE_MAX ||
+        ch2 < RC_CH_VALUE_MIN || ch2 > RC_CH_VALUE_MAX ||
+        ch3 < RC_CH_VALUE_MIN || ch3 > RC_CH_VALUE_MAX ||
+        wheel < RC_CH_VALUE_MIN || wheel > RC_CH_VALUE_MAX ||
+        mode_sw > 2u ||
+        mouse_left_button > 1u ||
+        mouse_right_button > 1u ||
+        mouse_mid_button > 1u) {
         return 0u;
     }
 
-    // 这里先尝试 varint 长度前缀，作用是兼容“长度 + protobuf”的常见串口封包方式；
-    // 原因是 PDF 只定义了消息语义，没有给机器人侧 UART 封边格式，必须做一层兼容兜底。
-    varint_len = VideoLinkParseVarint(frame, frame_len, &declared_len);
-    if (varint_len != 0u && declared_len != 0u && (declared_len + varint_len) == frame_len) {
-        if (VideoLinkTryDecodePayload(frame + varint_len, (uint16_t)declared_len, decode_out)) {
-            return 1u;
-        }
-    }
+    // 这里把 VT03 的 4 路摇杆重新映射到现有 `RC_ctrl_t` 语义，作用是让下游仍按 DBUS 坐标系读摇杆；
+    // 原因是 VT03 手册里的 `channel2/3` 定义顺序与仓库中 `rocker_l_/rocker_l1` 的排列不同，不能直接照抄编号。
+    decode_out->rocker_r_ = (int16_t)ch0 - RC_CH_VALUE_OFFSET;
+    decode_out->rocker_r1 = (int16_t)ch1 - RC_CH_VALUE_OFFSET;
+    decode_out->rocker_l1 = (int16_t)ch2 - RC_CH_VALUE_OFFSET;
+    decode_out->rocker_l_ = (int16_t)ch3 - RC_CH_VALUE_OFFSET;
+    decode_out->dial = (int16_t)wheel - RC_CH_VALUE_OFFSET;
+    decode_out->mouse_x = VideoLinkExtractSigned16LE(frame, VIDEO_LINK_KM_MOUSE_X_BIT_OFFSET);
+    decode_out->mouse_y = VideoLinkExtractSigned16LE(frame, VIDEO_LINK_KM_MOUSE_Y_BIT_OFFSET);
+    decode_out->mouse_z = VideoLinkExtractSigned16LE(frame, VIDEO_LINK_KM_MOUSE_Z_BIT_OFFSET);
+    decode_out->keyboard_value = (uint16_t)VideoLinkExtractBitsLE(frame, VIDEO_LINK_KM_KEYBOARD_BIT_OFFSET, 16u);
+    decode_out->left_button_down = (uint8_t)mouse_left_button;
+    decode_out->right_button_down = (uint8_t)mouse_right_button;
+    decode_out->mid_button_down = (uint8_t)mouse_mid_button;
+    decode_out->mode_sw = (uint8_t)mode_sw;
+    decode_out->pause_button_down = (uint8_t)pause_button;
+    decode_out->fn_left_button_down = (uint8_t)fn_left_button;
+    decode_out->fn_right_button_down = (uint8_t)fn_right_button;
+    decode_out->trigger_button_down = (uint8_t)trigger_button;
 
-    // 这里补 1 字节长度前缀，作用是兼容简化封装；
-    // 原因是一些上位机桥接层会直接把 payload_len 放在首字节后透传到串口。
-    if (frame[0] == (uint8_t)(frame_len - 1u)) {
-        if (VideoLinkTryDecodePayload(frame + 1u, (uint16_t)(frame_len - 1u), decode_out)) {
-            return 1u;
-        }
-    }
-
-    if (frame_len > 2u) {
-        prefix_len_16 = (uint16_t)(frame[0] | (frame[1] << 8));
-        if ((uint16_t)(prefix_len_16 + 2u) == frame_len) {
-            if (VideoLinkTryDecodePayload(frame + 2u, prefix_len_16, decode_out)) {
-                return 1u;
-            }
-        }
-
-        prefix_len_16 = (uint16_t)((frame[0] << 8) | frame[1]);
-        if ((uint16_t)(prefix_len_16 + 2u) == frame_len) {
-            if (VideoLinkTryDecodePayload(frame + 2u, prefix_len_16, decode_out)) {
-                return 1u;
-            }
-        }
-    }
-
-    return 0u;
+    return 1u;
 }
 
 /**
- * @brief 综合尝试解析图传键鼠帧
+ * @brief 根据解包结果更新 RC 风格的键鼠状态
  *
- * @param frame 原始帧
- * @param frame_len 原始帧长
- * @param decode_out 解析结果
- * @return uint8_t 1:成功 0:失败
- */
-static uint8_t VideoLinkTryDecodeFrame(const uint8_t *frame, uint16_t frame_len, VideoLinkKM_Decode_s *decode_out)
-{
-    if (frame == NULL || decode_out == NULL || frame_len == 0u) {
-        return 0u;
-    }
-
-    // 这里优先按“纯 protobuf 负载”解析，作用是直接匹配官方 KeyboardMouseControl 消息体；
-    // 原因是比赛时官方选手端与图传链路最终到机器人侧的有效语义就是该消息的字段集合。
-    if (VideoLinkTryDecodePayload(frame, frame_len, decode_out)) {
-        return 1u;
-    }
-
-    if (VideoLinkTryDecodeWithLengthPrefix(frame, frame_len, decode_out)) {
-        return 1u;
-    }
-
-    // 这里补 1~2 字节头尾裁剪尝试，作用是给可能存在的轻量封边留出兼容空间；
-    // 原因是当前仓库没有官方机器人侧 UART 封装样例，真机链路上可能多一层短头短尾。
-    for (uint8_t head_skip = 0u; head_skip <= 2u && head_skip < frame_len; ++head_skip) {
-        for (uint8_t tail_trim = 0u; tail_trim <= 2u && (uint16_t)(head_skip + tail_trim) < frame_len; ++tail_trim) {
-            uint16_t payload_len = (uint16_t)(frame_len - head_skip - tail_trim);
-            if (head_skip == 0u && tail_trim == 0u) {
-                continue;
-            }
-            if (VideoLinkTryDecodePayload(frame + head_skip, payload_len, decode_out)) {
-                return 1u;
-            }
-        }
-    }
-
-    return 0u;
-}
-
-/**
- * @brief 根据解析结果更新 RC 风格的键鼠状态
- *
- * @param decode 解析结果
+ * @param decode 解包结果
  */
 static void VideoLinkApplyDecodedState(const VideoLinkKM_Decode_s *decode)
 {
@@ -294,15 +232,22 @@ static void VideoLinkApplyDecodedState(const VideoLinkKM_Decode_s *decode)
 
     VideoLinkClearCurrentControl();
 
-    video_link_ctrl[TEMP].mouse.x = VideoLinkClampToInt16(decode->mouse_x);
-    video_link_ctrl[TEMP].mouse.y = VideoLinkClampToInt16(decode->mouse_y);
+    // 这里仅把当前控制链真正消费的等价字段映射进 `RC_ctrl_t`，作用是让 `robot_cmd` 无需感知输入来源；
+    // 原因是本轮仍由 DBUS 负责模式与急停门控，VT03 只负责补充摇杆/键鼠等可复用输入量。
+    video_link_ctrl[TEMP].rc.rocker_l_ = decode->rocker_l_;
+    video_link_ctrl[TEMP].rc.rocker_l1 = decode->rocker_l1;
+    video_link_ctrl[TEMP].rc.rocker_r_ = decode->rocker_r_;
+    video_link_ctrl[TEMP].rc.rocker_r1 = decode->rocker_r1;
+    video_link_ctrl[TEMP].rc.dial = decode->dial;
+    video_link_ctrl[TEMP].mouse.x = decode->mouse_x;
+    video_link_ctrl[TEMP].mouse.y = decode->mouse_y;
     video_link_ctrl[TEMP].mouse.press_l = decode->left_button_down;
     video_link_ctrl[TEMP].mouse.press_r = decode->right_button_down;
-    *(uint16_t *)&video_link_ctrl[TEMP].key[KEY_PRESS] = (uint16_t)(decode->keyboard_value & 0xFFFFu);
+    *(uint16_t *)&video_link_ctrl[TEMP].key[KEY_PRESS] = decode->keyboard_value;
     key_now = video_link_ctrl[TEMP].key[KEY_PRESS].keys;
 
-    // 这里同样按协议 bit 位判断 Ctrl/Shift，作用是让图传和 DBUS 共用同一套稳定语义；
-    // 原因是图传键鼠本质也是键位掩码，继续依赖位域顺序会把协议兼容性押在编译器实现上。
+    // 这里继续按显式位掩码生成 Ctrl/Shift 组合键态，作用是让图传与 DBUS 共用同一套稳定键盘语义；
+    // 原因是位域布局依赖编译器实现，而 `robot_cmd` 的按键逻辑已经统一改成了按协议 bit 位判断。
     if ((key_now & (1u << Key_Ctrl)) != 0u) {
         video_link_ctrl[TEMP].key[KEY_PRESS_WITH_CTRL] = video_link_ctrl[TEMP].key[KEY_PRESS];
     } else {
@@ -338,6 +283,8 @@ static void VideoLinkApplyDecodedState(const VideoLinkKM_Decode_s *decode)
 
     video_link_diag.last_mouse_z = decode->mouse_z;
     video_link_diag.last_mid_button = decode->mid_button_down;
+    video_link_diag.last_switch_position = decode->mode_sw;
+    video_link_diag.last_trigger_state = decode->trigger_button_down;
     memcpy(&video_link_ctrl[LAST], &video_link_ctrl[TEMP], sizeof(RC_ctrl_t));
 }
 
@@ -349,34 +296,85 @@ static void VideoLinkKMRxCallback(void)
 {
     VideoLinkKM_Decode_s decode;
     uint16_t recv_len = 0u;
+    uint16_t index = 0u;
+    uint8_t found_candidate = 0u;
+    uint8_t found_valid_frame = 0u;
+    uint32_t prev_header_fail_count;
+    uint32_t prev_crc_fail_count;
 
     if (video_link_usart_instance == NULL) {
         return;
     }
 
     recv_len = video_link_usart_instance->recv_len;
-    video_link_diag.rx_frame_count++;
+    prev_header_fail_count = video_link_diag.header_fail_count;
+    prev_crc_fail_count = video_link_diag.crc_fail_count;
     video_link_diag.last_frame_len = recv_len;
-
     VideoLinkClearCurrentControl();
 
-    if (VideoLinkTryDecodeFrame(video_link_usart_instance->recv_buff, recv_len, &decode)) {
-        // 这里解析成功后立即覆写当前控制态，作用是把图传键鼠无缝映射到现有 robot_cmd；
-        // 原因是下游已经以 RC_ctrl_t 为统一输入层，复用该结构能把修改面控制在最小范围。
-        VideoLinkApplyDecodedState(&decode);
-        video_link_diag.decode_success_count++;
-        video_link_has_valid_frame = 1u;
-        // 这里仅在成功解码后喂狗，作用是让“图传在线”严格等于“确实收到过有效键鼠包”；
-        // 原因是 USART1 浮空或噪声会触发串口回调，若失败帧也喂狗，会把 DBUS 键鼠错误屏蔽掉。
-        DaemonReload(video_link_daemon_instance);
-    } else {
-        video_link_diag.decode_fail_count++;
-        memcpy(&video_link_ctrl[LAST], &video_link_ctrl[TEMP], sizeof(RC_ctrl_t));
-        if ((video_link_diag.decode_fail_count % VIDEO_LINK_KM_LOG_INTERVAL) == 1u) {
-            LOGWARNING("[video_link] decode failed, rx_len=%d fail_cnt=%d",
-                       recv_len,
-                       video_link_diag.decode_fail_count);
+    // 这里在 DMA 收到的缓冲区里扫描多帧，作用是兼容一次空闲中断带回多包数据的情况；
+    // 原因是 VT03 固定 14ms 连续出帧，任务负载变化时同一回调里可能粘连两帧以上数据。
+    while ((uint16_t)(index + 1u) < recv_len) {
+        if (video_link_usart_instance->recv_buff[index] != VIDEO_LINK_KM_FRAME_HEADER_0 ||
+            video_link_usart_instance->recv_buff[index + 1u] != VIDEO_LINK_KM_FRAME_HEADER_1) {
+            index++;
+            continue;
         }
+
+        found_candidate = 1u;
+        if ((uint16_t)(recv_len - index) < VIDEO_LINK_KM_FRAME_SIZE) {
+            video_link_diag.header_fail_count++;
+            break;
+        }
+
+        video_link_diag.rx_frame_count++;
+        if (!VideoLinkVerifyFrame(video_link_usart_instance->recv_buff + index)) {
+            video_link_diag.crc_fail_count++;
+            index++;
+            continue;
+        }
+
+        if (!VideoLinkDecodeFrame(video_link_usart_instance->recv_buff + index, &decode)) {
+            video_link_diag.header_fail_count++;
+            index += VIDEO_LINK_KM_FRAME_SIZE;
+            continue;
+        }
+
+        // 这里始终保留本次缓冲区中的最后一帧有效数据，作用是让控制层拿到最新输入；
+        // 原因是多帧粘连时旧帧已经过时，继续消费只会给底盘和云台增加额外延迟。
+        found_valid_frame = 1u;
+        video_link_diag.valid_frame_count++;
+        index += VIDEO_LINK_KM_FRAME_SIZE;
+    }
+
+    if (!found_candidate && recv_len != 0u) {
+        video_link_diag.header_fail_count++;
+    }
+
+    if (found_valid_frame) {
+        VideoLinkApplyDecodedState(&decode);
+        video_link_has_valid_frame = 1u;
+        DaemonReload(video_link_daemon_instance);
+        if (video_link_diag.valid_frame_count == 1u) {
+            LOGINFO("[video_link] VT03 frame online, rx_len=%u", recv_len);
+        }
+        return;
+    }
+
+    memcpy(&video_link_ctrl[LAST], &video_link_ctrl[TEMP], sizeof(RC_ctrl_t));
+
+    if (video_link_diag.header_fail_count != prev_header_fail_count &&
+        (video_link_diag.header_fail_count % VIDEO_LINK_KM_LOG_INTERVAL) == 1u) {
+        LOGWARNING("[video_link] VT03 header failed, rx_len=%u fail=%lu",
+                   recv_len,
+                   (unsigned long)video_link_diag.header_fail_count);
+    }
+
+    if (video_link_diag.crc_fail_count != prev_crc_fail_count &&
+        (video_link_diag.crc_fail_count % VIDEO_LINK_KM_LOG_INTERVAL) == 1u) {
+        LOGWARNING("[video_link] VT03 crc failed, rx_len=%u fail=%lu",
+                   recv_len,
+                   (unsigned long)video_link_diag.crc_fail_count);
     }
 }
 
@@ -389,14 +387,16 @@ static void VideoLinkKMOfflineCallback(void *id)
 {
     (void)id;
 
-    // 这里掉线时直接清空图传键鼠状态，作用是让 robot_cmd 在下一拍拿到全零输入；
-    // 原因是图传控车最怕断链后残留旧命令继续执行，必须在模块层先做安全兜底。
+    // 这里掉线时直接清空图传键鼠状态，作用是让 `robot_cmd` 下一拍立刻看到全零输入；
+    // 原因是图传在线时它优先于 DBUS 键鼠，若断链不清状态就会把旧按键和鼠标增量继续带下去。
     memset(video_link_ctrl, 0, sizeof(video_link_ctrl));
     video_link_has_valid_frame = 0u;
     video_link_diag.last_mouse_z = 0;
     video_link_diag.last_mid_button = 0u;
+    video_link_diag.last_switch_position = 0u;
+    video_link_diag.last_trigger_state = 0u;
     USARTServiceInit(video_link_usart_instance);
-    LOGWARNING("[video_link] keyboard-mouse link lost");
+    LOGWARNING("[video_link] VT03 keyboard-mouse link lost");
 }
 
 RC_ctrl_t *VideoLinkKMInit(UART_HandleTypeDef *video_link_usart_handle)
@@ -420,9 +420,9 @@ RC_ctrl_t *VideoLinkKMInit(UART_HandleTypeDef *video_link_usart_handle)
     video_link_daemon_instance = DaemonRegister(&daemon_conf);
 
     video_link_init_flag = 1u;
-    LOGINFO("[video_link] init ok, uart=%p rx_buff=%d",
+    LOGINFO("[video_link] VT03 init ok, uart=%p frame_size=%u",
             (void *)video_link_usart_handle,
-            VIDEO_LINK_KM_RX_BUFFER_SIZE);
+            VIDEO_LINK_KM_FRAME_SIZE);
     return video_link_ctrl;
 }
 

@@ -104,7 +104,10 @@ void MX_USART6_UART_Init(void)
 
   /* USER CODE END USART6_Init 1 */
   huart6.Instance = USART6;
-  huart6.Init.BaudRate = 115200;
+  /* USER CODE BEGIN USART6_Init 2_BAUD */
+  /* What: 将 USART6 波特率设置为 921600；Why: VT03 图传发送端 UART 固定输出 921600 8N1。 */
+  /* USER CODE END USART6_Init 2_BAUD */
+  huart6.Init.BaudRate = 921600;
   huart6.Init.WordLength = UART_WORDLENGTH_8B;
   huart6.Init.StopBits = UART_STOPBITS_1;
   huart6.Init.Parity = UART_PARITY_NONE;

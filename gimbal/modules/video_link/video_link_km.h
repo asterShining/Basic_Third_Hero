@@ -3,15 +3,18 @@
 
 #include "remote_control.h"
 
-/* 图传键鼠链路诊断信息 */
+/* VT03 图传键鼠链路诊断信息 */
 typedef struct
 {
     uint32_t rx_frame_count;
-    uint32_t decode_success_count;
-    uint32_t decode_fail_count;
+    uint32_t valid_frame_count;
+    uint32_t header_fail_count;
+    uint32_t crc_fail_count;
     uint16_t last_frame_len;
-    int32_t last_mouse_z;
+    int16_t last_mouse_z;
     uint8_t last_mid_button;
+    uint8_t last_switch_position;
+    uint8_t last_trigger_state;
 } VideoLinkKM_Diag_s;
 
 /**

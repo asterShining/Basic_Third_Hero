@@ -148,8 +148,8 @@ void RobotCMDInit()
     // What: 开机时把 yaw 软件对齐基准直接设为 0 度；Why: 让底盘跟随从第一拍就围绕 DM 硬件零点闭环，避免首帧回到旧机械角。
     yaw_align_offset_deg = 0.0f;
     rc_data = RemoteControlInit(&huart3); // 修改为对应串口,注意如果是自研板dbus协议串口需选用添加了反相器的那个
-    // What: 恢复图传键鼠初始化；Why: 快速收腿不应该顺带关掉原来的图传输入链路。
-    video_link_data = VideoLinkKMInit(&huart1);
+    // What: 把图传键鼠接到 USART6；Why: 当前 DJI C 板外部标注的 UART1 接口对应 PG14/PG9 这组 USART6 引脚。
+    video_link_data = VideoLinkKMInit(&huart6);
     // vision_recv_data = VisionInit(&huart1); // 视觉通信串口
 
     Buzzer_config_s hint_config = {
