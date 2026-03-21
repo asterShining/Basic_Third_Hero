@@ -55,6 +55,7 @@ static RC_ctrl_t video_link_ctrl[2];
 static USARTInstance *video_link_usart_instance;
 static DaemonInstance *video_link_daemon_instance;
 static VideoLinkKM_Diag_s video_link_diag;
+static VideoLinkKM_RemoteState_s video_link_remote_state;
 static uint8_t video_link_init_flag = 0u;
 static uint8_t video_link_has_valid_frame = 0u;
 
@@ -232,8 +233,8 @@ static void VideoLinkApplyDecodedState(const VideoLinkKM_Decode_s *decode)
 
     VideoLinkClearCurrentControl();
 
-    // 这里仅把当前控制链真正消费的等价字段映射进 `RC_ctrl_t`，作用是让 `robot_cmd` 无需感知输入来源；
-    // 原因是本轮仍由 DBUS 负责模式与急停门控，VT03 只负责补充摇杆/键鼠等可复用输入量。
+    // 这里把 VT03 的摇杆/键鼠等价字段映射进 `RC_ctrl_t`，作用是让 `robot_cmd` 的键鼠和摇杆路径继续复用旧接口；
+    // 原因是本轮虽然新增了 VT03 遥控主状态机，但底层输入容器仍以 `RC_ctrl_t` 为统一消费格式。
     video_link_ctrl[TEMP].rc.rocker_l_ = decode->rocker_l_;
     video_link_ctrl[TEMP].rc.rocker_l1 = decode->rocker_l1;
     video_link_ctrl[TEMP].rc.rocker_r_ = decode->rocker_r_;
@@ -285,6 +286,13 @@ static void VideoLinkApplyDecodedState(const VideoLinkKM_Decode_s *decode)
     video_link_diag.last_mid_button = decode->mid_button_down;
     video_link_diag.last_switch_position = decode->mode_sw;
     video_link_diag.last_trigger_state = decode->trigger_button_down;
+    // 这里同步保存 VT03 遥控专用状态，作用是让 `robot_cmd` 直接读取 Pause/CNS/自定义键/扳机；
+    // 原因是这些量不属于 `RC_ctrl_t` 标准字段，若只塞进诊断结构会让主状态机读取语义不清晰。
+    video_link_remote_state.mode_sw = decode->mode_sw;
+    video_link_remote_state.pause_button_down = decode->pause_button_down;
+    video_link_remote_state.fn_left_button_down = decode->fn_left_button_down;
+    video_link_remote_state.fn_right_button_down = decode->fn_right_button_down;
+    video_link_remote_state.trigger_button_down = decode->trigger_button_down;
     memcpy(&video_link_ctrl[LAST], &video_link_ctrl[TEMP], sizeof(RC_ctrl_t));
 }
 
@@ -395,6 +403,9 @@ static void VideoLinkKMOfflineCallback(void *id)
     video_link_diag.last_mid_button = 0u;
     video_link_diag.last_switch_position = 0u;
     video_link_diag.last_trigger_state = 0u;
+    // 这里离线时同步清空遥控状态，作用是让上层不会把旧的 VT03 拨挡和扳机电平当成当前命令；
+    // 原因是图传断链后 `robot_cmd` 需要立即回退到 DT7 或 NONE，不能残留上一次有效帧的遥控语义。
+    memset(&video_link_remote_state, 0, sizeof(video_link_remote_state));
     USARTServiceInit(video_link_usart_instance);
     LOGWARNING("[video_link] VT03 keyboard-mouse link lost");
 }
@@ -406,6 +417,7 @@ RC_ctrl_t *VideoLinkKMInit(UART_HandleTypeDef *video_link_usart_handle)
 
     memset(&video_link_diag, 0, sizeof(video_link_diag));
     memset(video_link_ctrl, 0, sizeof(video_link_ctrl));
+    memset(&video_link_remote_state, 0, sizeof(video_link_remote_state));
     video_link_has_valid_frame = 0u;
 
     usart_conf.recv_buff_size = VIDEO_LINK_KM_RX_BUFFER_SIZE;
@@ -442,4 +454,9 @@ uint8_t VideoLinkKMHasValidFrame(void)
 const VideoLinkKM_Diag_s *VideoLinkKMGetDiag(void)
 {
     return &video_link_diag;
+}
+
+const VideoLinkKM_RemoteState_s *VideoLinkKMGetRemoteState(void)
+{
+    return &video_link_remote_state;
 }

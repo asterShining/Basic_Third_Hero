@@ -1,4 +1,6 @@
 #include "island_action.h"
+
+#ifdef USE_ISLAND_ACTION // [条件编译] 仅在启用上岛机构时编译整个实现；Why: 禁用时此翻译单元为空，不产生任何符号
 #include "bsp_dwt.h"
 #include "controller.h" // What: 引入通用PID模块；Why: 自动调平仍沿用现有 pitch 速度闭环，不额外新建控制器实现。
 #include "dji_motor.h"
@@ -492,3 +494,5 @@ void IslandActionStop(void)
     lift_retract_bottom_latched = 0u;
     last_lift_mode = LIFT_OFF;
 }
+
+#endif // USE_ISLAND_ACTION

@@ -26,6 +26,11 @@
 // ==========================================
 // #define USE_SUPER_CAP // 启用超级电容模块，注释此行则禁用超电
 
+// ==========================================
+// [新增] 上岛辅助机构开关 (取消注释以启用上岛)
+// ==========================================
+// #define USE_ISLAND_ACTION // [条件编译] 启用上岛辅助机构（前履带+后抬升），注释此行则禁用上岛
+
 /* 机器人重要参数定义,注意根据不同机器人进行修改,浮点数需要以.0或f结尾,无符号以u结尾 */
 // 云台参数
 #define YAW_CHASSIS_ALIGN_ECD 2711 // 云台和底盘对齐指向相同方向时的电机编码器值,若对云台有机械改动需要修改
@@ -156,6 +161,7 @@ typedef enum {
     FRICTION_ON, // 摩擦轮开启
 } friction_mode_e;
 
+#ifdef USE_ISLAND_ACTION // [条件编译] 仅在启用上岛机构时编译前履带和抬升枚举
 typedef enum {
     FRONT_TRACK_OFF = 0, // 前履带关闭
     FRONT_TRACK_ON, // 前履带开启
@@ -168,6 +174,7 @@ typedef enum {
     LIFT_AUTO_LEVEL, // What: 基于底盘pitch陀螺仪闭环自动调平；Why: 上坡后松开拨轮即可自动抬升后端保持底盘水平
     LIFT_RETRACT, // What: 快速收腿模式；Why: 左拨杆回中时全速反向收腿，撞限位后自动停止
 } lift_mode_e;
+#endif // USE_ISLAND_ACTION
 
 typedef enum {
     LID_OPEN = 0, // 弹舱盖打开
@@ -218,10 +225,12 @@ typedef struct
     chassis_mode_e chassis_mode;
     int chassis_speed_buff;
     super_cap_mode_e cap_mode;
+#ifdef USE_ISLAND_ACTION // [条件编译] 仅在启用上岛机构时包含辅助机构控制字段
     front_track_mode_e front_track_mode; // What: 独立描述前履带开关状态；Why: 避免复用底盘主模式后让跟随与上岛辅助机构互相覆盖
     lift_mode_e lift_mode; // What: 独立描述抬升状态机；Why: 让抬升保持与调高语义在双板两侧都保持一致
     float front_track_speed_ref; // What: 下发前履带速度参考；Why: 把履带调速接口预留在双板协议里，底盘侧不再硬编码启停外的行为
     float lift_dial_input; // What: 下发抬升拨轮归一化输入；Why: 底盘侧基于真实电机反馈积分目标高度，避免云台板盲算位置
+#endif // USE_ISLAND_ACTION
     // UI部分
     //  ...
 

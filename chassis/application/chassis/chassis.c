@@ -17,6 +17,7 @@
 #include "robot_def.h"
 #include "power_control.h"
 #include "dmmotor.h"
+#define USE_SUPER_CAP
 #ifdef USE_SUPER_CAP
 #include "super_cap.h" // [条件编译] 仅在启用超电时包含此头文件
 #endif
@@ -65,7 +66,9 @@ static Referee_Interactive_info_t ui_data; // UI数据，将底盘中的数据�
 #ifdef USE_SUPER_CAP
 static SuperCapInstance *cap = { NULL }; // [条件编译] 超级电容实例指针
 #endif
-#include "island_action.h"
+#ifdef USE_ISLAND_ACTION
+#include "island_action.h" // [条件编译] 仅在启用上岛机构时包含上岛头文件
+#endif // USE_ISLAND_ACTION
 
 static DJIMotorInstance *motor_lf, *motor_rf, *motor_lb, *motor_rb; // left right forward back
 
@@ -199,7 +202,9 @@ void ChassisInit()
     chassis_motor_config.controller_setting_init_config.motor_reverse_flag = MOTOR_DIRECTION_REVERSE;
     motor_lb = PowerControlInit(&chassis_motor_config);
 
-    IslandActionInit();
+#ifdef USE_ISLAND_ACTION
+    IslandActionInit(); // [条件编译] 仅在启用上岛机构时初始化前履带和后抬升电机
+#endif // USE_ISLAND_ACTION
 
     // referee_data = UITaskInit(&huart6, &ui_data); // 裁判系统初始化,会同时初始化UI
     PowerControl_EnableSlopeComp(1);
@@ -208,7 +213,7 @@ void ChassisInit()
     // [条件编译] 超级电容初始化配置
     SuperCap_Init_Config_s cap_conf = {
         .can_config = {
-            .can_handle = &hcan1,
+            .can_handle = &hcan2,
             .tx_id = 0x061, // 超级电容默认接收id
             .rx_id = 0x051, // 超级电容默认发送id,注意tx和rx在其他人看来是反的
         }
@@ -518,7 +523,9 @@ void ChassisTask()
         DJIMotorStop(motor_rf);
         DJIMotorStop(motor_lb);
         DJIMotorStop(motor_rb);
-        IslandActionStop();
+#ifdef USE_ISLAND_ACTION
+        IslandActionStop(); // [条件编译] 仅在启用上岛机构时停止辅助机构
+#endif // USE_ISLAND_ACTION
     } else { // 正常工作
         DJIMotorEnable(motor_lf);
         DJIMotorEnable(motor_rf);
@@ -578,10 +585,12 @@ void ChassisTask()
     // 根据裁判系统的反馈数据和电容数据对输出限幅并设定闭环参考值
     LimitChassisOutput();
 
+#ifdef USE_ISLAND_ACTION
     if (chassis_cmd_recv.chassis_mode != CHASSIS_ZERO_FORCE) {
         // What: 在底盘主运动解算后独立控制履带与抬升，同时传入IMU pitch角度；Why: 上岛辅助机构不参与麦轮功率分配，自动调平需要实时pitch反馈但不应直接访问底盘IMU全局变量。
         IslandActionControl(&chassis_cmd_recv, Chassis_IMU_data->Pitch);
     }
+#endif // USE_ISLAND_ACTION
 
     // 根据电机的反馈速度和IMU(如果有)计算真实速度
     // EstimateSpeed();

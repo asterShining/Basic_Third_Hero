@@ -128,8 +128,8 @@ RC_ctrl_t *RemoteControlInit(UART_HandleTypeDef *rc_usart_handle)
 
     // 进行守护进程的注册,用于定时检查遥控器是否正常工作
     Daemon_Init_Config_s daemon_conf = {
-        .reload_count = 200, // ~200ms 超时，避免短暂无报文被误判离线
-        .init_count = 200,
+        .reload_count = 20, // What: 把 DT7 离线超时修正为约 200ms；Why: DaemonTask 实际以 100Hz 运行，原来的 200 会导致近 2s 才判离线。
+        .init_count = 20, // What: 初始化计数与重载值保持一致；Why: 避免上电初期和运行中使用两套不同的离线时间窗。
         .callback = RCLostCallback,
         .owner_id = NULL, // 只有1个遥控器,不需要owner_id
     };

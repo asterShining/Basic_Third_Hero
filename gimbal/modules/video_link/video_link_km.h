@@ -17,6 +17,16 @@ typedef struct
     uint8_t last_trigger_state;
 } VideoLinkKM_Diag_s;
 
+/* VT03 遥控器主控状态 */
+typedef struct
+{
+    uint8_t mode_sw;
+    uint8_t pause_button_down;
+    uint8_t fn_left_button_down;
+    uint8_t fn_right_button_down;
+    uint8_t trigger_button_down;
+} VideoLinkKM_RemoteState_s;
+
 /**
  * @brief 初始化图传键鼠模块
  *
@@ -45,5 +55,12 @@ uint8_t VideoLinkKMHasValidFrame(void);
  * @return const VideoLinkKM_Diag_s* 诊断信息指针
  */
 const VideoLinkKM_Diag_s *VideoLinkKMGetDiag(void);
+
+/**
+ * @brief 获取最近一次有效 VT03 遥控器状态
+ *
+ * @return const VideoLinkKM_RemoteState_s* 遥控器状态指针
+ */
+const VideoLinkKM_RemoteState_s *VideoLinkKMGetRemoteState(void);
 
 #endif

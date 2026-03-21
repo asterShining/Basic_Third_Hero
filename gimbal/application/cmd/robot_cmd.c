@@ -33,6 +33,10 @@
 #define YAW_DRIFT_LOCK_COEF 0.95f
 // What: 定义遥控器连发射频；Why: 保持当前遥控器发射手感，不把这次上岛迁移扩散成发射参数重调。
 #define BURST_FIRE_RATE 8.0f
+// What: 定义前履带默认速度参考；Why: 先打通履带速度闭环链路，后续实车调速只需改这一处。
+#define FRONT_TRACK_SPEED_REF_DEFAULT 10.0f
+// What: 定义左拨杆上档时的默认抬升输入；Why: 用户希望前履带开启后拨杆推到上档就能直接看到后轮抬升响应。
+#define LIFT_SWITCH_UP_INPUT_DEFAULT 0.6f
 // What: 定义抬升拨轮归一化满量程；Why: 与DBUS拨轮量程保持一致，让双板两侧都使用同一套输入解释。
 #define AUX_DIAL_INPUT_MAX 660.0f
 // What: 定义抬升拨轮死区；Why: 机械中位抖动和手指轻碰都不应该持续积分抬升目标。
@@ -106,9 +110,9 @@ static uint16_t last_switch_left = RC_SW_DOWN; // What: 保存左拨杆上一拍
 static float yaw_align_offset_deg = 0.0f;
 static uint8_t friction_switch_state = 0u; // What: 记录遥控器摩擦轮锁存状态；Why: 左拨杆上拨需要做一次一切换而不是按住就反复翻转。
 static uint8_t fire_mode_state = 0u; // What: 记录当前遥控器发射模式；Why: 保留现有单发/二连发/连发切换状态，不把上岛迁移变成发射重构。
+#ifdef USE_ISLAND_ACTION
 static uint8_t front_track_switch_state = 0u; // What: 记录前履带开关状态；Why: 上岛辅助机构需要跨控制周期保持启停状态。
-static uint8_t lift_mode_switch_state = 0u; // What: 记录抬升模式锁存状态；Why: 拨轮松手后仍需保持当前位置，而不是自动退出抬升会话。
-static uint8_t lift_retract_active = 0u; // What: 记录快速收腿状态；Why: 拨动到中间时触发收腿，持续下发直到底盘内部撞底层限位停止。
+#endif
 
 // --- 新增的静态变量，用于长按计时 ---
 static uint32_t inner_eight_cnt = 0; // 内八计时器
@@ -143,15 +147,177 @@ static float keyboard_vy_smoothed = 0.0f;
 // 原因是任务调度并非绝对恒定 5ms，直接写死步长会让不同负载下手感漂移。
 static uint32_t keyboard_ramp_last_ms = 0;
 
+/**
+ * @brief 将 pitch 目标统一限幅到机构安全范围
+ *
+ */
+static void LimitGimbalPitchTarget()
+{
+    // 这里统一约束 pitch 目标，作用是让遥控器和鼠标共用同一份限位；
+    // 原因是两个输入源都会改写 pitch，分散限位容易出现一边忘记限位导致撞机构。
+    if (gimbal_cmd_send.pitch > PITCH_MAX_ANGLE) {
+        gimbal_cmd_send.pitch = PITCH_MAX_ANGLE;
+    } else if (gimbal_cmd_send.pitch < PITCH_MIN_ANGLE) {
+        gimbal_cmd_send.pitch = PITCH_MIN_ANGLE;
+    }
+}
+
+/**
+ * @brief 清空键鼠射击锁存状态
+ *
+ */
+static void ResetMouseFireState()
+{
+    // 这里把键鼠开火状态全部清零，作用是急停后不残留摩擦轮和连发锁存；
+    // 原因是键鼠改成并行输入后，若不清状态，恢复出急停时会把上一次鼠标意图带回来。
+    mouse_fire_friction_latched = 0;
+    mouse_left_last = 0;
+    mouse_left_burst_active = 0;
+    mouse_left_press_start_ms = 0;
+    keyboard_friction_toggle_last = 0;
+}
+
+/**
+ * @brief 清空键盘平移斜坡状态
+ *
+ */
+static void ResetKeyboardMotionState()
+{
+    // 这里把键盘平移斜坡状态清零，作用是急停/断链后不保留上一拍的加减速尾巴；
+    // 原因是平滑状态本身是跨周期记忆量，不主动复位就会在恢复控制时带出历史速度。
+    keyboard_vx_smoothed = 0.0f;
+    keyboard_vy_smoothed = 0.0f;
+    keyboard_ramp_last_ms = 0u;
+}
+
+#ifdef USE_ISLAND_ACTION
+/**
+ * @brief 将拨轮原始值归一化为抬升输入
+ *
+ * @param raw_dial 遥控器原始拨轮值
+ * @return float 归一化后的抬升输入
+ */
+static float NormalizeLiftDialInput(int16_t raw_dial)
+{
+    float normalized = -((float)raw_dial) / AUX_DIAL_INPUT_MAX;
+    float deadzone = AUX_DIAL_INPUT_DEADZONE / AUX_DIAL_INPUT_MAX;
+
+    // What: 统一把拨轮上拨解释成正向抬升并做死区与限幅；Why: 底盘侧只消费稳定标准化命令，避免双板两边各自解释方向和抖动。
+    if (normalized > -deadzone && normalized < deadzone)
+        return 0.0f;
+
+    LIMIT_MIN_MAX(normalized, -1.0f, 1.0f);
+    return normalized;
+}
+#endif
+
+/**
+ * @brief 清空上岛辅助机构状态
+ *
+ */
+static void ResetChassisAuxState()
+{
+    // What: 一次性复位前履带与抬升状态及下发值；Why: 急停或退出上岛时不能沿用上一拍辅助机构命令继续动作。
+#ifdef USE_ISLAND_ACTION
+    front_track_switch_state = 0u;
+    chassis_cmd_send.front_track_mode = FRONT_TRACK_OFF;
+    chassis_cmd_send.lift_mode = LIFT_OFF;
+    chassis_cmd_send.front_track_speed_ref = 0.0f;
+    chassis_cmd_send.lift_dial_input = 0.0f;
+#endif
+}
+
+/**
+ * @brief 按斜坡限速把当前值推进到目标值
+ *
+ * @param current 当前输出
+ * @param target 目标输出
+ * @param dt_s 本拍时间
+ * @return float 平滑后的输出
+ */
+static float RampKeyboardAxis(float current, float target, float dt_s)
+{
+    float max_step;
+
+    // 这里根据“加速/减速/反向”场景选择不同步长，作用是让起步柔和但松键更干脆；
+    // 原因是底盘平移最怕的就是起步突兀和停车拖尾，两种手感不能共用一套斜率。
+    if (target == 0.0f || (current > 0.0f && target < current) || (current < 0.0f && target > current)) {
+        max_step = KEYBOARD_CHASSIS_RAMP_DOWN_PER_SEC * dt_s;
+    } else {
+        max_step = KEYBOARD_CHASSIS_RAMP_UP_PER_SEC * dt_s;
+    }
+
+    if (target > current + max_step) {
+        current += max_step;
+    } else if (target < current - max_step) {
+        current -= max_step;
+    } else {
+        current = target;
+    }
+
+    if (current < KEYBOARD_CHASSIS_CMD_EPSILON && current > -KEYBOARD_CHASSIS_CMD_EPSILON && target == 0.0f) {
+        current = 0.0f;
+    }
+    return current;
+}
+
+/**
+ * @brief 选择当前生效的键鼠输入源
+ *
+ * @return const RC_ctrl_t* 当前键鼠输入源
+ */
+static const RC_ctrl_t *GetActiveMouseKeySource(void)
+{
+    // 这里优先返回图传键鼠数据，作用是让官方图传链路覆盖 DBUS 内嵌键鼠；
+    // 原因是用户明确要求把 2026 图传控制入口接到云台板，当前实现必须以图传为主源。
+    if (video_link_data != NULL && VideoLinkKMIsOnline() && VideoLinkKMHasValidFrame()) {
+        return &video_link_data[TEMP];
+    }
+    return &rc_data[TEMP];
+}
+
+/**
+ * @brief 每周期先把控制量恢复到安全基线
+ *
+ */
+static void PrepareControlCommandBase()
+{
+    // 这里先清理瞬态控制量，作用是阻断上一拍残留的速度和发射命令；
+    // 原因是键鼠接入后同一份指令会被多源叠加，若不先回到安全基线会出现“松手后还在沿用旧命令”。
+    chassis_cmd_send.vx = 0.0f;
+    chassis_cmd_send.vy = 0.0f;
+    chassis_cmd_send.wz = 0.0f;
+    chassis_cmd_send.gimbal_cmd_wz = 0.0f;
+    chassis_cmd_send.calibrate_imu = 0;
+    chassis_cmd_send.chassis_mode = CHASSIS_ZERO_FORCE;
+    chassis_cmd_send.cap_mode = SUPER_CAP_OFF;
+    chassis_cmd_send.chassis_speed_buff = 0;
+#ifdef USE_ISLAND_ACTION
+    chassis_cmd_send.front_track_mode = FRONT_TRACK_OFF;
+    chassis_cmd_send.lift_mode = LIFT_OFF;
+    chassis_cmd_send.front_track_speed_ref = 0.0f;
+    chassis_cmd_send.lift_dial_input = 0.0f;
+#endif
+
+    gimbal_cmd_send.gimbal_mode = GIMBAL_ZERO_FORCE;
+
+    shoot_cmd_send.shoot_mode = SHOOT_OFF;
+    shoot_cmd_send.load_mode = LOAD_STOP;
+    shoot_cmd_send.friction_mode = FRICTION_OFF;
+    shoot_cmd_send.shoot_rate = 0.0f;
+
+    auto_aim_state = AUTO_AIM_IDLE;
+}
+
 void RobotCMDInit()
 {
     // What: 开机时把 yaw 软件对齐基准直接设为 0 度；Why: 让底盘跟随从第一拍就围绕 DM 硬件零点闭环，避免首帧回到旧机械角。
     yaw_align_offset_deg = 0.0f;
     rc_data = RemoteControlInit(&huart3); // 修改为对应串口,注意如果是自研板dbus协议串口需选用添加了反相器的那个
-    // What: 把图传键鼠接到 USART6；Why: 当前 DJI C 板外部标注的 UART1 接口对应 PG14/PG9 这组 USART6 引脚。
-    video_link_data = VideoLinkKMInit(&huart6);
+    // 这里在 USART1 初始化图传键鼠，作用是按 921600 串口接入官方图传链路；
+    // 原因是当前工程视觉走 VCP，USART1 空闲，正好可作为云台板图传入口。
+    video_link_data = VideoLinkKMInit(&huart1);
     // vision_recv_data = VisionInit(&huart1); // 视觉通信串口
-
     Buzzer_config_s hint_config = {
         .alarm_level = ALARM_LEVEL_MEDIUM, // 优先级
         .octave = OCTAVE_5, // 音调 (SoFreq)
@@ -183,7 +349,7 @@ void RobotCMDInit()
     LOGINFO("[can_comm] Chassis_Upload_Data_s size: %d", sizeof(Chassis_Upload_Data_s));
     LOGINFO("[can_comm] Chassis_Ctrl_Cmd_s size: %d", sizeof(Chassis_Ctrl_Cmd_s));
     LOGINFO("[can_comm] CAN_COMM_MAX_BUFFSIZE: %d", CAN_COMM_MAX_BUFFSIZE);
-    // What: 保留双板通信初始化日志；Why: 这些原本就是排障入口，不该因为快速收腿需求被我删掉。
+    // 【新增调试日志】
     if (cmd_can_comm != NULL) {
         LOGINFO("[GIMBAL_DEBUG] CAN Comm Init Success! TxID: %d, RxID: %d", cmd_can_comm->can_ins->tx_id, cmd_can_comm->can_ins->rx_id);
     } else {
@@ -196,165 +362,68 @@ void RobotCMDInit()
 }
 
 /**
- * @brief 将 pitch 目标统一限幅到机构安全范围
- *
- */
-static void LimitGimbalPitchTarget()
-{
-    // What: 统一约束 pitch 目标；Why: 遥控器与键鼠都会改写 pitch，必须共用一套限位避免撞机构。
-    if (gimbal_cmd_send.pitch > PITCH_MAX_ANGLE) {
-        gimbal_cmd_send.pitch = PITCH_MAX_ANGLE;
-    } else if (gimbal_cmd_send.pitch < PITCH_MIN_ANGLE) {
-        gimbal_cmd_send.pitch = PITCH_MIN_ANGLE;
-    }
-}
-
-/**
- * @brief 清空键鼠射击锁存状态
- *
- */
-static void ResetMouseFireState()
-{
-    // What: 一次性清空键鼠开火锁存；Why: 急停或链路切换后不能把旧的摩擦轮/连发意图带到下一拍。
-    mouse_fire_friction_latched = 0;
-    mouse_left_last = 0;
-    mouse_left_burst_active = 0;
-    mouse_left_press_start_ms = 0;
-    keyboard_friction_toggle_last = 0;
-}
-
-/**
- * @brief 清空键盘平移斜坡状态
- *
- */
-static void ResetKeyboardMotionState()
-{
-    // What: 清空键盘平移斜坡缓存；Why: 急停或断链后不应继续沿用上一拍的速度尾巴。
-    keyboard_vx_smoothed = 0.0f;
-    keyboard_vy_smoothed = 0.0f;
-    keyboard_ramp_last_ms = 0u;
-}
-
-/**
- * @brief 将拨轮原始值归一化为抬升输入
- *
- * @param raw_dial 遥控器原始拨轮值
- * @return float 归一化后的抬升输入
- */
-static float NormalizeLiftDialInput(int16_t raw_dial)
-{
-    float normalized = -((float)raw_dial) / AUX_DIAL_INPUT_MAX;
-    float deadzone = AUX_DIAL_INPUT_DEADZONE / AUX_DIAL_INPUT_MAX;
-
-    // What: 统一把拨轮上拨解释成正向抬升并做死区与限幅；Why: 底盘侧只消费稳定标准化命令，避免双板两边各自解释方向和抖动。
-    if (normalized > -deadzone && normalized < deadzone)
-        return 0.0f;
-
-    LIMIT_MIN_MAX(normalized, -1.0f, 1.0f);
-    return normalized;
-}
-
-/**
- * @brief 返回当前有效的键鼠控制源
- */
-static const RC_ctrl_t *GetActiveMouseKeySource(void)
-{
-    // What: 恢复原有图传优先取数方式；Why: 快速收腿不应改变键鼠输入源的指针语义。
-    if (video_link_data != NULL && VideoLinkKMIsOnline() && VideoLinkKMHasValidFrame()) {
-        return &video_link_data[TEMP];
-    }
-    return &rc_data[TEMP];
-}
-
-/**
- * @brief 清空上岛辅助机构锁存状态
- */
-static void ResetChassisAuxState()
-{
-    // What: 一次性复位前履带、抬升和快速收腿状态及下发值；Why: 急停或退出上岛时不能沿用上一拍辅助机构命令继续动作。
-    front_track_switch_state = 0u;
-    lift_mode_switch_state = 0u;
-    lift_retract_active = 0u;
-    chassis_cmd_send.front_track_mode = FRONT_TRACK_OFF;
-    chassis_cmd_send.lift_mode = LIFT_OFF;
-    chassis_cmd_send.front_track_speed_ref = 0.0f;
-    chassis_cmd_send.lift_dial_input = 0.0f;
-}
-
-/**
- * @brief 每拍先清空瞬态控制量
- */
-static void PrepareControlCommandBase()
-{
-    // What: 恢复原有瞬态命令清零基线；Why: 快速收腿只需要叠加辅助机构命令，不该删掉其它原本每拍回零的控制字段。
-    chassis_cmd_send.vx = 0.0f;
-    chassis_cmd_send.vy = 0.0f;
-    chassis_cmd_send.wz = 0.0f;
-    chassis_cmd_send.gimbal_cmd_wz = 0.0f;
-    chassis_cmd_send.calibrate_imu = 0;
-    chassis_cmd_send.chassis_mode = CHASSIS_ZERO_FORCE;
-    chassis_cmd_send.cap_mode = SUPER_CAP_OFF;
-    chassis_cmd_send.chassis_speed_buff = 0;
-    chassis_cmd_send.front_track_mode = FRONT_TRACK_OFF;
-    chassis_cmd_send.front_track_speed_ref = 0.0f;
-    chassis_cmd_send.lift_mode = LIFT_OFF;
-    chassis_cmd_send.lift_dial_input = 0.0f;
-    gimbal_cmd_send.gimbal_mode = GIMBAL_ZERO_FORCE;
-    shoot_cmd_send.load_mode = LOAD_STOP;
-    shoot_cmd_send.shoot_rate = 0.0f;
-    shoot_cmd_send.friction_mode = FRICTION_OFF;
-    shoot_cmd_send.shoot_mode = SHOOT_OFF;
-    auto_aim_state = AUTO_AIM_IDLE;
-}
-
-/**
- * @brief 按斜坡限速把当前值推进到目标值
- */
-static float RampKeyboardAxis(float current, float target, float dt_s)
-{
-    float delta = target - current;
-    float max_step;
-
-    // What: 按当前是加速还是减速选择不同步长；Why: 起步要柔和，松键和反向要更干脆。
-    if (target == 0.0f || (current > 0.0f && target < current) || (current < 0.0f && target > current))
-        max_step = KEYBOARD_CHASSIS_RAMP_DOWN_PER_SEC * dt_s;
-    else
-        max_step = KEYBOARD_CHASSIS_RAMP_UP_PER_SEC * dt_s;
-
-    if (delta > max_step)
-        delta = max_step;
-    else if (delta < -max_step)
-        delta = -max_step;
-
-    current += delta;
-    if (fabsf(current) < KEYBOARD_CHASSIS_CMD_EPSILON && target == 0.0f)
-        current = 0.0f;
-
-    return current;
-}
-
-/**
  * @brief 根据gimbal app传回的当前电机角度计算和零位的误差
+ *        单圈绝对角度的范围是0~360,说明文档中有图示
+ *
  */
+// static void CalcOffsetAngle()
+// {
+//     // 别名angle提高可读性,不然太长了不好看,虽然基本不会动这个函数
+//     static float angle;
+//     angle = gimbal_fetch_data.yaw_motor_single_round_angle; // 从云台获取的当前yaw电机单圈角度
+// #if YAW_ECD_GREATER_THAN_4096 // 如果大于180度
+//     if (angle > YAW_ALIGN_ANGLE && angle <= 180.0f + YAW_ALIGN_ANGLE)
+//         chassis_cmd_send.offset_angle = angle - YAW_ALIGN_ANGLE;
+//     else if (angle > 180.0f + YAW_ALIGN_ANGLE)
+//         chassis_cmd_send.offset_angle = angle - YAW_ALIGN_ANGLE - 360.0f;
+//     else
+//         chassis_cmd_send.offset_angle = angle - YAW_ALIGN_ANGLE;
+// #else // 小于180度
+//     if (angle > YAW_ALIGN_ANGLE)
+//         chassis_cmd_send.offset_angle = angle - YAW_ALIGN_ANGLE;
+//     else if (angle <= YAW_ALIGN_ANGLE && angle >= YAW_ALIGN_ANGLE - 180.0f)
+//         chassis_cmd_send.offset_angle = angle - YAW_ALIGN_ANGLE;
+//     else
+//         chassis_cmd_send.offset_angle = angle - YAW_ALIGN_ANGLE + 360.0f;
+// #endif
+// }
+
 static void CalcOffsetAngle()
 {
-    float error = gimbal_fetch_data.yaw_motor_single_round_angle - yaw_align_offset_deg;
+    // 获取你在 gimbal.c 中计算出的 0~360 度角度
+    float gimbal_angle = gimbal_fetch_data.yaw_motor_single_round_angle;
 
-    // What: 把云台相对底盘的偏角统一折叠到[-180, 180]；Why: 底盘跟随只需要最短转向误差，不能直接拿0~360度做闭环。
-    while (error < -180.0f)
+    // What: 使用当前生效的 yaw 软件基准计算底盘跟随偏角；Why: 手动校零后继续围绕 0 度闭环，防止 offset 仍引用旧机械安装角。
+    float align_offset = yaw_align_offset_deg;
+
+    // 1. 计算原始偏差
+    float error = gimbal_angle - align_offset;
+
+    // 2. 归一化到 0~360
+    while (error < 0.0f)
         error += 360.0f;
-    while (error > 180.0f)
+    while (error >= 360.0f)
         error -= 360.0f;
 
-    chassis_cmd_send.offset_angle = error;
+    // 3. 转换为 -180 ~ +180 范围 (最短路径逻辑)
+    if (error > 180.0f) {
+        chassis_cmd_send.offset_angle = error - 360.0f; // 例如 350 -> -10
+    } else {
+        chassis_cmd_send.offset_angle = error; // 例如 10 -> 10
+    }
 }
-
 /**
- * @brief 紧急停止处理
+ * @brief  紧急停止,包括遥控器左上侧拨轮打满/重要模块离线/双板通信失效等
+ *         停止的阈值'300'待修改成合适的值,或改为开关控制.
+ *
+ * @todo   后续修改为遥控器离线则电机停止(关闭遥控器急停),通过给遥控器模块添加daemon实现
+ *
  */
 static void EmergencyHandler()
 {
-    // What: 恢复原有急停清状态逻辑；Why: 快速收腿不能越过急停，摩擦轮和辅助机构锁存都必须一起清掉。
+    // // 拨轮的向下拨超过一半进入急停模式.注意向打时下拨轮是正
+    // if (rc_data[TEMP].rc.dial > 300 || robot_state == ROBOT_STOP) // 还需添加重要应用和模块离线的判断
+    // {
     robot_state = ROBOT_STOP;
     gimbal_cmd_send.gimbal_mode = GIMBAL_ZERO_FORCE;
     chassis_cmd_send.chassis_mode = CHASSIS_ZERO_FORCE;
@@ -363,67 +432,110 @@ static void EmergencyHandler()
     shoot_cmd_send.load_mode = LOAD_STOP;
     shoot_cmd_send.friction_mode = FRICTION_OFF;
     friction_switch_state = 0u;
-    shoot_cmd_send.shoot_rate = 0.0f;
     ResetChassisAuxState();
+    // }
+    // 遥控器右侧开关为[上],恢复正常运行
+    // if (switch_is_up(rc_data[TEMP].rc.switch_right)) {
+    //     robot_state = ROBOT_READY;
+    //     shoot_cmd_send.shoot_mode = SHOOT_ON;
+    //     LOGINFO("[CMD] reinstate, robot ready");
+    // // }
 }
 
 /**
  * @brief 控制输入为遥控器(调试时)的模式和控制量设置
+ *
  */
 static void RemoteControlSet()
 {
+    // 1. 获取当前开关状态
     uint16_t current_switch_right = rc_data[TEMP].rc.switch_right;
     uint16_t current_switch_left = rc_data[TEMP].rc.switch_left;
-    uint8_t left_mid_to_up = (uint8_t)(switch_is_up(current_switch_left) && switch_is_mid(last_switch_left));
-    uint8_t left_mid_to_down = (uint8_t)(switch_is_down(current_switch_left) && switch_is_mid(last_switch_left));
-    uint8_t left_up_to_mid = (uint8_t)(switch_is_mid(current_switch_left) && switch_is_up(last_switch_left));
-    float rocker_lx;
-    float rocker_ly;
-    float rocker_rx;
-    float rocker_ry;
-    float current_real_pitch = gimbal_fetch_data.gimbal_imu_data.Pitch; // What: 读取当前真实 pitch 反馈；Why: 内八校准后要把云台目标同步回当前姿态，避免退出急停时瞬时回拉。
+    uint8_t left_mid_to_up = switch_is_up(current_switch_left) && switch_is_mid(last_switch_left);
+    uint8_t left_mid_to_down = switch_is_down(current_switch_left) && switch_is_mid(last_switch_left);
 
-    // What: 右拨杆下位进入急停与校准检测；Why: 保持原有安全优先级，不让辅助机构逻辑覆盖急停。
+    float current_real_pitch = gimbal_fetch_data.gimbal_imu_data.Pitch; // [轴互换后] Pitch 字段即物理 Pitch
+
+    // What: 每拍先清空辅助机构瞬态命令；Why: 上岛开关是锁存状态，但履带速度和抬升拨轮输入都不应该沿用旧值。
+#ifdef USE_ISLAND_ACTION
+    chassis_cmd_send.front_track_mode = front_track_switch_state ? FRONT_TRACK_ON : FRONT_TRACK_OFF;
+    chassis_cmd_send.lift_mode = LIFT_OFF;
+    chassis_cmd_send.front_track_speed_ref = 0.0f;
+    chassis_cmd_send.lift_dial_input = 0.0f;
+#endif
+
+    // --- 状态机逻辑 ---
+
+    // [下] 急停模式
     if (switch_is_down(current_switch_right)) {
-        bool is_inner_eight;
-
         EmergencyHandler();
-
-        is_inner_eight = (rc_data[TEMP].rc.rocker_l_ > RC_TRIGGER_TH) &&
-                         (rc_data[TEMP].rc.rocker_l1 < -RC_TRIGGER_TH) &&
-                         (rc_data[TEMP].rc.rocker_r_ < -RC_TRIGGER_TH) &&
-                         (rc_data[TEMP].rc.rocker_r1 < -RC_TRIGGER_TH);
+        static uint8_t cali_triggered = 0;
+        bool is_inner_eight = (rc_data[TEMP].rc.rocker_l_ > RC_TRIGGER_TH) && // 左摇杆向右
+                              (rc_data[TEMP].rc.rocker_l1 < -RC_TRIGGER_TH) && // 左摇杆向下
+                              (rc_data[TEMP].rc.rocker_r_ < -RC_TRIGGER_TH) && // 右摇杆向左
+                              (rc_data[TEMP].rc.rocker_r1 < -RC_TRIGGER_TH); // 右摇杆向下
 
         if (is_inner_eight) {
-            if (cali_triggered == 0u) {
+            if (cali_triggered == 0) {
+                // 1. 调用校准
                 GimbalCalibrate();
-                // What: 手动校零后把底盘跟随零位同步回运行时基准；Why: 否则 offset 还会沿用旧零点，看起来像校零没有生效。
+                // 手动 DM 校零后，将底盘跟随基准切到运行时零位。
+                // 原因是当前 yaw_motor_single_round_angle 会围绕 0 反馈，继续减旧机械角会让校零看起来“没生效”。
                 yaw_align_offset_deg = 0.0f;
-                // What: 校零完成后同步刷新云台目标到当前姿态；Why: 退出急停时不能让云台去追旧目标角。
+                // 同步刷新云台目标到当前 IMU 姿态，避免退出急停后沿用旧参考值导致瞬时回拉。
                 gimbal_cmd_send.yaw = gimbal_fetch_data.gimbal_imu_data.YawTotalAngle;
                 gimbal_cmd_send.pitch = current_real_pitch;
-                if (hint_buzzer != NULL)
+
+                // 2. 【新增】开启蜂鸣器提示
+                if (hint_buzzer != NULL) {
                     AlarmSetStatus(hint_buzzer, ALARM_ON);
-                cali_triggered = 1u;
+                }
+
+                cali_triggered = 1;
             }
-        } else if (cali_triggered != 0u) {
-            if (hint_buzzer != NULL)
-                AlarmSetStatus(hint_buzzer, ALARM_OFF);
-            cali_triggered = 0u;
+        } else {
+            // 摇杆回中后，关闭蜂鸣器并重置触发位
+            if (cali_triggered == 1) {
+                if (hint_buzzer != NULL) {
+                    AlarmSetStatus(hint_buzzer, ALARM_OFF);
+                }
+                cali_triggered = 0;
+            }
         }
-    } else if (switch_is_up(current_switch_right)) {
-        // What: 右拨杆上位进入小陀螺 + 云台陀螺仪模式；Why: 保持当前车体的上位驾驶习惯不变。
-        if (!switch_is_up(last_switch_right))
-            gimbal_cmd_send.yaw = gimbal_fetch_data.gimbal_imu_data.YawTotalAngle;
+    }
+    // [上] 底盘无力，云台能够转动
+    else if (switch_is_up(current_switch_right)) {
+        // 无扰切换判断
+        if (!switch_is_up(last_switch_right)) {
+            if (!switch_is_up(last_switch_right)) {
+                gimbal_cmd_send.yaw = gimbal_fetch_data.gimbal_imu_data.YawTotalAngle;
+            }
+        }
 
         robot_state = ROBOT_READY;
+        // [用户要求] 注释掉原有逻辑 (User request: Comment out original logic)
+        // chassis_cmd_send.chassis_mode = CHASSIS_NO_FOLLOW;
+        gimbal_cmd_send.gimbal_mode = GIMBAL_FREE_MODE;
+
+        // [新增] 小陀螺模式配置 (New Configuration: Little Top Mode)
+        // 这里明确下发 CHASSIS_ROTATE，作用是让底盘侧进入小陀螺分支。
+        // 之前该行被注释后，发送出去的一直是 CHASSIS_NO_FOLLOW，所以底盘永远不会自旋。
         chassis_cmd_send.chassis_mode = CHASSIS_ROTATE;
-        gimbal_cmd_send.gimbal_mode = GIMBAL_GYRO_MODE;
+        // 云台切换至陀螺仪模式以保持世界坐标系下的稳定瞄准
+        // gimbal_cmd_send.gimbal_mode = GIMBAL_GYRO_MODE;
+
         shoot_cmd_send.shoot_mode = SHOOT_ON;
-    } else {
-        // What: 右拨杆中位进入底盘跟随云台模式；Why: 保留当前主驾驶模式切换语义。
-        if (!switch_is_mid(last_switch_right))
+
+    }
+    // [中] 底盘跟随云台模式
+    else if (switch_is_mid(current_switch_right)) {
+        // 核心修改：检测是否刚刚切入[上]档位
+        if (!switch_is_mid(last_switch_right)) {
+            // 【无扰切换执行】
+            // 将云台控制的"目标值"强行设定为当前的"反馈值"
+            // 这样PID的误差(Error)在这一瞬间为0，避免云台疯转
             gimbal_cmd_send.yaw = gimbal_fetch_data.gimbal_imu_data.YawTotalAngle;
+        }
 
         robot_state = ROBOT_READY;
         chassis_cmd_send.chassis_mode = CHASSIS_FOLLOW_GIMBAL_YAW;
@@ -431,36 +543,51 @@ static void RemoteControlSet()
         shoot_cmd_send.shoot_mode = SHOOT_ON;
     }
 
-    rocker_lx = (float)rc_data[TEMP].rc.rocker_l_;
-    rocker_ly = (float)rc_data[TEMP].rc.rocker_l1;
-    rocker_rx = (float)rc_data[TEMP].rc.rocker_r_;
-    rocker_ry = (float)rc_data[TEMP].rc.rocker_r1;
+    // --- 1. 提取原始数据并转为浮点数 ---
+    float rocker_lx = (float)rc_data[TEMP].rc.rocker_l_; // 左摇杆 X (云台Yaw)
+    float rocker_ly = (float)rc_data[TEMP].rc.rocker_l1; // 左摇杆 Y (云台Pitch)
+    float rocker_rx = (float)rc_data[TEMP].rc.rocker_r_; // 右摇杆 X (底盘左右)
+    float rocker_ry = (float)rc_data[TEMP].rc.rocker_r1; // 右摇杆 Y (底盘前后)
 
-    // What: 对四路摇杆统一做死区处理；Why: 中位抖动不应该继续驱动云台和底盘。
+    // --- 2. 死区处理逻辑 ---
+    // 如果数值在 -RC_DEADZONE 到 +RC_DEADZONE 之间，则强制归零
     if (rocker_lx > -RC_DEADZONE && rocker_lx < RC_DEADZONE)
-        rocker_lx = 0.0f;
+        rocker_lx = 0;
     if (rocker_ly > -RC_DEADZONE && rocker_ly < RC_DEADZONE)
-        rocker_ly = 0.0f;
+        rocker_ly = 0;
     if (rocker_rx > -RC_DEADZONE && rocker_rx < RC_DEADZONE)
-        rocker_rx = 0.0f;
+        rocker_rx = 0;
     if (rocker_ry > -RC_DEADZONE && rocker_ry < RC_DEADZONE)
-        rocker_ry = 0.0f;
+        rocker_ry = 0;
 
+    // --- 3. 使用过滤后的数据进行控制 ---
+
+    // 云台控制量计算 (仅在非急停状态下累加)
     if (!switch_is_down(current_switch_right)) {
         float yaw_sensitivity = 0.001f;
         float pitch_sensitivity = 0.0003f;
 
+        // [新增] 拨轮微调模式
+        // 当左侧拨轮向下拨动超过 100 时，进入微调模式 (灵敏度降低)
         if (rc_data[TEMP].rc.dial > 100) {
-            yaw_sensitivity *= 0.3f;
-            pitch_sensitivity *= 0.3f;
+            yaw_sensitivity *= 0.3f; // 降低 YAW 灵敏度至 30%
+            pitch_sensitivity *= 0.3f; // 降低 PITCH 灵敏度至 30%
         }
 
-        // What: 用左摇杆累加云台目标角；Why: 保持当前“目标角积分式”手感，不重写云台控制接口。
+        // 使用处理后的 rocker_lx 和 rocker_ly
         gimbal_cmd_send.yaw -= yaw_sensitivity * rocker_lx;
         gimbal_cmd_send.pitch += pitch_sensitivity * rocker_ly;
 
-        // What: 摇杆松手时把 yaw 目标缓慢锁回当前反馈；Why: 消除陀螺仪零偏导致的长期误差积累与放手漂移。
+        // ==================== [新增] Yaw 死区零偏漂移限位 ====================
+        // 功能: 当摇杆 X 轴在死区内 (rocker_lx == 0) 时，陀螺仪零偏会让 YawTotalAngle
+        //       持续缓慢变化，但 gimbal_cmd_send.yaw（目标值）却保持不动，
+        //       导致 PID 误差不断积累，云台被强迫追赶漂移，表现为"飘"。
+        // 原理: 在无输入期间，将目标值以低通方式软锁定到当前 IMU 反馈值，
+        //       使目标值跟随真实漂移，消除误差累积。
+        //       低通系数 YAW_DRIFT_LOCK_COEF 越小，锁定越快（0.0 = 立即锁定，会突变）；
+        //       设为 0.95 可让云台在放手后约 0.5s 内平滑锁定到当前姿态，无扰动感。
         if (rocker_lx == 0.0f) {
+            // 将目标值向当前 IMU 真实 yaw 缓慢拉拢，防止零偏积分积累误差
             gimbal_cmd_send.yaw = YAW_DRIFT_LOCK_COEF * gimbal_cmd_send.yaw +
                                   (1.0f - YAW_DRIFT_LOCK_COEF) * gimbal_fetch_data.gimbal_imu_data.YawTotalAngle;
         }
@@ -468,76 +595,99 @@ static void RemoteControlSet()
         LimitGimbalPitchTarget();
     }
 
+    // ==========================================
+    // [新增] 自瞄逻辑集成
+    // ==========================================
+    // 触发条件: 右拨杆为[上] (GIMBAL_GYRO_MODE)
+    // 且 用户按下了自瞄按键 (这里假设是 PC端的鼠标右键 或者 遥控器的某个组合键，目前默认在 GYRO_MODE 下常开自瞄检测)
+    // 或者，我们可以定义一个特定的开关逻辑
+
+    // // 修正: 只有在 GIMBAL_GYRO_MODE 下才允许自瞄介入
     if (switch_is_up(current_switch_right)) {
         if (gimbal_cmd_send.gimbal_mode == GIMBAL_GYRO_MODE) {
+            // 1. 获取当前云台反馈
+            // 注意: 我们在 robot_def.h 中定义了 VISION_YAW_AXIS 和 VISION_PITCH_AXIS
+            // 确保使用宏定义的轴向, 保持逻辑统一
             float current_yaw_total = gimbal_fetch_data.gimbal_imu_data.VISION_YAW_AXIS * VISION_YAW_SIGN;
+
+            // [轴互换后] Pitch 字段直接对应物理 Pitch 轴
             float current_pitch = gimbal_fetch_data.gimbal_imu_data.VISION_PITCH_AXIS * VISION_PITCH_SIGN;
 
-            // What: 只有陀螺仪模式才允许自瞄覆写目标角；Why: 避免自由模式下视觉和手控同时争抢同一套目标值。
+            // 2. 运行自瞄逻辑
+            // 如果识别到目标，cmd_yaw/pitch 会被更新为目标值
+            // 如果未识别到，cmd_yaw/pitch 保持 RemoteControl 计算出的手动值
             auto_aim_state = AutoGimbalRun(
                 vision_recv_data,
                 current_yaw_total,
                 current_pitch,
                 &gimbal_cmd_send.yaw,
                 &gimbal_cmd_send.pitch);
+
+            // 如果进入自瞄跟踪状态，可以覆盖底盘模式为跟随云台 (可选)
+            if (auto_aim_state == AUTO_AIM_TRACKING) {
+                // chassis_cmd_send.chassis_mode = CHASSIS_FOLLOW_GIMBAL_YAW;
+                // (保持小陀螺或跟随，视 tactical 需求而定，暂不强制修改底盘模式)
+            }
         } else {
             auto_aim_state = AUTO_AIM_IDLE;
         }
-    } else {
-        auto_aim_state = AUTO_AIM_IDLE;
     }
 
-    // What: 底盘遥控量继续沿用当前历史量纲；Why: 底盘侧还按“摇杆值×10”解释，不能在这一轮同时改单位。
-    chassis_cmd_send.vx = 10.0f * rocker_ry;
-    chassis_cmd_send.vy = 10.0f * rocker_rx;
+    // 底盘参数
+    // 右手系 x正向前进 y正向右移
+    // 使用处理后的 rocker_rx 和 rocker_ry
+    // [修复] 将遥控器摇杆值(-660~+660)正确映射为底盘速度(m/s)单位
+    // 归一化公式: (rocker_value / 660.0f) * MAX_SPEED
+    // 最大平地速度由 robot_def.h 中的 MAX_CHASSIS_VX/VY_SPEED 定义 (默认 6.0 m/s)
+    // chassis_cmd_send.vx = (rocker_ry / 660.0f) * MAX_CHASSIS_VX_SPEED; // 前后速度 (m/s)
+    // chassis_cmd_send.vy = (rocker_rx / 660.0f) * MAX_CHASSIS_VY_SPEED; // 左右速度 (m/s)
+    chassis_cmd_send.vx = 10.0f * rocker_ry; // 竖直方向,发送给vx
+    chassis_cmd_send.vy = 10.0f * rocker_rx; // 水平方向
 
+    // 发射参数
+    if (switch_is_up(rc_data[TEMP].rc.switch_right)) // 右侧开关状态[上],弹舱打开
+        ; // 弹舱舵机控制,待添加servo_motor模块,开启
+    else {
+        {
+            // 弹舱舵机控制,待添加servo_motor模块,关闭
+        };
+    }
+
+    // ==============================================================
+    // [新增] 安全逻辑: 仅在非急停状态下允许开启摩擦轮、前履带和抬升
+    // ==============================================================
     if (!switch_is_down(current_switch_right)) {
-        // What: 左拨杆中位上拨优先处理当前功能域；Why: 同一个拨杆同时复用摩擦轮和上岛辅助机构，必须按已锁存状态解释边沿。
         if (left_mid_to_up) {
+            // What: 左拨杆上翻优先处理当前功能域；Why: 同一个拨杆要在摩擦轮与上岛辅助机构之间复用，必须按当前锁存状态解释边沿。
             if (friction_switch_state != 0u) {
                 friction_switch_state = 0u;
-            } else if (front_track_switch_state != 0u) {
-                if (lift_retract_active != 0u) {
-                    lift_retract_active = 0u;
-                    lift_mode_switch_state = 1u;
-                } else {
-                    lift_mode_switch_state = !lift_mode_switch_state;
-                }
             } else {
-                friction_switch_state = 1u;
+#ifdef USE_ISLAND_ACTION
+                if (front_track_switch_state == 0u)
+#endif
+                {
+                    friction_switch_state = 1u;
+                }
             }
         }
 
-        // What: 左拨杆中位下拨仍然只负责前履带开关；Why: 保持用户要求恢复的原始交互，不把收腿入口塞到下拨上。
+#ifdef USE_ISLAND_ACTION
         if (friction_switch_state == 0u && left_mid_to_down) {
+            // What: 仅在摩擦轮关闭时响应履带切换；Why: 保留原有左拨杆下拨开火语义，不让上岛逻辑抢占发射入口。
             front_track_switch_state = !front_track_switch_state;
-            if (front_track_switch_state == 0u) {
-                lift_mode_switch_state = 0u;
-                lift_retract_active = 0u;
-            }
         }
-
-        if (front_track_switch_state == 0u) {
-            // What: 前履带关闭时同步退出抬升与收腿会话；Why: 上岛辅助机构必须先有前履带作为前置状态。
-            lift_mode_switch_state = 0u;
-            lift_retract_active = 0u;
-        }
-
-        // What: 左拨杆从上位回到中位时触发快速收腿；Why: `lift_retract_active` 已预留但未接线，本轮把它挂到用户指定的拨杆动作上。
-        if (left_up_to_mid &&
-            friction_switch_state == 0u &&
-            front_track_switch_state != 0u &&
-            lift_mode_switch_state != 0u) {
-            lift_retract_active = 1u;
-        }
+#endif
 
         if (friction_switch_state == 1u) {
-            // What: 摩擦轮开启后才解析左拨杆下位发射；Why: 保持原有发射安全门控，不让辅助机构复用伤到发射逻辑。
+            // 1. 开启摩擦轮
             shoot_cmd_send.friction_mode = FRICTION_ON;
             shoot_cmd_send.bullet_speed = BIG_AMU_12;
 
+            // 2. 处理开火指令 (左拨杆 -> 下)
+            // 只有在摩擦轮开启时，拨到下面才有效
+
             switch (fire_mode_state) {
-            case 0:
+            case 0: // 【单发模式】
                 if (switch_is_down(current_switch_left)) {
                     shoot_cmd_send.load_mode = LOAD_1_BULLET;
                 } else {
@@ -547,13 +697,15 @@ static void RemoteControlSet()
                 break;
 
             case 1:
-                if (switch_is_down(current_switch_left))
+                if (switch_is_down(current_switch_left)) {
                     shoot_cmd_send.load_mode = LOAD_2_BULLET;
-                else
+                } else {
                     shoot_cmd_send.load_mode = LOAD_STOP;
+                }
                 break;
 
-            case 2:
+            case 2: // 【连发模式】
+                // 逻辑: 只要拨杆保持在 [下]，就持续开火 (电平触发)
                 if (switch_is_down(current_switch_left)) {
                     shoot_cmd_send.load_mode = LOAD_BURSTFIRE;
                     shoot_cmd_send.shoot_rate = BURST_FIRE_RATE;
@@ -566,26 +718,37 @@ static void RemoteControlSet()
                 shoot_cmd_send.load_mode = LOAD_STOP;
                 break;
             }
+        } else {
+            // --- 摩擦轮关闭状态 ---
+            shoot_cmd_send.friction_mode = FRICTION_OFF;
+            shoot_cmd_send.load_mode = LOAD_STOP;
+            shoot_cmd_send.shoot_rate = 0.0f;
         }
 
+#ifdef USE_ISLAND_ACTION
         chassis_cmd_send.front_track_mode = front_track_switch_state ? FRONT_TRACK_ON : FRONT_TRACK_OFF;
         if (front_track_switch_state != 0u) {
             float lift_dial_input = NormalizeLiftDialInput(rc_data[TEMP].rc.dial);
 
-            chassis_cmd_send.front_track_speed_ref = FRONT_TRACK_SPEED_REF_DEFAULT; // What: 前履带开启时下发显式配置速度；Why: 让用户继续只改宏就能调履带速度。
-            chassis_cmd_send.lift_dial_input = 0.0f;
+            // What: 履带开启时下发更保守的固定速度与抬升输入；Why: 先把前履带速度降下来，同时让左拨杆上档就能直接触发后轮抬升。
+            chassis_cmd_send.front_track_speed_ref = FRONT_TRACK_SPEED_REF_DEFAULT;
+            if (switch_is_up(current_switch_left)) {
+                if (lift_dial_input == 0.0f)
+                    lift_dial_input = LIFT_SWITCH_UP_INPUT_DEFAULT;
 
-            if (lift_retract_active != 0u) {
-                // What: 快速收腿期间强制下发 `LIFT_RETRACT`；Why: 持续保持中位时也要让底盘侧一直执行收腿，直到内部撞底停机。
-                chassis_cmd_send.lift_mode = LIFT_RETRACT;
-            } else {
-                // What: 非收腿时恢复原始抬升拨轮语义；Why: 手动拨轮松手后必须回到位置保持，而不是在 `robot_cmd` 里擅自切成陀螺仪自动调平。
+                // What: 左拨杆上档时直接进入抬升调高；Why: 用户操作上希望上档立刻有反应，不需要再依赖隐藏锁存或额外拨轮动作。
                 chassis_cmd_send.lift_dial_input = lift_dial_input;
-                chassis_cmd_send.lift_mode = (lift_mode_switch_state == 0u) ? LIFT_OFF : (lift_dial_input == 0.0f ? LIFT_HOLD : LIFT_ADJUST);
+                chassis_cmd_send.lift_mode = LIFT_ADJUST;
+            } else {
+                // What: 左拨杆离开上档后保持当前位置；Why: 后轮抬起后应稳定保持高度，避免松手就回落。
+                chassis_cmd_send.lift_dial_input = 0.0f;
+                chassis_cmd_send.lift_mode = LIFT_HOLD;
             }
         }
+#endif
+
     } else {
-        // What: 急停时强制清空所有辅助机构锁存；Why: 解除急停后必须从安全基线重新进入，而不是继续沿用旧会话。
+        // What: 急停时强制清空所有遥控器锁存状态；Why: 解除急停后必须从安全基线重新进入，而不是继续沿用旧会话。
         friction_switch_state = 0u;
         shoot_cmd_send.friction_mode = FRICTION_OFF;
         shoot_cmd_send.load_mode = LOAD_STOP;
@@ -593,8 +756,9 @@ static void RemoteControlSet()
         ResetChassisAuxState();
     }
 
-    last_switch_left = current_switch_left; // What: 记录左拨杆历史状态；Why: 自动收腿依赖 `up -> mid` 边沿，不能只看当前电平。
-    last_switch_right = current_switch_right; // What: 记录右拨杆历史状态；Why: 云台无扰切换只应在模式边沿触发一次。
+    // 更新历史状态
+    last_switch_left = current_switch_left;
+    last_switch_right = current_switch_right;
 }
 
 /**
