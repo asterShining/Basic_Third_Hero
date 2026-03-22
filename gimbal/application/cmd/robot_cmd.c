@@ -60,6 +60,15 @@
 // 键鼠长按连发速率单独定义，作用是让鼠标连发不依赖遥控拨杆分支；
 // 原因是本轮需要让键鼠和遥控器并行控制，不能复用函数内局部宏。
 #define MOUSE_BURST_FIRE_RATE 8.0f
+// What: 定义 VT03 模式未初始化标记；Why: 需要把“首次接入 VT03”与真实模式挡位区分开，避免刚上线就误判成换挡。
+#define VT03_MODE_SW_INVALID 0xFFu
+
+typedef enum
+{
+    CONTROL_SOURCE_NONE = 0,
+    CONTROL_SOURCE_VT03,
+    CONTROL_SOURCE_DT7,
+} ControlSource_e;
 
 /* cmd应用包含的模块实例指针和交互信息存储*/
 #ifdef GIMBAL_BOARD // 对双板的兼容,条件编译
@@ -146,6 +155,20 @@ static float keyboard_vy_smoothed = 0.0f;
 // 键盘平移上一次更新时间戳，作用是按真实控制周期计算每拍允许变化量；
 // 原因是任务调度并非绝对恒定 5ms，直接写死步长会让不同负载下手感漂移。
 static uint32_t keyboard_ramp_last_ms = 0;
+// What: 记录当前主控输入源；Why: 需要在 VT03 主控、DT7 回退和双离线零力之间做统一仲裁。
+static ControlSource_e current_control_source = CONTROL_SOURCE_NONE;
+// What: 记录 VT03 右自定义键上一拍电平；Why: 自定义键是电平输入，必须在 cmd 层自行做上升沿锁存切换。
+static uint8_t vt03_fn_right_last = 0u;
+// What: 记录 VT03 扳机上一拍电平；Why: 单发拨弹只能响应上升沿，不能把扳机电平直接长期送进发射状态机。
+static uint8_t vt03_trigger_last = 0u;
+// What: 记录 VT03 Pause 上一拍电平；Why: 需要把 Pause 改成短按锁存切换，而不是按住期间临时零力。
+static uint8_t vt03_pause_last = 0u;
+// What: 锁存 VT03 Pause 零力状态；Why: VT03 上报的是瞬时按键电平，不额外锁存的话短按结束后下一拍就会恢复有力。
+static uint8_t vt03_pause_zero_force_latched = 0u;
+// What: 记录 VT03 上一拍模式挡位；Why: VT03 换挡时需要把云台目标同步到当前姿态，避免切挡瞬间跳变。
+static uint8_t vt03_mode_sw_last = VT03_MODE_SW_INVALID;
+
+static void ResetChassisAuxState(void);
 
 /**
  * @brief 将 pitch 目标统一限幅到机构安全范围
@@ -188,6 +211,146 @@ static void ResetKeyboardMotionState()
     keyboard_vx_smoothed = 0.0f;
     keyboard_vy_smoothed = 0.0f;
     keyboard_ramp_last_ms = 0u;
+}
+
+/**
+ * @brief 对摇杆量应用统一死区
+ *
+ * @param value 原始摇杆量
+ * @return float 死区处理后的摇杆量
+ */
+static float ApplyRCDeadzone(float value)
+{
+    // What: 统一复用同一套摇杆死区；Why: VT03 和 DT7 都应该保持相同的中位抖动抑制手感。
+    if (value > -RC_DEADZONE && value < RC_DEADZONE) {
+        return 0.0f;
+    }
+    return value;
+}
+
+/**
+ * @brief 将云台目标同步到当前姿态
+ *
+ */
+static void SyncGimbalTargetToCurrentAttitude()
+{
+    // What: 在控制源切换或模式切换时把云台目标同步到当前反馈；Why: 避免切源后继续追旧目标导致云台突然跳转。
+    gimbal_cmd_send.yaw = gimbal_fetch_data.gimbal_imu_data.YawTotalAngle;
+    gimbal_cmd_send.pitch = gimbal_fetch_data.gimbal_imu_data.Pitch;
+    LimitGimbalPitchTarget();
+}
+
+/**
+ * @brief 判断 VT03 是否已经具备主控资格
+ *
+ * @return uint8_t 1:可用 0:不可用
+ */
+static uint8_t IsVideoLinkControlReady(void)
+{
+    // What: 统一封装 VT03 主控可用条件；Why: 主控仲裁和键鼠取源都必须依赖同一套在线且有有效帧的判断。
+    return (uint8_t)((video_link_data != NULL) && VideoLinkKMIsOnline() && VideoLinkKMHasValidFrame());
+}
+
+/**
+ * @brief 获取当前主控输入源
+ *
+ * @return ControlSource_e 当前主控输入源
+ */
+static ControlSource_e GetActiveControlSource(void)
+{
+    // What: 固定采用 VT03 优先、DT7 回退、双离线零力的顺序；Why: 用户要求 VT03 遥控器恢复主控，DT7 只在断链时兜底。
+    if (IsVideoLinkControlReady()) {
+        return CONTROL_SOURCE_VT03;
+    }
+    if (RemoteControlIsOnline()) {
+        return CONTROL_SOURCE_DT7;
+    }
+    return CONTROL_SOURCE_NONE;
+}
+
+/**
+ * @brief 将键鼠边沿状态对齐到当前输入源的当前电平
+ *
+ * @param mouse_key_source 当前输入源的键鼠数据视图
+ */
+static void SyncMouseKeyEdgeState(const RC_ctrl_t *mouse_key_source)
+{
+    uint16_t key_bits = 0u;
+
+    if (mouse_key_source != NULL) {
+        key_bits = mouse_key_source->key[KEY_PRESS].keys;
+        mouse_left_last = mouse_key_source->mouse.press_l;
+    } else {
+        mouse_left_last = 0u;
+    }
+
+    // What: 切换输入源时对齐键盘 F 键和鼠标左键边沿历史；Why: 否则切源首拍会把“已经按住”的键误判成新的上升沿。
+    keyboard_friction_toggle_last = (uint8_t)((key_bits >> Key_F) & 0x1u);
+}
+
+/**
+ * @brief 处理主控输入源切换时的锁存复位和边沿同步
+ *
+ * @param new_source 新的主控输入源
+ */
+static void HandleControlSourceSwitch(ControlSource_e new_source)
+{
+    const VideoLinkKM_RemoteState_s *video_link_remote_state = VideoLinkKMGetRemoteState();
+    const RC_ctrl_t *mouse_key_source = NULL;
+
+    if (new_source == current_control_source) {
+        return;
+    }
+
+    // What: 切换主控源时统一清空所有跨周期锁存；Why: 不同链路的边沿语义不同，沿用旧状态会直接造成误开火或残留运动。
+    ResetMouseFireState();
+    ResetKeyboardMotionState();
+    ResetChassisAuxState();
+    friction_switch_state = 0u;
+    shoot_cmd_send.shoot_rate = 0.0f;
+    auto_aim_state = AUTO_AIM_IDLE;
+    vt03_pause_zero_force_latched = 0u;
+    vt03_mode_sw_last = VT03_MODE_SW_INVALID;
+
+    if (new_source == CONTROL_SOURCE_DT7) {
+        last_switch_left = rc_data[TEMP].rc.switch_left;
+        last_switch_right = rc_data[TEMP].rc.switch_right;
+        vt03_fn_right_last = 0u;
+        vt03_trigger_last = 0u;
+        vt03_pause_last = 0u;
+        mouse_key_source = &rc_data[TEMP];
+    } else if (new_source == CONTROL_SOURCE_VT03) {
+        last_switch_left = RC_SW_DOWN;
+        last_switch_right = RC_SW_DOWN;
+        if (video_link_remote_state != NULL) {
+            vt03_fn_right_last = video_link_remote_state->fn_right_button_down;
+            vt03_trigger_last = video_link_remote_state->trigger_button_down;
+            vt03_pause_last = video_link_remote_state->pause_button_down;
+            vt03_mode_sw_last = video_link_remote_state->mode_sw;
+        } else {
+            vt03_fn_right_last = 0u;
+            vt03_trigger_last = 0u;
+            vt03_pause_last = 0u;
+        }
+        if (video_link_data != NULL) {
+            mouse_key_source = &video_link_data[TEMP];
+        }
+    } else {
+        last_switch_left = RC_SW_DOWN;
+        last_switch_right = RC_SW_DOWN;
+        vt03_fn_right_last = 0u;
+        vt03_trigger_last = 0u;
+        vt03_pause_last = 0u;
+    }
+
+    SyncMouseKeyEdgeState(mouse_key_source);
+    last_video_link_online = IsVideoLinkControlReady();
+
+    if (new_source != CONTROL_SOURCE_NONE) {
+        SyncGimbalTargetToCurrentAttitude();
+    }
+
+    current_control_source = new_source;
 }
 
 #ifdef USE_ISLAND_ACTION
@@ -268,9 +431,8 @@ static float RampKeyboardAxis(float current, float target, float dt_s)
  */
 static const RC_ctrl_t *GetActiveMouseKeySource(void)
 {
-    // 这里优先返回图传键鼠数据，作用是让官方图传链路覆盖 DBUS 内嵌键鼠；
-    // 原因是用户明确要求把 2026 图传控制入口接到云台板，当前实现必须以图传为主源。
-    if (video_link_data != NULL && VideoLinkKMIsOnline() && VideoLinkKMHasValidFrame()) {
+    // What: 键鼠输入跟随当前主控源取数；Why: VT03 在线时需要完整接管图传键鼠，断链后再无缝回退到 DBUS。
+    if (current_control_source == CONTROL_SOURCE_VT03 && video_link_data != NULL) {
         return &video_link_data[TEMP];
     }
     return &rc_data[TEMP];
@@ -314,9 +476,8 @@ void RobotCMDInit()
     // What: 开机时把 yaw 软件对齐基准直接设为 0 度；Why: 让底盘跟随从第一拍就围绕 DM 硬件零点闭环，避免首帧回到旧机械角。
     yaw_align_offset_deg = 0.0f;
     rc_data = RemoteControlInit(&huart3); // 修改为对应串口,注意如果是自研板dbus协议串口需选用添加了反相器的那个
-    // 这里在 USART1 初始化图传键鼠，作用是按 921600 串口接入官方图传链路；
-    // 原因是当前工程视觉走 VCP，USART1 空闲，正好可作为云台板图传入口。
-    video_link_data = VideoLinkKMInit(&huart1);
+    // What: 将 VT03 图传链路恢复到 USART6；Why: 当前实车接线走的是云台板 USART6，挂到 USART1 会导致 VT03 遥控和键鼠都收不到有效帧。
+    video_link_data = VideoLinkKMInit(&huart6);
     // vision_recv_data = VisionInit(&huart1); // 视觉通信串口
     Buzzer_config_s hint_config = {
         .alarm_level = ALARM_LEVEL_MEDIUM, // 优先级
@@ -431,7 +592,11 @@ static void EmergencyHandler()
     shoot_cmd_send.friction_mode = FRICTION_OFF;
     shoot_cmd_send.load_mode = LOAD_STOP;
     shoot_cmd_send.friction_mode = FRICTION_OFF;
+    shoot_cmd_send.shoot_rate = 0.0f;
     friction_switch_state = 0u;
+    // What: 零力出口统一清空键鼠和遥控锁存；Why: 否则恢复有力后会把暂停前的旧输入当成当前意图继续执行。
+    ResetMouseFireState();
+    ResetKeyboardMotionState();
     ResetChassisAuxState();
     // }
     // 遥控器右侧开关为[上],恢复正常运行
@@ -446,13 +611,57 @@ static void EmergencyHandler()
  * @brief 控制输入为遥控器(调试时)的模式和控制量设置
  *
  */
-static void RemoteControlSet()
+static void ApplyRemoteGimbalStickControl(float rocker_lx, float rocker_ly, int16_t dial_input)
+{
+    float yaw_sensitivity = 0.001f;
+    float pitch_sensitivity = 0.0003f;
+
+    if (dial_input > 100) {
+        yaw_sensitivity *= 0.3f;
+        pitch_sensitivity *= 0.3f;
+    }
+
+    // What: 统一复用当前积分式云台手感；Why: 本轮只恢复 VT03 主控，不应该顺带重调云台控制参数。
+    gimbal_cmd_send.yaw -= yaw_sensitivity * rocker_lx;
+    gimbal_cmd_send.pitch += pitch_sensitivity * rocker_ly;
+
+    // What: 摇杆横向回中后将 yaw 目标软锁到当前反馈；Why: 需要抵消 IMU 零偏导致的长期漂移，避免放手后云台慢慢飘走。
+    if (rocker_lx == 0.0f) {
+        gimbal_cmd_send.yaw = YAW_DRIFT_LOCK_COEF * gimbal_cmd_send.yaw +
+                              (1.0f - YAW_DRIFT_LOCK_COEF) * gimbal_fetch_data.gimbal_imu_data.YawTotalAngle;
+    }
+
+    LimitGimbalPitchTarget();
+}
+
+/**
+ * @brief 按当前遥控器手感更新底盘平移指令
+ *
+ * @param rocker_rx 右摇杆横向
+ * @param rocker_ry 右摇杆纵向
+ */
+static void ApplyRemoteChassisStickControl(float rocker_rx, float rocker_ry)
+{
+    // What: 继续沿用当前底盘历史量纲；Why: 底盘侧仍按“摇杆值乘 10”解释，不能在恢复 VT03 时再顺手改单位。
+    chassis_cmd_send.vx = 10.0f * rocker_ry;
+    chassis_cmd_send.vy = 10.0f * rocker_rx;
+}
+
+/**
+ * @brief 控制输入为 DT7 遥控器时的模式和控制量设置
+ *
+ */
+static void RemoteControlSetDT7(void)
 {
     // 1. 获取当前开关状态
     uint16_t current_switch_right = rc_data[TEMP].rc.switch_right;
     uint16_t current_switch_left = rc_data[TEMP].rc.switch_left;
-    uint8_t left_mid_to_up = switch_is_up(current_switch_left) && switch_is_mid(last_switch_left);
-    uint8_t left_mid_to_down = switch_is_down(current_switch_left) && switch_is_mid(last_switch_left);
+    uint8_t left_mid_to_up = (uint8_t)(switch_is_up(current_switch_left) && switch_is_mid(last_switch_left));
+    uint8_t left_mid_to_down = (uint8_t)(switch_is_down(current_switch_left) && switch_is_mid(last_switch_left));
+    float rocker_lx;
+    float rocker_ly;
+    float rocker_rx;
+    float rocker_ry;
 
     float current_real_pitch = gimbal_fetch_data.gimbal_imu_data.Pitch; // [轴互换后] Pitch 字段即物理 Pitch
 
@@ -468,15 +677,16 @@ static void RemoteControlSet()
 
     // [下] 急停模式
     if (switch_is_down(current_switch_right)) {
+        bool is_inner_eight;
+
         EmergencyHandler();
-        static uint8_t cali_triggered = 0;
-        bool is_inner_eight = (rc_data[TEMP].rc.rocker_l_ > RC_TRIGGER_TH) && // 左摇杆向右
-                              (rc_data[TEMP].rc.rocker_l1 < -RC_TRIGGER_TH) && // 左摇杆向下
-                              (rc_data[TEMP].rc.rocker_r_ < -RC_TRIGGER_TH) && // 右摇杆向左
-                              (rc_data[TEMP].rc.rocker_r1 < -RC_TRIGGER_TH); // 右摇杆向下
+        is_inner_eight = (rc_data[TEMP].rc.rocker_l_ > RC_TRIGGER_TH) &&
+                         (rc_data[TEMP].rc.rocker_l1 < -RC_TRIGGER_TH) &&
+                         (rc_data[TEMP].rc.rocker_r_ < -RC_TRIGGER_TH) &&
+                         (rc_data[TEMP].rc.rocker_r1 < -RC_TRIGGER_TH);
 
         if (is_inner_eight) {
-            if (cali_triggered == 0) {
+            if (cali_triggered == 0u) {
                 // 1. 调用校准
                 GimbalCalibrate();
                 // 手动 DM 校零后，将底盘跟随基准切到运行时零位。
@@ -491,50 +701,34 @@ static void RemoteControlSet()
                     AlarmSetStatus(hint_buzzer, ALARM_ON);
                 }
 
-                cali_triggered = 1;
+                cali_triggered = 1u;
             }
         } else {
             // 摇杆回中后，关闭蜂鸣器并重置触发位
-            if (cali_triggered == 1) {
+            if (cali_triggered != 0u) {
                 if (hint_buzzer != NULL) {
                     AlarmSetStatus(hint_buzzer, ALARM_OFF);
                 }
-                cali_triggered = 0;
+                cali_triggered = 0u;
             }
         }
     }
     // [上] 底盘无力，云台能够转动
     else if (switch_is_up(current_switch_right)) {
-        // 无扰切换判断
         if (!switch_is_up(last_switch_right)) {
-            if (!switch_is_up(last_switch_right)) {
-                gimbal_cmd_send.yaw = gimbal_fetch_data.gimbal_imu_data.YawTotalAngle;
-            }
+            SyncGimbalTargetToCurrentAttitude();
         }
 
         robot_state = ROBOT_READY;
-        // [用户要求] 注释掉原有逻辑 (User request: Comment out original logic)
-        // chassis_cmd_send.chassis_mode = CHASSIS_NO_FOLLOW;
-        gimbal_cmd_send.gimbal_mode = GIMBAL_FREE_MODE;
-
-        // [新增] 小陀螺模式配置 (New Configuration: Little Top Mode)
-        // 这里明确下发 CHASSIS_ROTATE，作用是让底盘侧进入小陀螺分支。
-        // 之前该行被注释后，发送出去的一直是 CHASSIS_NO_FOLLOW，所以底盘永远不会自旋。
+        // What: 上档恢复为小陀螺 + 云台陀螺仪模式；Why: 保持现有 DT7 主驾驶语义，也避免顶部逻辑和 VT03 分支分叉两套行为。
         chassis_cmd_send.chassis_mode = CHASSIS_ROTATE;
-        // 云台切换至陀螺仪模式以保持世界坐标系下的稳定瞄准
-        // gimbal_cmd_send.gimbal_mode = GIMBAL_GYRO_MODE;
-
+        gimbal_cmd_send.gimbal_mode = GIMBAL_GYRO_MODE;
         shoot_cmd_send.shoot_mode = SHOOT_ON;
-
     }
     // [中] 底盘跟随云台模式
     else if (switch_is_mid(current_switch_right)) {
-        // 核心修改：检测是否刚刚切入[上]档位
         if (!switch_is_mid(last_switch_right)) {
-            // 【无扰切换执行】
-            // 将云台控制的"目标值"强行设定为当前的"反馈值"
-            // 这样PID的误差(Error)在这一瞬间为0，避免云台疯转
-            gimbal_cmd_send.yaw = gimbal_fetch_data.gimbal_imu_data.YawTotalAngle;
+            SyncGimbalTargetToCurrentAttitude();
         }
 
         robot_state = ROBOT_READY;
@@ -543,56 +737,14 @@ static void RemoteControlSet()
         shoot_cmd_send.shoot_mode = SHOOT_ON;
     }
 
-    // --- 1. 提取原始数据并转为浮点数 ---
-    float rocker_lx = (float)rc_data[TEMP].rc.rocker_l_; // 左摇杆 X (云台Yaw)
-    float rocker_ly = (float)rc_data[TEMP].rc.rocker_l1; // 左摇杆 Y (云台Pitch)
-    float rocker_rx = (float)rc_data[TEMP].rc.rocker_r_; // 右摇杆 X (底盘左右)
-    float rocker_ry = (float)rc_data[TEMP].rc.rocker_r1; // 右摇杆 Y (底盘前后)
-
-    // --- 2. 死区处理逻辑 ---
-    // 如果数值在 -RC_DEADZONE 到 +RC_DEADZONE 之间，则强制归零
-    if (rocker_lx > -RC_DEADZONE && rocker_lx < RC_DEADZONE)
-        rocker_lx = 0;
-    if (rocker_ly > -RC_DEADZONE && rocker_ly < RC_DEADZONE)
-        rocker_ly = 0;
-    if (rocker_rx > -RC_DEADZONE && rocker_rx < RC_DEADZONE)
-        rocker_rx = 0;
-    if (rocker_ry > -RC_DEADZONE && rocker_ry < RC_DEADZONE)
-        rocker_ry = 0;
-
-    // --- 3. 使用过滤后的数据进行控制 ---
+    rocker_lx = ApplyRCDeadzone((float)rc_data[TEMP].rc.rocker_l_);
+    rocker_ly = ApplyRCDeadzone((float)rc_data[TEMP].rc.rocker_l1);
+    rocker_rx = ApplyRCDeadzone((float)rc_data[TEMP].rc.rocker_r_);
+    rocker_ry = ApplyRCDeadzone((float)rc_data[TEMP].rc.rocker_r1);
 
     // 云台控制量计算 (仅在非急停状态下累加)
     if (!switch_is_down(current_switch_right)) {
-        float yaw_sensitivity = 0.001f;
-        float pitch_sensitivity = 0.0003f;
-
-        // [新增] 拨轮微调模式
-        // 当左侧拨轮向下拨动超过 100 时，进入微调模式 (灵敏度降低)
-        if (rc_data[TEMP].rc.dial > 100) {
-            yaw_sensitivity *= 0.3f; // 降低 YAW 灵敏度至 30%
-            pitch_sensitivity *= 0.3f; // 降低 PITCH 灵敏度至 30%
-        }
-
-        // 使用处理后的 rocker_lx 和 rocker_ly
-        gimbal_cmd_send.yaw -= yaw_sensitivity * rocker_lx;
-        gimbal_cmd_send.pitch += pitch_sensitivity * rocker_ly;
-
-        // ==================== [新增] Yaw 死区零偏漂移限位 ====================
-        // 功能: 当摇杆 X 轴在死区内 (rocker_lx == 0) 时，陀螺仪零偏会让 YawTotalAngle
-        //       持续缓慢变化，但 gimbal_cmd_send.yaw（目标值）却保持不动，
-        //       导致 PID 误差不断积累，云台被强迫追赶漂移，表现为"飘"。
-        // 原理: 在无输入期间，将目标值以低通方式软锁定到当前 IMU 反馈值，
-        //       使目标值跟随真实漂移，消除误差累积。
-        //       低通系数 YAW_DRIFT_LOCK_COEF 越小，锁定越快（0.0 = 立即锁定，会突变）；
-        //       设为 0.95 可让云台在放手后约 0.5s 内平滑锁定到当前姿态，无扰动感。
-        if (rocker_lx == 0.0f) {
-            // 将目标值向当前 IMU 真实 yaw 缓慢拉拢，防止零偏积分积累误差
-            gimbal_cmd_send.yaw = YAW_DRIFT_LOCK_COEF * gimbal_cmd_send.yaw +
-                                  (1.0f - YAW_DRIFT_LOCK_COEF) * gimbal_fetch_data.gimbal_imu_data.YawTotalAngle;
-        }
-
-        LimitGimbalPitchTarget();
+        ApplyRemoteGimbalStickControl(rocker_lx, rocker_ly, rc_data[TEMP].rc.dial);
     }
 
     // ==========================================
@@ -633,16 +785,7 @@ static void RemoteControlSet()
         }
     }
 
-    // 底盘参数
-    // 右手系 x正向前进 y正向右移
-    // 使用处理后的 rocker_rx 和 rocker_ry
-    // [修复] 将遥控器摇杆值(-660~+660)正确映射为底盘速度(m/s)单位
-    // 归一化公式: (rocker_value / 660.0f) * MAX_SPEED
-    // 最大平地速度由 robot_def.h 中的 MAX_CHASSIS_VX/VY_SPEED 定义 (默认 6.0 m/s)
-    // chassis_cmd_send.vx = (rocker_ry / 660.0f) * MAX_CHASSIS_VX_SPEED; // 前后速度 (m/s)
-    // chassis_cmd_send.vy = (rocker_rx / 660.0f) * MAX_CHASSIS_VY_SPEED; // 左右速度 (m/s)
-    chassis_cmd_send.vx = 10.0f * rocker_ry; // 竖直方向,发送给vx
-    chassis_cmd_send.vy = 10.0f * rocker_rx; // 水平方向
+    ApplyRemoteChassisStickControl(rocker_rx, rocker_ry);
 
     // 发射参数
     if (switch_is_up(rc_data[TEMP].rc.switch_right)) // 右侧开关状态[上],弹舱打开
@@ -762,13 +905,144 @@ static void RemoteControlSet()
 }
 
 /**
+ * @brief 处理 VT03 遥控器发射逻辑
+ *
+ * @param video_link_remote_state VT03 遥控器状态
+ */
+static void ApplyVT03ShootLogic(const VideoLinkKM_RemoteState_s *video_link_remote_state)
+{
+    uint8_t fn_right_pressed;
+    uint8_t trigger_pressed;
+
+    if (video_link_remote_state == NULL) {
+        return;
+    }
+
+    fn_right_pressed = video_link_remote_state->fn_right_button_down;
+    trigger_pressed = video_link_remote_state->trigger_button_down;
+
+    if (fn_right_pressed && !vt03_fn_right_last) {
+        // What: 使用 VT03 右自定义键切换摩擦轮；Why: VT03 遥控器没有 DT7 的拨杆边沿接口，需要在 cmd 层用自定义键承接启停。
+        friction_switch_state = (uint8_t)!friction_switch_state;
+    }
+
+    if (friction_switch_state != 0u) {
+        shoot_cmd_send.shoot_mode = SHOOT_ON;
+        shoot_cmd_send.friction_mode = FRICTION_ON;
+        shoot_cmd_send.bullet_speed = BIG_AMU_12;
+
+        // What: 扳机只响应单发上升沿；Why: 用户要求 VT03 遥控器保持“扳机点一下打一发”的安全语义。
+        if (trigger_pressed && !vt03_trigger_last) {
+            shoot_cmd_send.load_mode = LOAD_1_BULLET;
+        } else {
+            shoot_cmd_send.load_mode = LOAD_STOP;
+        }
+    } else {
+        shoot_cmd_send.friction_mode = FRICTION_OFF;
+        shoot_cmd_send.load_mode = LOAD_STOP;
+        shoot_cmd_send.shoot_rate = 0.0f;
+    }
+
+    vt03_fn_right_last = fn_right_pressed;
+    vt03_trigger_last = trigger_pressed;
+}
+
+/**
+ * @brief 控制输入为 VT03 遥控器时的模式和控制量设置
+ *
+ */
+static void RemoteControlSetVT03(void)
+{
+    const VideoLinkKM_RemoteState_s *video_link_remote_state = VideoLinkKMGetRemoteState();
+    uint8_t pause_pressed;
+    float rocker_lx;
+    float rocker_ly;
+    float rocker_rx;
+    float rocker_ry;
+
+    if (video_link_remote_state == NULL || video_link_data == NULL) {
+        EmergencyHandler();
+        return;
+    }
+
+    pause_pressed = video_link_remote_state->pause_button_down;
+    if (pause_pressed && !vt03_pause_last) {
+        // What: 用 Pause 上升沿翻转 VT03 零力锁存；Why: 用户要求短按一次失能、再短按一次恢复，而不是按住才零力。
+        vt03_pause_zero_force_latched = (uint8_t)!vt03_pause_zero_force_latched;
+        // What: Pause 切换时同步刷新 VT03 边沿历史；Why: 避免恢复有力后把暂停期间按住的扳机或自定义键误判成新触发。
+        vt03_fn_right_last = video_link_remote_state->fn_right_button_down;
+        vt03_trigger_last = video_link_remote_state->trigger_button_down;
+        vt03_mode_sw_last = video_link_remote_state->mode_sw;
+        if (vt03_pause_zero_force_latched == 0u) {
+            SyncGimbalTargetToCurrentAttitude();
+        }
+    }
+    vt03_pause_last = pause_pressed;
+
+    if (vt03_pause_zero_force_latched != 0u) {
+        // What: Pause 锁存零力期间持续更新 VT03 边沿历史；Why: 用户在零力时改挡位或按住扳机，恢复时不应该被当成新的边沿事件。
+        vt03_fn_right_last = video_link_remote_state->fn_right_button_down;
+        vt03_trigger_last = video_link_remote_state->trigger_button_down;
+        vt03_mode_sw_last = video_link_remote_state->mode_sw;
+        EmergencyHandler();
+        return;
+    }
+
+    if (vt03_mode_sw_last != video_link_remote_state->mode_sw) {
+        SyncGimbalTargetToCurrentAttitude();
+    }
+
+    robot_state = ROBOT_READY;
+    if (video_link_remote_state->mode_sw == 2u) {
+        // What: VT03 的 S 挡进入底盘自由 + 云台自由；Why: 保持遥控器 S 挡作为“完全手动自由控制”的直觉语义。
+        chassis_cmd_send.chassis_mode = CHASSIS_NO_FOLLOW;
+        gimbal_cmd_send.gimbal_mode = GIMBAL_FREE_MODE;
+    } else {
+        // What: VT03 的 C/N 挡统一进入底盘跟随云台；Why: 当前用户需求里这两个挡位都用于正常驾驶，不再拆成两套底盘行为。
+        chassis_cmd_send.chassis_mode = CHASSIS_FOLLOW_GIMBAL_YAW;
+        gimbal_cmd_send.gimbal_mode = GIMBAL_GYRO_MODE;
+    }
+    shoot_cmd_send.shoot_mode = SHOOT_ON;
+    auto_aim_state = AUTO_AIM_IDLE;
+
+    rocker_lx = ApplyRCDeadzone((float)video_link_data[TEMP].rc.rocker_l_);
+    rocker_ly = ApplyRCDeadzone((float)video_link_data[TEMP].rc.rocker_l1);
+    rocker_rx = ApplyRCDeadzone((float)video_link_data[TEMP].rc.rocker_r_);
+    rocker_ry = ApplyRCDeadzone((float)video_link_data[TEMP].rc.rocker_r1);
+
+    ApplyRemoteGimbalStickControl(rocker_lx, rocker_ly, video_link_data[TEMP].rc.dial);
+    ApplyRemoteChassisStickControl(rocker_rx, rocker_ry);
+
+    // What: VT03 遥控分支显式关闭当前未接到图传遥控器上的辅助机构；Why: 本轮只恢复主驾驶和发射，不让上岛逻辑误吃到图传状态。
+    ResetChassisAuxState();
+    ApplyVT03ShootLogic(video_link_remote_state);
+    vt03_mode_sw_last = video_link_remote_state->mode_sw;
+}
+
+/**
+ * @brief 根据当前主控输入源设置模式和控制量
+ *
+ * @param control_source 当前主控输入源
+ */
+static void RemoteControlSet(ControlSource_e control_source)
+{
+    if (control_source == CONTROL_SOURCE_VT03) {
+        RemoteControlSetVT03();
+    } else if (control_source == CONTROL_SOURCE_DT7) {
+        RemoteControlSetDT7();
+    } else {
+        EmergencyHandler();
+    }
+}
+
+/**
  * @brief 输入为键鼠时模式和控制量设置
  *
  */
 static void MouseKeySet()
 {
     const RC_ctrl_t *mouse_key_source = GetActiveMouseKeySource();
-    uint8_t video_link_online = (video_link_data != NULL) && VideoLinkKMIsOnline() && VideoLinkKMHasValidFrame();
+    uint8_t video_link_online = IsVideoLinkControlReady();
     uint16_t key_bits = mouse_key_source->key[KEY_PRESS].keys;
     uint8_t friction_toggle_pressed = (uint8_t)((key_bits >> Key_F) & 0x1u);
     int8_t keyboard_vx = (int8_t)((key_bits >> Key_W) & 0x1u) - (int8_t)((key_bits >> Key_S) & 0x1u);
@@ -878,6 +1152,8 @@ static void MouseKeySet()
 /* 机器人核心控制任务,200Hz频率运行(必须高于视觉发送频率) */
 void RobotCMDTask()
 {
+    ControlSource_e active_control_source;
+
     // BMI088Acquire(bmi088_test,&bmi088_data) ;
     // 从其他应用获取回传数据
 #ifdef ONE_BOARD
@@ -894,10 +1170,16 @@ void RobotCMDTask()
     PrepareControlCommandBase();
     // 根据gimbal的反馈值计算云台和底盘正方向的夹角,不需要传参,通过static私有变量完成
     CalcOffsetAngle();
-    // 先执行遥控器基础映射，再叠加键鼠输入，作用是实现“同周期混控”；
-    // 原因是用户要求键盘鼠标和遥控器能够同时控制，而不是走左拨杆互斥切换。
-    RemoteControlSet();
-    MouseKeySet();
+    active_control_source = GetActiveControlSource();
+    HandleControlSourceSwitch(active_control_source);
+
+    // What: 先收口主遥控源，再叠加当前主控对应的键鼠输入；Why: 需要让 VT03 遥控器和电脑控制同链路共存，同时保留 DT7 断链回退。
+    if (active_control_source == CONTROL_SOURCE_NONE) {
+        EmergencyHandler();
+    } else {
+        RemoteControlSet(active_control_source);
+        MouseKeySet();
+    }
 
     // EmergencyHandler(); // 处理模块离线和遥控器急停等紧急情况
 
