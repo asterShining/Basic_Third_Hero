@@ -60,11 +60,16 @@
 // 键鼠长按连发速率单独定义，作用是让鼠标连发不依赖遥控拨杆分支；
 // 原因是本轮需要让键鼠和遥控器并行控制，不能复用函数内局部宏。
 #define MOUSE_BURST_FIRE_RATE 8.0f
+// What: 定义 VT03 的 C 挡编码；Why: 挡位映射需要显式拆开，避免再次把 C/N 合并后改坏小陀螺逻辑。
+#define VT03_MODE_SW_C 0u
+// What: 定义 VT03 的 N 挡编码；Why: 用命名常量替代裸值，后续调整挡位语义时不容易改漏。
+#define VT03_MODE_SW_N 1u
+// What: 定义 VT03 的 S 挡编码；Why: 当前 S 挡仍然保留自由模式，显式命名能让分支语义更清楚。
+#define VT03_MODE_SW_S 2u
 // What: 定义 VT03 模式未初始化标记；Why: 需要把“首次接入 VT03”与真实模式挡位区分开，避免刚上线就误判成换挡。
 #define VT03_MODE_SW_INVALID 0xFFu
 
-typedef enum
-{
+typedef enum {
     CONTROL_SOURCE_NONE = 0,
     CONTROL_SOURCE_VT03,
     CONTROL_SOURCE_DT7,
@@ -148,6 +153,12 @@ static uint8_t last_video_link_online = 0;
 // 键盘摩擦轮开关键上一拍电平，作用是检测 F 键上升沿；
 // 原因是摩擦轮开关应该是“按一下切换一次”，而不是按住期间每拍反复翻转。
 static uint8_t keyboard_friction_toggle_last = 0;
+// 键盘小陀螺开关键上一拍电平，作用是检测 X 键上升沿；
+// 原因是用户要求 X 键按一次切一次，不能按住期间每拍重复翻转小陀螺状态。
+static uint8_t keyboard_spin_toggle_last = 0u;
+// 键盘小陀螺锁存状态，作用是让 X 键一次切换后持续保持小陀螺；
+// 原因是用户明确要求 X 键直接作为小陀螺开关，而不是按住才生效。
+static uint8_t keyboard_spin_mode_latched = 0u;
 // 键盘平移当前平滑输出，作用是保存斜坡状态跨周期延续；
 // 原因是 `PrepareControlCommandBase()` 每拍都会清零瞬态命令，平滑状态必须独立保存。
 static float keyboard_vx_smoothed = 0.0f;
@@ -191,13 +202,25 @@ static void LimitGimbalPitchTarget()
  */
 static void ResetMouseFireState()
 {
-    // 这里把键鼠开火状态全部清零，作用是急停后不残留摩擦轮和连发锁存；
-    // 原因是键鼠改成并行输入后，若不清状态，恢复出急停时会把上一次鼠标意图带回来。
+    // 这里仅清空键鼠发射相关锁存，作用是关闭摩擦轮或急停后不残留开火意图；
+    // 原因是 F 键手动关摩擦轮也会复用这个函数，不能顺带把其它键鼠模式锁存一起清掉。
     mouse_fire_friction_latched = 0;
     mouse_left_last = 0;
     mouse_left_burst_active = 0;
     mouse_left_press_start_ms = 0;
     keyboard_friction_toggle_last = 0;
+}
+
+/**
+ * @brief 清空键鼠控制锁存状态
+ *
+ */
+static void ResetMouseControlLatchState()
+{
+    // What: 一次性清空键鼠发射和小陀螺锁存；Why: 急停、断链和切源后不应继续沿用上一拍的火力或模式意图。
+    ResetMouseFireState();
+    keyboard_spin_toggle_last = 0u;
+    keyboard_spin_mode_latched = 0u;
 }
 
 /**
@@ -286,6 +309,8 @@ static void SyncMouseKeyEdgeState(const RC_ctrl_t *mouse_key_source)
 
     // What: 切换输入源时对齐键盘 F 键和鼠标左键边沿历史；Why: 否则切源首拍会把“已经按住”的键误判成新的上升沿。
     keyboard_friction_toggle_last = (uint8_t)((key_bits >> Key_F) & 0x1u);
+    // What: 同步对齐 X 键边沿历史；Why: 主控切换时若用户正按着 X，不应在切源首拍被误判成新的小陀螺切换。
+    keyboard_spin_toggle_last = (uint8_t)((key_bits >> Key_X) & 0x1u);
 }
 
 /**
@@ -303,7 +328,7 @@ static void HandleControlSourceSwitch(ControlSource_e new_source)
     }
 
     // What: 切换主控源时统一清空所有跨周期锁存；Why: 不同链路的边沿语义不同，沿用旧状态会直接造成误开火或残留运动。
-    ResetMouseFireState();
+    ResetMouseControlLatchState();
     ResetKeyboardMotionState();
     ResetChassisAuxState();
     friction_switch_state = 0u;
@@ -595,7 +620,7 @@ static void EmergencyHandler()
     shoot_cmd_send.shoot_rate = 0.0f;
     friction_switch_state = 0u;
     // What: 零力出口统一清空键鼠和遥控锁存；Why: 否则恢复有力后会把暂停前的旧输入当成当前意图继续执行。
-    ResetMouseFireState();
+    ResetMouseControlLatchState();
     ResetKeyboardMotionState();
     ResetChassisAuxState();
     // }
@@ -993,12 +1018,20 @@ static void RemoteControlSetVT03(void)
     }
 
     robot_state = ROBOT_READY;
-    if (video_link_remote_state->mode_sw == 2u) {
+    if (video_link_remote_state->mode_sw == VT03_MODE_SW_C) {
+        // What: VT03 的 C 挡进入小陀螺 + 云台陀螺仪模式；Why: 用户明确要求切到 C 挡时直接进入小陀螺。
+        chassis_cmd_send.chassis_mode = CHASSIS_ROTATE;
+        gimbal_cmd_send.gimbal_mode = GIMBAL_GYRO_MODE;
+    } else if (video_link_remote_state->mode_sw == VT03_MODE_SW_N) {
+        // What: VT03 的 N 挡进入底盘跟随云台；Why: 保留常规驾驶模式，让 N 挡承担正常跟随操控。
+        chassis_cmd_send.chassis_mode = CHASSIS_FOLLOW_GIMBAL_YAW;
+        gimbal_cmd_send.gimbal_mode = GIMBAL_GYRO_MODE;
+    } else if (video_link_remote_state->mode_sw == VT03_MODE_SW_S) {
         // What: VT03 的 S 挡进入底盘自由 + 云台自由；Why: 保持遥控器 S 挡作为“完全手动自由控制”的直觉语义。
         chassis_cmd_send.chassis_mode = CHASSIS_NO_FOLLOW;
         gimbal_cmd_send.gimbal_mode = GIMBAL_FREE_MODE;
     } else {
-        // What: VT03 的 C/N 挡统一进入底盘跟随云台；Why: 当前用户需求里这两个挡位都用于正常驾驶，不再拆成两套底盘行为。
+        // What: 异常挡位兜底回到底盘跟随云台；Why: 协议层虽然已限幅，但上层仍保留保守回退，避免异常值直接打到自由或小陀螺。
         chassis_cmd_send.chassis_mode = CHASSIS_FOLLOW_GIMBAL_YAW;
         gimbal_cmd_send.gimbal_mode = GIMBAL_GYRO_MODE;
     }
@@ -1045,6 +1078,7 @@ static void MouseKeySet()
     uint8_t video_link_online = IsVideoLinkControlReady();
     uint16_t key_bits = mouse_key_source->key[KEY_PRESS].keys;
     uint8_t friction_toggle_pressed = (uint8_t)((key_bits >> Key_F) & 0x1u);
+    uint8_t spin_toggle_pressed = (uint8_t)((key_bits >> Key_X) & 0x1u);
     int8_t keyboard_vx = (int8_t)((key_bits >> Key_W) & 0x1u) - (int8_t)((key_bits >> Key_S) & 0x1u);
     int8_t keyboard_vy = (int8_t)((key_bits >> Key_D) & 0x1u) - (int8_t)((key_bits >> Key_A) & 0x1u);
     uint8_t mouse_left_pressed = mouse_key_source->mouse.press_l;
@@ -1056,7 +1090,7 @@ static void MouseKeySet()
     // 这里检测图传离线边沿，作用是第一时间清掉键鼠锁存和残留发射意图；
     // 原因是图传断链后会回退到 DBUS 源，若不在切换瞬间清理状态，旧图传命令会被继续沿用。
     if (last_video_link_online && !video_link_online) {
-        ResetMouseFireState();
+        ResetMouseControlLatchState();
         ResetKeyboardMotionState();
     }
     last_video_link_online = video_link_online;
@@ -1074,7 +1108,7 @@ static void MouseKeySet()
     if (robot_state == ROBOT_STOP ||
         gimbal_cmd_send.gimbal_mode == GIMBAL_ZERO_FORCE ||
         chassis_cmd_send.chassis_mode == CHASSIS_ZERO_FORCE) {
-        ResetMouseFireState();
+        ResetMouseControlLatchState();
         ResetKeyboardMotionState();
         return;
     }
@@ -1113,6 +1147,14 @@ static void MouseKeySet()
     }
     keyboard_friction_toggle_last = friction_toggle_pressed;
 
+    if (spin_toggle_pressed && !keyboard_spin_toggle_last) {
+        // What: 用 X 键上升沿翻转键鼠小陀螺锁存；Why: 用户要求按一次切一次，而不是按住期间临时进入小陀螺。
+        keyboard_spin_mode_latched = (uint8_t)!keyboard_spin_mode_latched;
+        // What: 小陀螺开关切换时同步云台目标到当前姿态；Why: 避免在自由/跟随/小陀螺之间切换时继续追旧目标产生瞬时跳变。
+        SyncGimbalTargetToCurrentAttitude();
+    }
+    keyboard_spin_toggle_last = spin_toggle_pressed;
+
     // 鼠标首次请求开火时锁存摩擦轮开启，作用是让后续短按/长按都不需要额外按键预热；
     // 原因是你本轮只要求接入 mouse.press_l，不能再依赖 F/Q/E 之类的旧调试键位。
     if (mouse_left_pressed && !mouse_left_last) {
@@ -1121,7 +1163,7 @@ static void MouseKeySet()
         mouse_left_press_start_ms = now_ms;
         shoot_cmd_send.shoot_mode = SHOOT_ON;
         shoot_cmd_send.friction_mode = FRICTION_ON;
-        shoot_cmd_send.bullet_speed = BIG_AMU_16;
+        shoot_cmd_send.bullet_speed = BIG_AMU_12;
         shoot_cmd_send.load_mode = LOAD_1_BULLET;
     } else if (mouse_left_pressed && ((now_ms - mouse_left_press_start_ms) >= LOAD_TRIGGER_DELAY)) {
         mouse_left_burst_active = 1;
@@ -1135,7 +1177,7 @@ static void MouseKeySet()
         shoot_cmd_send.shoot_mode = SHOOT_ON;
         shoot_cmd_send.friction_mode = FRICTION_ON;
         if (shoot_cmd_send.bullet_speed == BULLET_SPEED_NONE) {
-            shoot_cmd_send.bullet_speed = BIG_AMU_16;
+            shoot_cmd_send.bullet_speed = BIG_AMU_12;
         }
     }
 
@@ -1144,6 +1186,12 @@ static void MouseKeySet()
     if (mouse_left_burst_active) {
         shoot_cmd_send.load_mode = LOAD_BURSTFIRE;
         shoot_cmd_send.shoot_rate = MOUSE_BURST_FIRE_RATE;
+    }
+
+    if (keyboard_spin_mode_latched != 0u) {
+        // What: X 锁存生效后在键鼠层最终覆盖成小陀螺 + 陀螺仪模式；Why: 用户要求 X 优先于当前遥控器挡位，直到再次按 X 或被安全链清锁。
+        chassis_cmd_send.chassis_mode = CHASSIS_ROTATE;
+        gimbal_cmd_send.gimbal_mode = GIMBAL_GYRO_MODE;
     }
 
     mouse_left_last = mouse_left_pressed;
