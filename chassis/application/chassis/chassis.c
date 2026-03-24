@@ -206,7 +206,7 @@ void ChassisInit()
     IslandActionInit(); // [条件编译] 仅在启用上岛机构时初始化前履带和后抬升电机
 #endif // USE_ISLAND_ACTION
 
-    // referee_data = UITaskInit(&huart6, &ui_data); // 裁判系统初始化,会同时初始化UI
+    referee_data = UITaskInit(&huart6, &ui_data); // 裁判系统初始化,会同时初始化UI
     PowerControl_EnableSlopeComp(1);
 
 #ifdef USE_SUPER_CAP
@@ -336,8 +336,10 @@ static void LimitChassisOutput()
         } else {
             cap->tx_msg.enableDCDC = 0;
         }
+
         static uint32_t error_toggle_tick = 0;
-        if (cap->rx_msg.errorCode != 0) {
+        // 使用 SuperCapGetErrorCode() 过滤掉 bit7 (128) 输出禁用状态标志
+        if (SuperCapGetErrorCode(cap) != 0) {
             uint32_t now = HAL_GetTick();
             if (error_toggle_tick == 0)
                 error_toggle_tick = now;
@@ -513,8 +515,8 @@ void ChassisTask()
 #endif // USE_SUPER_CAP
 
     // 4. 最终限幅保护
-    if (final_power_limit > 300.0f)
-        final_power_limit = 300.0f; // 物理极限
+    if (final_power_limit > 120.0f)
+        final_power_limit = 120.0f; // 物理极限
     // 5. 设置给底盘功率控制算法 (这个函数控制电机的电流)
     SetPowerLimit(final_power_limit);
 

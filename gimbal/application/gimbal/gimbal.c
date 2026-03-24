@@ -8,6 +8,7 @@
 #include "general_def.h"
 #include "bmi088.h"
 #include "gimbal_pitch_cali.h"
+#include "video_link_motor.h" // [新增] 图传固定电机模块; Why: 在云台中统一管理图传电机的生命周期
 
 // // 顶部宏定义区域
 // #define PITCH_GRAVITY_COEFFICIENT_K1 -15.2383f
@@ -149,6 +150,10 @@ void GimbalInit()
         /* optional logging */
     }
 
+    // [新增] 初始化图传固定电机(M2006, CAN2 ID7)
+    // Why: 在云台初始化中统一注册, 确保CAN外设就绪后再初始化电机
+    VideoLinkMotorInit();
+
     // GimbalCali_Init(&pitch_cali_handler);
 }
 
@@ -178,6 +183,7 @@ void GimbalTask()
         }
         if (pitch_motor)
             DMMotorStop(pitch_motor);
+        VideoLinkMotorDisable(); // [新增] 零力模式下停止图传电机; Why: 避免零力模式下电机继续转动
         break;
     // 使用陀螺仪的反馈,底盘根据yaw电机的offset跟随云台或视觉模式采用
     case GIMBAL_GYRO_MODE: // 后续只保留此模式
@@ -195,6 +201,7 @@ void GimbalTask()
             DMMotorSetRef(yaw_motor, gimbal_cmd_recv.yaw); // yaw和pitch会在robot_cmd中处理好多圈和单圈
         if (pitch_motor)
             DMMotorSetRef(pitch_motor, gimbal_cmd_recv.pitch);
+        VideoLinkMotorEnable(); // [新增] 陀螺仪模式下使能图传电机; Why: 云台正常工作时才允许图传电机运动
         break;
     // 云台自由模式,使用编码器反馈,底盘和云台分离,仅云台旋转,一般用于调整云台姿态(英雄吊射等)/能量机关
     case GIMBAL_FREE_MODE: // 后续删除,或加入云台追地盘的跟随模式(响应速度更快)
@@ -211,6 +218,7 @@ void GimbalTask()
             DMMotorSetRef(yaw_motor, gimbal_cmd_recv.yaw); // yaw和pitch会在robot_cmd中处理好多圈和单圈
         if (pitch_motor)
             DMMotorSetRef(pitch_motor, gimbal_cmd_recv.pitch);
+        VideoLinkMotorEnable(); // [新增] 自由模式下使能图传电机; Why: 与陀螺仪模式一致, 云台工作时图传电机应运动
         break;
     default:
         break;
@@ -246,6 +254,10 @@ void GimbalTask()
         }
         pitch_ff_storage = 0.0f;
     }
+
+    // [新增] 每周期执行图传电机状态机
+    // Why: 状态机需要周期性检测堵转并切换状态, 放在重力补偿之后保证电机控制逻辑的完整执行
+    VideoLinkMotorTask();
 
     // 设置反馈数据,主要是imu和yaw的ecd
     // 1. 获取 Yaw 电机当前的连续累计弧度值 (解决 ±12.5 rad 跳变与 2PI 不匹配的问题)

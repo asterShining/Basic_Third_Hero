@@ -21,7 +21,7 @@
 
 /* 功率和能量限制 */
 #define POWER_LIMIT_MIN 30 // 最小功率限制 (W)
-#define POWER_LIMIT_MAX 250 // 最大功率限制 (W)
+#define POWER_LIMIT_MAX 150 // 最大功率限制 (W)
 #define ENERGY_BUFFER_MAX 300 // 最大能量缓冲 (J)
 
 #pragma pack(1)
