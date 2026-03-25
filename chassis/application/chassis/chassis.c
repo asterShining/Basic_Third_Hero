@@ -320,25 +320,16 @@ static void LimitChassisOutput()
         // 无论是否开启爆发模式，给超电的永远是"合法的电池功率上限"
         cap->tx_msg.refereePowerLimit = (uint16_t)safe_limit;
 
-        // 3. DCDC 开关逻辑 (保持你原有的逻辑，稍作优化)
-        // 裁判系统允许底盘输出 && 超电在线 && 无关键错误
+        // What: 只要裁判系统允许底盘输出且超电在线，就持续发送 DCDC 使能请求；Why: 让 C 板侧忽略 bit7=128，避免“输出禁用”状态被上层再次锁死。
         if (referee_data->GameRobotState.power_management_chassis_output != 0 &&
-            cap->is_online &&
-            !SuperCapIsOutputDisabled(cap)) // 使用 super_cap.c 里的辅助函数判断错误
-        {
-            // 电量充足时开启 DCDC
-            if (cap->rx_msg.capEnergyPercent > 30) {
-                cap->tx_msg.enableDCDC = 1;
-            } else {
-                // 低电量保护
-                cap->tx_msg.enableDCDC = 0;
-            }
+            cap->is_online) {
+            cap->tx_msg.enableDCDC = 1;
         } else {
             cap->tx_msg.enableDCDC = 0;
         }
 
         static uint32_t error_toggle_tick = 0;
-        // 使用 SuperCapGetErrorCode() 过滤掉 bit7 (128) 输出禁用状态标志
+        // What: 只对 bit0-bit6 的真实错误执行 2 秒关 / 2 秒开恢复；Why: bit7=128 只是输出禁用状态，不应再参与 C 板关断逻辑。
         if (SuperCapGetErrorCode(cap) != 0) {
             uint32_t now = HAL_GetTick();
             if (error_toggle_tick == 0)
@@ -509,14 +500,14 @@ void ChassisTask()
         (chassis_cmd_recv.cap_mode == SUPER_CAP_ON || fabsf(Chassis_IMU_data->Pitch) > CHASSIS_SLOPE_THRESHOLD) &&
         cap->rx_msg.capEnergyPercent > 30 &&
         cap->tx_msg.enableDCDC == 1) {
-        // 允许爆发，电机功率上限 = 裁判限制 + 电容贡献(30W-40W)
-        final_power_limit += 35.0f;
+        // What: 将超电额外功率加成从 35W 提到 45W；Why: 让底盘在超电介入时放电更积极一点，但仍控制在“小幅上调”范围内。
+        final_power_limit += 45.0f;
     }
 #endif // USE_SUPER_CAP
 
     // 4. 最终限幅保护
-    if (final_power_limit > 120.0f)
-        final_power_limit = 120.0f; // 物理极限
+    if (final_power_limit > 130.0f)
+        final_power_limit = 130.0f; // What: 将底盘侧总功率硬上限提高到 130W；Why: 避免新增的超电加成被原先 120W 上限立刻截断。
     // 5. 设置给底盘功率控制算法 (这个函数控制电机的电流)
     SetPowerLimit(final_power_limit);
 

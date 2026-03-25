@@ -34,7 +34,7 @@
 #define YAW_CHASSIS_ALIGN_ECD 2711 // 云台和底盘对齐指向相同方向时的电机编码器值,若对云台有机械改动需要修改
 #define YAW_ECD_GREATER_THAN_4096 0 // ALIGN_ECD值是否大于4096,是为1,否为0;用于计算云台偏转角度
 #define PITCH_HORIZON_ECD 0 // 云台处于水平位置时编码器值,若对云台有机械改动需要修改
-#define PITCH_MAX_ANGLE 37 // 云台陀螺仪竖直方向最大角度
+#define PITCH_MAX_ANGLE 45 // What: 将云台上抬软件限位放宽到 45 度；Why: 用户反馈当前抬头空间偏小，需要先恢复一部分上抬行程，同时仍保留软件限位防止直接撞机构。
 #define PITCH_MIN_ANGLE -11 // 云台陀螺仪竖直方向最小角度
 // 发射参数
 #define ONE_BULLET_DELTA_ANGLE 80 // 发射一发弹丸拨盘转动的距离,由机械设计图纸给出
@@ -239,6 +239,7 @@ typedef struct
     float yaw;
     float pitch;
     gimbal_mode_e gimbal_mode;
+    uint8_t yaw_pid_reset_request; // What: 请求 gimbal 侧复位 yaw 速度环运行时状态；Why: 小陀螺进出和切源时只同步目标还不够，必须顺手清掉残留积分才能防止头被拽歪。
 } Gimbal_Ctrl_Cmd_s;
 
 // cmd发布的发射控制数据,由shoot订阅

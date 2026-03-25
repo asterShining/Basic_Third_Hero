@@ -24,6 +24,16 @@
 
 #define PITCH_MECH_LIMIT_MAX 0.08f // 上极限
 #define PITCH_MECH_LIMIT_MIN -0.967f // 下极限
+// What: 定义 yaw 速度环积分系数；Why: 小陀螺属于持续扰动场景，只靠 P 项容易留下稳态偏差，因此补一小段 Ki 来慢慢顶住漂移。
+#define YAW_SPEED_PID_KI 0.03f
+// What: 定义 yaw 速度环静止死区(rad/s)；Why: 陀螺仪静止时也会有零偏和噪声，必须把极小误差吞掉，防止积分攒久后突然抽动。
+#define YAW_SPEED_PID_DEADBAND_RAD 0.015f
+// What: 定义 yaw 速度环积分限幅；Why: 即使进入积分，也只允许积累少量修正，避免静摩擦被一次性打穿导致云台突跳。
+#define YAW_SPEED_PID_INTEGRAL_LIMIT 0.6f
+// What: 定义 yaw 速度环变速积分主区间(rad/s)；Why: 误差较大时由 P 项主导，误差较小时才逐步放开积分，减少小陀螺切换和停车瞬间的堆积。
+#define YAW_SPEED_PID_COEF_A_RAD 0.18f
+// What: 定义 yaw 速度环全积分阈值(rad/s)；Why: 只有误差足够小的时候才允许满积分，用来补静态偏差而不是放大动态扰动。
+#define YAW_SPEED_PID_COEF_B_RAD 0.03f
 
 static attitude_t *gimba_IMU_data; // 云台IMU数据
 static DMMotorInstance *yaw_motor, *pitch_motor;
@@ -35,6 +45,37 @@ static Gimbal_Ctrl_Cmd_s gimbal_cmd_recv; // 来自cmd的控制信息
 static GimbalCali_Handler_t pitch_cali_handler; // 定义标定句柄
 
 static BMI088Instance *bmi088; // 云台IMU
+
+/**
+ * @brief 清空单个 PID 的运行时状态
+ *
+ * @param pid 需要复位的 PID 实例
+ */
+static void ResetPIDRuntimeState(PIDInstance *pid)
+{
+    if (pid == NULL) {
+        return;
+    }
+
+    // What: 仅清空 PID 的误差、积分和微分历史；Why: 模式切换后最怕沿用旧工况的残留积分，导致云台恢复静止时突然自己扭一下。
+    pid->Measure = 0.0f;
+    pid->Last_Measure = 0.0f;
+    pid->Err = 0.0f;
+    pid->Last_Err = 0.0f;
+    pid->Last_ITerm = 0.0f;
+    pid->Pout = 0.0f;
+    pid->Iout = 0.0f;
+    pid->Dout = 0.0f;
+    pid->ITerm = 0.0f;
+    pid->Output = 0.0f;
+    pid->Last_Output = 0.0f;
+    pid->Last_Dout = 0.0f;
+    pid->Ref = 0.0f;
+    pid->ERRORHandler.ERRORCount = 0u;
+    pid->ERRORHandler.ERRORType = PID_ERROR_NONE;
+    DWT_GetDeltaT(&pid->DWT_CNT);
+}
+
 void GimbalCalibrate()
 {
     if (yaw_motor != NULL) {
@@ -72,10 +113,13 @@ void GimbalInit()
             },
             .speed_PID = {
                 .Kp = 2.1, // 2.1
-                .Ki = 0.0, // 0.1 //最好增加速度环ki,小陀螺的时候可以抑制云台偏移
+                .Ki = YAW_SPEED_PID_KI,
                 .Kd = 0,
-                .Improve = PID_Trapezoid_Intergral | PID_Integral_Limit | PID_Derivative_On_Measurement,
-                .IntegralLimit = 3,
+                .DeadBand = YAW_SPEED_PID_DEADBAND_RAD,
+                .Improve = PID_Trapezoid_Intergral | PID_Integral_Limit | PID_Derivative_On_Measurement | PID_ChangingIntegrationRate,
+                .IntegralLimit = YAW_SPEED_PID_INTEGRAL_LIMIT,
+                .CoefA = YAW_SPEED_PID_COEF_A_RAD,
+                .CoefB = YAW_SPEED_PID_COEF_B_RAD,
                 .MaxOut = 10,
             },
             .other_angle_feedback_ptr = &gimba_IMU_data->YawTotalAngle,
@@ -160,12 +204,26 @@ void GimbalInit()
 /* 机器人云台控制核心任务,后续考虑只保留IMU控制,不再需要电机的反馈 */
 void GimbalTask()
 {
+    static gimbal_mode_e last_gimbal_mode = GIMBAL_ZERO_FORCE; // What: 记录上一拍云台模式；Why: 只有在模式切换边沿才需要清空 yaw 速度环积分，避免每拍都把 Ki 的作用抹掉。
     // 获取云台控制数据
     // 后续增加未收到数据的处理
     if (gimbal_sub) {
         SubGetMessage(gimbal_sub, &gimbal_cmd_recv);
     } else {
         memset(&gimbal_cmd_recv, 0, sizeof(gimbal_cmd_recv));
+    }
+    if (gimbal_cmd_recv.yaw_pid_reset_request != 0u) {
+        if (yaw_motor != NULL) {
+            // What: 收到 cmd 侧的小陀螺切换复位请求时清空 yaw 速度环状态；Why: 进入/退出小陀螺只改了 chassis_mode，不会触发 gimbal_mode 边沿，必须靠显式请求来消掉残留积分。
+            ResetPIDRuntimeState(&yaw_motor->speed_PID);
+        }
+    }
+    if (gimbal_cmd_recv.gimbal_mode != last_gimbal_mode) {
+        if (yaw_motor != NULL) {
+            // What: 模式切换时清空 yaw 速度环运行时状态；Why: 小陀螺、自由和零力切换后若沿用旧积分，静止下来时很容易突然乱动一下。
+            ResetPIDRuntimeState(&yaw_motor->speed_PID);
+        }
+        last_gimbal_mode = gimbal_cmd_recv.gimbal_mode;
     }
     // [新增] 静态变量: 用于存储前馈值 (必须是static，因为指针会被传递给电机驱动)
     static float pitch_ff_storage = 0.0f;
@@ -257,7 +315,7 @@ void GimbalTask()
 
     // [新增] 每周期执行图传电机状态机
     // Why: 状态机需要周期性检测堵转并切换状态, 放在重力补偿之后保证电机控制逻辑的完整执行
-    VideoLinkMotorTask();
+    // VideoLinkMotorTask();
 
     // 设置反馈数据,主要是imu和yaw的ecd
     // 1. 获取 Yaw 电机当前的连续累计弧度值 (解决 ±12.5 rad 跳变与 2PI 不匹配的问题)

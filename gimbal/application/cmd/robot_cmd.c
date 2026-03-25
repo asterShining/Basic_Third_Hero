@@ -31,6 +31,8 @@
 #define RC_TRIGGER_TH 500
 // Yaw 死区漂移低通锁定系数: 0.90~0.98，值越小锁定越快，0.95 约 0.5s 平滑锁定
 #define YAW_DRIFT_LOCK_COEF 0.95f
+// What: 定义 yaw 目标软锁允许生效的最大实际角速度；Why: 云台快速旋转或底盘开小陀螺时不能再把目标值往当前姿态拉，否则会把扰动误当成目标更新。
+#define YAW_DRIFT_LOCK_GYRO_TH_DPS 8.0f
 // What: 定义遥控器连发射频；Why: 保持当前遥控器发射手感，不把这次上岛迁移扩散成发射参数重调。
 #define BURST_FIRE_RATE 8.0f
 // What: 定义前履带默认速度参考；Why: 先打通履带速度闭环链路，后续实车调速只需改这一处。
@@ -43,7 +45,7 @@
 #define AUX_DIAL_INPUT_DEADZONE 50.0f
 // 鼠标灵敏度按当前车体手感分别调整，作用是让 yaw 更跟手、pitch 方向与实际操控一致；
 // 原因是用户反馈 yaw 偏慢且 pitch 反向，因此这里同时上调 yaw 系数并翻转 pitch 符号。
-#define MOUSE_YAW_SENSITIVITY_DEG (0.00011f * RAD_2_DEGREE)
+#define MOUSE_YAW_SENSITIVITY_DEG (0.00012f * RAD_2_DEGREE) // What: 小幅上调键鼠 yaw 灵敏度；Why: 用户要求更跟手，但这次只做轻微增益，避免一次加太多后瞄准发飘。
 #define MOUSE_PITCH_SENSITIVITY_DEG (0.000018f * RAD_2_DEGREE)
 // 键盘底盘指令沿用当前摇杆分支的量纲，作用是让 WSAD 和摇杆给到底盘的速度处于同一数量级；
 // 原因是底盘侧现在仍按“摇杆值×10”的历史量纲做解算，直接发 6.0f 会小到几乎看不出运动。
@@ -68,6 +70,10 @@
 #define VT03_MODE_SW_S 2u
 // What: 定义 VT03 模式未初始化标记；Why: 需要把“首次接入 VT03”与真实模式挡位区分开，避免刚上线就误判成换挡。
 #define VT03_MODE_SW_INVALID 0xFFu
+// What: 定义 VT03 Pause 在零力态下触发 yaw 校准的长按时长；Why: 用户要求“长按 Pause 进入 yaw 轴校准”，固定 2 秒可以兼顾误触保护和现场操作速度。
+#define VT03_PAUSE_CALIB_HOLD_MS 2000u
+// What: 定义 yaw PID 复位请求保持拍数；Why: `message_center` 队列深度只有 1，边沿请求只发一拍有可能被下一拍覆盖，因此需要短暂保持几拍确保 gimbal 侧必然收到。
+#define YAW_PID_RESET_HOLD_TICKS 4u
 
 typedef enum {
     CONTROL_SOURCE_NONE = 0,
@@ -172,14 +178,59 @@ static ControlSource_e current_control_source = CONTROL_SOURCE_NONE;
 static uint8_t vt03_fn_right_last = 0u;
 // What: 记录 VT03 扳机上一拍电平；Why: 单发拨弹只能响应上升沿，不能把扳机电平直接长期送进发射状态机。
 static uint8_t vt03_trigger_last = 0u;
-// What: 记录 VT03 Pause 上一拍电平；Why: 需要把 Pause 改成短按锁存切换，而不是按住期间临时零力。
+// What: 记录 VT03 Pause 上一拍电平；Why: Pause 现在同时承担短按零力和长按校准，必须靠边沿区分按下、保持和释放三个阶段。
 static uint8_t vt03_pause_last = 0u;
-// What: 锁存 VT03 Pause 零力状态；Why: VT03 上报的是瞬时按键电平，不额外锁存的话短按结束后下一拍就会恢复有力。
+// What: 锁存 VT03 Pause 零力状态；Why: 长按校准必须在零力中完成，短按进入零力后也需要在松手后继续保持失能状态。
 static uint8_t vt03_pause_zero_force_latched = 0u;
+// What: 记录 VT03 Pause 本次按下的起始时间；Why: 长按校准要按真实毫秒时间判定，不能依赖任务周期次数估算。
+static uint32_t vt03_pause_press_start_ms = 0u;
+// What: 标记 VT03 Pause 本次按下是否从零力态开始；Why: 用户要求只能“零力中长按”才允许触发 yaw 校准，防止有力态误长按直接校零。
+static uint8_t vt03_pause_press_started_in_zero_force = 0u;
+// What: 标记 VT03 Pause 本次按住是否已经触发过长按校准；Why: 长按超过 2 秒后只能校准一次，不能在同一次按住里重复发 DM 校零指令。
+static uint8_t vt03_pause_longpress_handled = 0u;
 // What: 记录 VT03 上一拍模式挡位；Why: VT03 换挡时需要把云台目标同步到当前姿态，避免切挡瞬间跳变。
 static uint8_t vt03_mode_sw_last = VT03_MODE_SW_INVALID;
+// What: 记录 yaw PID 复位请求剩余保持拍数；Why: 小陀螺切换是边沿事件，做成多拍保持可以避免调度先后不同导致 gimbal 漏掉这一拍复位请求。
+static uint8_t yaw_pid_reset_hold_ticks = 0u;
+// What: 跟踪yaw电机上一拍在线状态；Why: 用于检测离线→上线跳变，触发offset重同步防止断电后底盘跟随偏移
+static uint8_t last_yaw_motor_online = 0u;
 
 static void ResetChassisAuxState(void);
+static void SyncGimbalTargetToCurrentAttitude(void);
+static void RequestYawSpeedPIDReset(void);
+static void SyncGimbalTargetAndRequestYawReset(void);
+
+/**
+ * @brief 清空 VT03 Pause 本次按压会话状态
+ *
+ */
+static void ResetVT03PausePressState()
+{
+    // What: 清空 VT03 Pause 的计时与长按标志；Why: 松手、断链或切源后本次按压语义已经失效，继续沿用会导致下次按键被误判成长按。
+    vt03_pause_press_start_ms = 0u;
+    vt03_pause_press_started_in_zero_force = 0u;
+    vt03_pause_longpress_handled = 0u;
+    if (hint_buzzer != NULL) {
+        // What: 清状态时同步关掉校准提示蜂鸣器；Why: 长按校准提示只应覆盖当前一次按压，不能跨会话残留鸣叫。
+        AlarmSetStatus(hint_buzzer, ALARM_OFF);
+    }
+}
+
+/**
+ * @brief 执行一次 VT03 的 yaw 轴零点校准
+ *
+ */
+static void TriggerVT03YawCalibration()
+{
+    // What: 统一封装 VT03 长按 Pause 的 yaw 轴校零动作；Why: 校零后还要同步软件零位和云台目标，集中处理能避免漏改导致恢复后跳头。
+    GimbalCalibrate();
+    yaw_align_offset_deg = 0.0f;
+    SyncGimbalTargetAndRequestYawReset();
+    if (hint_buzzer != NULL) {
+        // What: 校零真正触发后打开蜂鸣器提示；Why: 需要给操作者一个明确反馈，避免零力长按时不知道是否已经完成校准。
+        AlarmSetStatus(hint_buzzer, ALARM_ON);
+    }
+}
 
 /**
  * @brief 将 pitch 目标统一限幅到机构安全范围
@@ -264,6 +315,28 @@ static void SyncGimbalTargetToCurrentAttitude()
 }
 
 /**
+ * @brief 请求 gimbal 侧复位 yaw 速度环运行时状态
+ *
+ */
+static void RequestYawSpeedPIDReset(void)
+{
+    // What: 本拍立即拉高 yaw PID 复位请求并启动多拍保持；Why: 小陀螺切换边沿如果只发单拍，可能被下一拍普通命令覆盖，导致 gimbal 侧漏复位。
+    gimbal_cmd_send.yaw_pid_reset_request = 1u;
+    yaw_pid_reset_hold_ticks = YAW_PID_RESET_HOLD_TICKS;
+}
+
+/**
+ * @brief 同步云台目标并请求复位 yaw 速度环
+ *
+ */
+static void SyncGimbalTargetAndRequestYawReset(void)
+{
+    // What: 在模式切换边沿同时贴齐当前姿态并清 yaw 速度环残留状态；Why: 只同步目标不能消掉残余积分，底盘停止后仍可能把云台头慢慢拽歪。
+    SyncGimbalTargetToCurrentAttitude();
+    RequestYawSpeedPIDReset();
+}
+
+/**
  * @brief 判断 VT03 是否已经具备主控资格
  *
  * @return uint8_t 1:可用 0:不可用
@@ -334,7 +407,9 @@ static void HandleControlSourceSwitch(ControlSource_e new_source)
     friction_switch_state = 0u;
     shoot_cmd_send.shoot_rate = 0.0f;
     auto_aim_state = AUTO_AIM_IDLE;
-    vt03_pause_zero_force_latched = 0u;
+    ResetVT03PausePressState();
+    // What: 切换主控源时只清理 Pause 本次按压会话，不清零力锁存；Why: VT03 短暂掉帧或切回 DT7 时若把失能锁存一起清掉，链路恢复后机器人会自己突然重新使能。
+    vt03_pause_last = 0u;
     vt03_mode_sw_last = VT03_MODE_SW_INVALID;
 
     if (new_source == CONTROL_SOURCE_DT7) {
@@ -342,7 +417,6 @@ static void HandleControlSourceSwitch(ControlSource_e new_source)
         last_switch_right = rc_data[TEMP].rc.switch_right;
         vt03_fn_right_last = 0u;
         vt03_trigger_last = 0u;
-        vt03_pause_last = 0u;
         mouse_key_source = &rc_data[TEMP];
     } else if (new_source == CONTROL_SOURCE_VT03) {
         last_switch_left = RC_SW_DOWN;
@@ -365,14 +439,13 @@ static void HandleControlSourceSwitch(ControlSource_e new_source)
         last_switch_right = RC_SW_DOWN;
         vt03_fn_right_last = 0u;
         vt03_trigger_last = 0u;
-        vt03_pause_last = 0u;
     }
 
     SyncMouseKeyEdgeState(mouse_key_source);
     last_video_link_online = IsVideoLinkControlReady();
 
     if (new_source != CONTROL_SOURCE_NONE) {
-        SyncGimbalTargetToCurrentAttitude();
+        SyncGimbalTargetAndRequestYawReset();
     }
 
     current_control_source = new_source;
@@ -487,6 +560,7 @@ static void PrepareControlCommandBase()
 #endif
 
     gimbal_cmd_send.gimbal_mode = GIMBAL_ZERO_FORCE;
+    gimbal_cmd_send.yaw_pid_reset_request = 0u;
 
     shoot_cmd_send.shoot_mode = SHOOT_OFF;
     shoot_cmd_send.load_mode = LOAD_STOP;
@@ -640,6 +714,7 @@ static void ApplyRemoteGimbalStickControl(float rocker_lx, float rocker_ly, int1
 {
     float yaw_sensitivity = 0.001f;
     float pitch_sensitivity = 0.0003f;
+    float yaw_gyro_dps = gimbal_fetch_data.gimbal_imu_data.Gyro[2] * RAD_2_DEGREE;
 
     if (dial_input > 100) {
         yaw_sensitivity *= 0.3f;
@@ -650,8 +725,11 @@ static void ApplyRemoteGimbalStickControl(float rocker_lx, float rocker_ly, int1
     gimbal_cmd_send.yaw -= yaw_sensitivity * rocker_lx;
     gimbal_cmd_send.pitch += pitch_sensitivity * rocker_ly;
 
-    // What: 摇杆横向回中后将 yaw 目标软锁到当前反馈；Why: 需要抵消 IMU 零偏导致的长期漂移，避免放手后云台慢慢飘走。
-    if (rocker_lx == 0.0f) {
+    // What: 仅在低角速度且非小陀螺工况下，才把 yaw 目标缓慢拉向当前反馈；Why: 原逻辑在小陀螺时会把真实扰动当成“新目标”写回去，表现成云台越转越歪。
+    if (rocker_lx == 0.0f &&
+        chassis_cmd_send.chassis_mode != CHASSIS_ROTATE &&
+        yaw_gyro_dps < YAW_DRIFT_LOCK_GYRO_TH_DPS &&
+        yaw_gyro_dps > -YAW_DRIFT_LOCK_GYRO_TH_DPS) {
         gimbal_cmd_send.yaw = YAW_DRIFT_LOCK_COEF * gimbal_cmd_send.yaw +
                               (1.0f - YAW_DRIFT_LOCK_COEF) * gimbal_fetch_data.gimbal_imu_data.YawTotalAngle;
     }
@@ -688,8 +766,6 @@ static void RemoteControlSetDT7(void)
     float rocker_rx;
     float rocker_ry;
 
-    float current_real_pitch = gimbal_fetch_data.gimbal_imu_data.Pitch; // [轴互换后] Pitch 字段即物理 Pitch
-
     // What: 每拍先清空辅助机构瞬态命令；Why: 上岛开关是锁存状态，但履带速度和抬升拨轮输入都不应该沿用旧值。
 #ifdef USE_ISLAND_ACTION
     chassis_cmd_send.front_track_mode = front_track_switch_state ? FRONT_TRACK_ON : FRONT_TRACK_OFF;
@@ -717,9 +793,8 @@ static void RemoteControlSetDT7(void)
                 // 手动 DM 校零后，将底盘跟随基准切到运行时零位。
                 // 原因是当前 yaw_motor_single_round_angle 会围绕 0 反馈，继续减旧机械角会让校零看起来“没生效”。
                 yaw_align_offset_deg = 0.0f;
-                // 同步刷新云台目标到当前 IMU 姿态，避免退出急停后沿用旧参考值导致瞬时回拉。
-                gimbal_cmd_send.yaw = gimbal_fetch_data.gimbal_imu_data.YawTotalAngle;
-                gimbal_cmd_send.pitch = current_real_pitch;
+                // What: 校零后同步刷新目标并申请清 yaw 速度环状态；Why: 硬件零点已经变化，若还沿用旧参考和旧积分，恢复后极易瞬时回拉或歪头。
+                SyncGimbalTargetAndRequestYawReset();
 
                 // 2. 【新增】开启蜂鸣器提示
                 if (hint_buzzer != NULL) {
@@ -741,7 +816,7 @@ static void RemoteControlSetDT7(void)
     // [上] 底盘无力，云台能够转动
     else if (switch_is_up(current_switch_right)) {
         if (!switch_is_up(last_switch_right)) {
-            SyncGimbalTargetToCurrentAttitude();
+            SyncGimbalTargetAndRequestYawReset();
         }
 
         robot_state = ROBOT_READY;
@@ -753,7 +828,7 @@ static void RemoteControlSetDT7(void)
     // [中] 底盘跟随云台模式
     else if (switch_is_mid(current_switch_right)) {
         if (!switch_is_mid(last_switch_right)) {
-            SyncGimbalTargetToCurrentAttitude();
+            SyncGimbalTargetAndRequestYawReset();
         }
 
         robot_state = ROBOT_READY;
@@ -980,27 +1055,55 @@ static void RemoteControlSetVT03(void)
 {
     const VideoLinkKM_RemoteState_s *video_link_remote_state = VideoLinkKMGetRemoteState();
     uint8_t pause_pressed;
+    uint32_t now_ms;
     float rocker_lx;
     float rocker_ly;
     float rocker_rx;
     float rocker_ry;
 
     if (video_link_remote_state == NULL || video_link_data == NULL) {
+        // What: VT03 状态视图失效时只复位 Pause 本次按压会话；Why: 图传临时掉帧不应把已经锁住的零力状态顺手解除，否则链路恢复时会出现“自己突然使能”。
+        ResetVT03PausePressState();
+        vt03_pause_last = 0u;
         EmergencyHandler();
         return;
     }
 
     pause_pressed = video_link_remote_state->pause_button_down;
+    now_ms = (uint32_t)DWT_GetTimeline_ms();
     if (pause_pressed && !vt03_pause_last) {
-        // What: 用 Pause 上升沿翻转 VT03 零力锁存；Why: 用户要求短按一次失能、再短按一次恢复，而不是按住才零力。
-        vt03_pause_zero_force_latched = (uint8_t)!vt03_pause_zero_force_latched;
-        // What: Pause 切换时同步刷新 VT03 边沿历史；Why: 避免恢复有力后把暂停期间按住的扳机或自定义键误判成新触发。
-        vt03_fn_right_last = video_link_remote_state->fn_right_button_down;
-        vt03_trigger_last = video_link_remote_state->trigger_button_down;
-        vt03_mode_sw_last = video_link_remote_state->mode_sw;
-        if (vt03_pause_zero_force_latched == 0u) {
-            SyncGimbalTargetToCurrentAttitude();
+        // What: Pause 按下沿启动一次新的长按会话；Why: 需要区分“按下进入零力”“零力中继续长按校准”和“松手退出零力”三种不同语义。
+        vt03_pause_press_start_ms = now_ms;
+        vt03_pause_longpress_handled = 0u;
+        if (vt03_pause_zero_force_latched != 0u) {
+            // What: 记录本次 Pause 是在零力态中按下；Why: 用户要求只有零力中长按才允许进入 yaw 轴校准。
+            vt03_pause_press_started_in_zero_force = 1u;
+        } else {
+            // What: 非零力态按下 Pause 时立即进入零力；Why: 保留 VT03 原有短按失能入口，同时禁止本次按住直接跨过零力去校准。
+            vt03_pause_press_started_in_zero_force = 0u;
+            vt03_pause_zero_force_latched = 1u;
+            vt03_fn_right_last = video_link_remote_state->fn_right_button_down;
+            vt03_trigger_last = video_link_remote_state->trigger_button_down;
+            vt03_mode_sw_last = video_link_remote_state->mode_sw;
         }
+    } else if (pause_pressed &&
+               vt03_pause_press_started_in_zero_force != 0u &&
+               vt03_pause_longpress_handled == 0u &&
+               (now_ms - vt03_pause_press_start_ms) >= VT03_PAUSE_CALIB_HOLD_MS) {
+        // What: 零力中长按 2 秒后仅触发一次 yaw 校零；Why: DM 零点指令是重动作，同一次长按里重复发送会徒增风险且没有收益。
+        TriggerVT03YawCalibration();
+        vt03_pause_longpress_handled = 1u;
+    } else if (!pause_pressed && vt03_pause_last) {
+        if (vt03_pause_press_started_in_zero_force != 0u && vt03_pause_longpress_handled == 0u) {
+            // What: 零力中短按并松开时退出零力；Why: 用户要求 Pause 在零力态下短按恢复有力，而不是继续锁在停止状态。
+            vt03_pause_zero_force_latched = 0u;
+            vt03_fn_right_last = video_link_remote_state->fn_right_button_down;
+            vt03_trigger_last = video_link_remote_state->trigger_button_down;
+            vt03_mode_sw_last = video_link_remote_state->mode_sw;
+            SyncGimbalTargetAndRequestYawReset();
+        }
+        // What: Pause 松开沿统一结束当前按压会话；Why: 下一次按键必须重新从 0 开始计时，蜂鸣器也应在此时关闭。
+        ResetVT03PausePressState();
     }
     vt03_pause_last = pause_pressed;
 
@@ -1014,7 +1117,7 @@ static void RemoteControlSetVT03(void)
     }
 
     if (vt03_mode_sw_last != video_link_remote_state->mode_sw) {
-        SyncGimbalTargetToCurrentAttitude();
+        SyncGimbalTargetAndRequestYawReset();
     }
 
     robot_state = ROBOT_READY;
@@ -1151,7 +1254,7 @@ static void MouseKeySet()
         // What: 用 X 键上升沿翻转键鼠小陀螺锁存；Why: 用户要求按一次切一次，而不是按住期间临时进入小陀螺。
         keyboard_spin_mode_latched = (uint8_t)!keyboard_spin_mode_latched;
         // What: 小陀螺开关切换时同步云台目标到当前姿态；Why: 避免在自由/跟随/小陀螺之间切换时继续追旧目标产生瞬时跳变。
-        SyncGimbalTargetToCurrentAttitude();
+        SyncGimbalTargetAndRequestYawReset();
     }
     keyboard_spin_toggle_last = spin_toggle_pressed;
 
@@ -1216,13 +1319,28 @@ void RobotCMDTask()
     // 每拍先清理一次瞬态控制量，作用是让后续遥控器和键鼠都从同一安全基线开始叠加；
     // 原因是当前 `robot_cmd` 已经不是互斥控制源，直接沿用上拍结果会产生残留指令。
     PrepareControlCommandBase();
+    if (yaw_pid_reset_hold_ticks != 0u) {
+        // What: 在请求后的若干拍持续下发 yaw PID 复位位；Why: Pub/Sub 队列深度为 1，持续几拍才能避免 producer 先跑两次把边沿消息顶掉。
+        gimbal_cmd_send.yaw_pid_reset_request = 1u;
+        yaw_pid_reset_hold_ticks--;
+    }
     // 根据gimbal的反馈值计算云台和底盘正方向的夹角,不需要传参,通过static私有变量完成
+    // What: 检测yaw电机离线→上线跳变；Why: DM电机断电后total_angle归零，重连时必须把offset基准对齐到当前电机角度，否则底盘跟随会追错误偏差导致云台歪掉
+    if (gimbal_fetch_data.yaw_motor_online && !last_yaw_motor_online) {
+        yaw_align_offset_deg = gimbal_fetch_data.yaw_motor_single_round_angle;
+        SyncGimbalTargetAndRequestYawReset();
+    }
+    last_yaw_motor_online = gimbal_fetch_data.yaw_motor_online;
     CalcOffsetAngle();
     active_control_source = GetActiveControlSource();
     HandleControlSourceSwitch(active_control_source);
 
+    // What: VT03 Pause 锁存后，即使主控短暂切到 DT7 或 NONE 也必须继续零力；Why: 用户按下暂停就是明确的失能意图，不能因为链路抖动或回退仲裁而自动恢复使能。
+    if (vt03_pause_zero_force_latched != 0u && active_control_source != CONTROL_SOURCE_VT03) {
+        EmergencyHandler();
+    }
     // What: 先收口主遥控源，再叠加当前主控对应的键鼠输入；Why: 需要让 VT03 遥控器和电脑控制同链路共存，同时保留 DT7 断链回退。
-    if (active_control_source == CONTROL_SOURCE_NONE) {
+    else if (active_control_source == CONTROL_SOURCE_NONE) {
         EmergencyHandler();
     } else {
         RemoteControlSet(active_control_source);

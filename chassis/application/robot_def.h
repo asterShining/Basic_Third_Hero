@@ -242,6 +242,7 @@ typedef struct
     float yaw;
     float pitch;
     gimbal_mode_e gimbal_mode;
+    uint8_t yaw_pid_reset_request; // What: 请求 gimbal 侧复位 yaw 速度环运行时状态；Why: 双板共用同一协议结构，保持字段一致才能避免小陀螺切换时协议错位或语义丢失。
 } Gimbal_Ctrl_Cmd_s;
 
 // cmd发布的发射控制数据,由shoot订阅

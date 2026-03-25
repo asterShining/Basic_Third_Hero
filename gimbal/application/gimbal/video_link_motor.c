@@ -17,19 +17,19 @@
 
 // 目标角度(电机转子total_angle, 单位deg), 负值表示向下转动方向
 // Why: M2006减速比36:1, -500°约为输出端-13.9°, 需根据实际安装调整
-#define VIDEO_LINK_TARGET_ANGLE  (-500.0f)
+#define VIDEO_LINK_TARGET_ANGLE (-500.0f)
 
 // 堵转检测: 电流绝对值阈值 (M2006反馈电流范围约±10000)
 // Why: 用户指定2000, 2006电机堵转时电流会迅速上升, 该值需根据负载实测微调
-#define VL_STALL_CURRENT_THRESHOLD  2000
+#define VL_STALL_CURRENT_THRESHOLD 2000
 
 // 堵转检测: 速度绝对值阈值 (deg/s), 低于此值认为电机已停转
 // Why: 30 deg/s足够区分正常运动与堵转, 避免减速过程误触发
-#define VL_STALL_SPEED_THRESHOLD    30.0f
+#define VL_STALL_SPEED_THRESHOLD 30.0f
 
 // 堵转消抖时间 (ms), 持续满足堵转条件超过此时间才确认堵转
 // Why: 100ms消抖可过滤瞬态冲击和启动阶段的假堵转信号
-#define VL_STALL_DEBOUNCE_TIME      100.0f
+#define VL_STALL_DEBOUNCE_TIME 100.0f
 
 /* ========================= 状态机枚举 ========================= */
 
@@ -37,8 +37,8 @@
 // Why: 三态状态机简洁且覆盖全部工作场景(待机/运动/锁定)
 typedef enum {
     VL_IDLE = 0, // 待机: 电机停止, 等待使能信号
-    VL_MOVING,   // 运动: 位置环驱动, 向目标角度运动中
-    VL_LOCKED,   // 锁定: 堵转检测触发后停止发力, 已到位
+    VL_MOVING, // 运动: 位置环驱动, 向目标角度运动中
+    VL_LOCKED, // 锁定: 堵转检测触发后停止发力, 已到位
 } VideoLinkState_e;
 
 /* ========================= 模块内部变量 ========================= */
@@ -71,7 +71,7 @@ void VideoLinkMotorInit(void)
     Motor_Init_Config_s vl_config = {
         .can_init_config = {
             .can_handle = &hcan2, // 使用CAN2总线
-            .tx_id = 7,           // 电调拨码开关设为ID 7
+            .tx_id = 7, // 电调拨码开关设为ID 7
         },
         .controller_param_init_config = {
             // 位置环PID: 外环, 输出作为速度环的目标值
@@ -98,14 +98,14 @@ void VideoLinkMotorInit(void)
         .controller_setting_init_config = {
             .angle_feedback_source = MOTOR_FEED, // 使用电机编码器反馈角度
             .speed_feedback_source = MOTOR_FEED, // 使用电机编码器反馈速度
-            .outer_loop_type = ANGLE_LOOP,        // 外层为位置环
+            .outer_loop_type = ANGLE_LOOP, // 外层为位置环
             .close_loop_type = ANGLE_LOOP | SPEED_LOOP, // 位置+速度串级
             .motor_reverse_flag = MOTOR_DIRECTION_NORMAL, // 根据安装方向调整
         },
         .motor_type = M2006, // M2006电机类型
     };
 
-    vl_motor = DJIMotorInit(&vl_config);
+    // vl_motor = DJIMotorInit(&vl_config);
 
     if (vl_motor == NULL) {
         LOGERROR("[video_link] M2006 init failed!"); // 初始化失败记录日志
@@ -135,12 +135,8 @@ static uint8_t IsVideoLinkStalled(void)
 
     // 取电流和速度的绝对值
     // Why: 电流和速度可正可负, 堵转判断只关心幅值
-    int16_t current_abs = (vl_motor->measure.real_current > 0)
-                              ? vl_motor->measure.real_current
-                              : -vl_motor->measure.real_current;
-    float speed_abs = (vl_motor->measure.speed_aps > 0.0f)
-                          ? vl_motor->measure.speed_aps
-                          : -vl_motor->measure.speed_aps;
+    int16_t current_abs = (vl_motor->measure.real_current > 0) ? vl_motor->measure.real_current : -vl_motor->measure.real_current;
+    float speed_abs = (vl_motor->measure.speed_aps > 0.0f) ? vl_motor->measure.speed_aps : -vl_motor->measure.speed_aps;
 
     // 同时满足高电流和低速度才认为堵转
     // Why: 单一条件容易误判(如启动瞬间电流大但速度正在上升)
@@ -160,7 +156,6 @@ void VideoLinkMotorTask(void)
     float current_time = DWT_GetTimeline_ms(); // 获取当前系统时间
 
     switch (vl_state) {
-
     case VL_IDLE:
         // 待机状态: 等待使能信号
         // Why: 云台零力模式下电机不应动作
