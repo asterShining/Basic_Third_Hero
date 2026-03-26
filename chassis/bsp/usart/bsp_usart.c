@@ -132,10 +132,11 @@ void USARTSend(USARTInstance *_instance, uint8_t *send_buf, uint16_t send_size, 
 /* 串口发送时,gstate会被设为BUSY_TX */
 uint8_t USARTIsReady(USARTInstance *_instance)
 {
-    if (_instance->usart_handle->gState | HAL_UART_STATE_BUSY_TX)
-        return 0;
-    else
-        return 1;
+    // What: 仅当串口发送状态回到 READY 才允许新的 UI/交互帧继续发出；Why: 旧实现把按位或误写成判断条件，导致几乎永远返回忙，DMA 发送就绪检测失效。
+    if (_instance == NULL || _instance->usart_handle == NULL) {
+        return 0u;
+    }
+    return (_instance->usart_handle->gState == HAL_UART_STATE_READY) ? 1u : 0u;
 }
 
 /**

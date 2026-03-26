@@ -192,9 +192,6 @@ static uint8_t vt03_pause_longpress_handled = 0u;
 static uint8_t vt03_mode_sw_last = VT03_MODE_SW_INVALID;
 // What: 记录 yaw PID 复位请求剩余保持拍数；Why: 小陀螺切换是边沿事件，做成多拍保持可以避免调度先后不同导致 gimbal 漏掉这一拍复位请求。
 static uint8_t yaw_pid_reset_hold_ticks = 0u;
-// What: 跟踪yaw电机上一拍在线状态；Why: 用于检测离线→上线跳变，触发offset重同步防止断电后底盘跟随偏移
-static uint8_t last_yaw_motor_online = 0u;
-
 static void ResetChassisAuxState(void);
 static void SyncGimbalTargetToCurrentAttitude(void);
 static void RequestYawSpeedPIDReset(void);
@@ -552,6 +549,8 @@ static void PrepareControlCommandBase()
     chassis_cmd_send.chassis_mode = CHASSIS_ZERO_FORCE;
     chassis_cmd_send.cap_mode = SUPER_CAP_OFF;
     chassis_cmd_send.chassis_speed_buff = 0;
+    chassis_cmd_send.gimbal_pitch_deg = 0.0f; // What: 每拍先清空下发到底盘的云台pitch实测值；Why: 若后续链路异常或本拍未完成赋值，底盘 UI 不应沿用上一拍旧姿态。
+    chassis_cmd_send.friction_on = 0u; // What: 每拍先清空摩擦轮状态位；Why: 断链或状态机切换时优先回到关闭显示，避免底盘 UI 继续误报摩擦轮开启。
 #ifdef USE_ISLAND_ACTION
     chassis_cmd_send.front_track_mode = FRONT_TRACK_OFF;
     chassis_cmd_send.lift_mode = LIFT_OFF;
@@ -1325,12 +1324,7 @@ void RobotCMDTask()
         yaw_pid_reset_hold_ticks--;
     }
     // 根据gimbal的反馈值计算云台和底盘正方向的夹角,不需要传参,通过static私有变量完成
-    // What: 检测yaw电机离线→上线跳变；Why: DM电机断电后total_angle归零，重连时必须把offset基准对齐到当前电机角度，否则底盘跟随会追错误偏差导致云台歪掉
-    if (gimbal_fetch_data.yaw_motor_online && !last_yaw_motor_online) {
-        yaw_align_offset_deg = gimbal_fetch_data.yaw_motor_single_round_angle;
-        SyncGimbalTargetAndRequestYawReset();
-    }
-    last_yaw_motor_online = gimbal_fetch_data.yaw_motor_online;
+    // What: 底盘跟随始终围绕既定零位计算偏角；Why: 上电/重连时若把“当前角度”重新写成零位，会直接把真实偏角清掉，表现成无法自动回正甚至越跟越歪。
     CalcOffsetAngle();
     active_control_source = GetActiveControlSource();
     HandleControlSourceSwitch(active_control_source);
@@ -1363,6 +1357,8 @@ void RobotCMDTask()
     // 推送消息,双板通信,视觉通信等
     // 其他应用所需的控制数据在remotecontrolsetmode和mousekeysetmode中完成设置
     chassis_cmd_send.gimbal_gyro_z = gimbal_fetch_data.gimbal_imu_data.Gyro[2] * RAD_2_DEGREE; // 假设原始是弧度，转成度
+    chassis_cmd_send.gimbal_pitch_deg = gimbal_fetch_data.gimbal_imu_data.Pitch; // What: 把云台实际pitch姿态随底盘命令一起下发；Why: 底盘裁判 UI 的俯仰滑块必须跟随机构真实位置实时移动。
+    chassis_cmd_send.friction_on = (shoot_cmd_send.friction_mode == FRICTION_ON) ? 1u : 0u; // What: 把摩擦轮真实启停状态显式下发到底盘；Why: fric 指示要反映上板最终发射使能，而不是底盘侧猜测。
 
 #ifdef ONE_BOARD
     PubPushMessage(chassis_cmd_pub, (void *)&chassis_cmd_send);

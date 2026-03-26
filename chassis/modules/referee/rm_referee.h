@@ -60,41 +60,21 @@ typedef struct
 	ext_robot_custom_data_2_t RobotCustomData2; // 0x0310
 	ext_robot_custom_data_3_t RobotCustomData3; // 0x0311
 
+	uint32_t last_shoot_data_tick_ms; // What: 记录最近一次收到0x0207实时射击数据的时刻；Why: UI需要在超时后主动清零弹速显示，避免旧射击事件长期残留。
 	uint8_t init_flag;
 
 } referee_info_t;
 
-// 模式是否切换标志位，0为未切换，1为切换，static定义默认为0
+// 此结构体承载底盘板本地或双板下发的实时UI数据，裁判原生数据仍直接从referee_info_t读取
 typedef struct
 {
-	uint32_t chassis_flag : 1;
-	uint32_t gimbal_flag : 1;
-	uint32_t shoot_flag : 1;
-	uint32_t lid_flag : 1;
-	uint32_t friction_flag : 1;
-	uint32_t Power_flag : 1;
-} Referee_Interactive_Flag_t;
-
-// 此结构体包含UI绘制与机器人车间通信的需要的其他非裁判系统数据
-typedef struct
-{
-	Referee_Interactive_Flag_t Referee_Interactive_Flag;
-	// 为UI绘制以及交互数据所用
-	chassis_mode_e chassis_mode;			 // 底盘模式
-	gimbal_mode_e gimbal_mode;				 // 云台模式
-	shoot_mode_e shoot_mode;				 // 发射模式设置
-	friction_mode_e friction_mode;			 // 摩擦轮关闭
-	lid_mode_e lid_mode;					 // 弹舱盖打开
-	Chassis_Power_Data_s Chassis_Power_Data; // 功率控制
-
-	// 上一次的模式，用于flag判断
-	chassis_mode_e chassis_last_mode;
-	gimbal_mode_e gimbal_last_mode;
-	shoot_mode_e shoot_last_mode;
-	friction_mode_e friction_last_mode;
-	lid_mode_e lid_last_mode;
-	Chassis_Power_Data_s Chassis_last_Power_Data;
-
+	float gimbal_pitch_deg; // What: 云台实际pitch角；Why: 俯仰滑块必须跟随机构真实姿态，而不是命令目标或估算值。
+	float chassis_yaw_rate_dps; // What: 底盘IMU的Z轴角速度；Why: 车体旋转动画要直接反映小陀螺和底盘真实转动。
+	float gimbal_yaw_rate_dps; // What: 云台IMU的Z轴角速度；Why: 枪管动画要和云台实际转动同步，不能跟底盘共用同一速率。
+	float chassis_gimbal_offset_deg; // What: 底盘相对云台的偏角；Why: body/qiang UI 现在需要显示相对姿态而不是各自的世界坐标旋转。
+	float chassis_power_w; // What: UI显示用的底盘实时功率；Why: 优先展示超电实测功率，离线时再退回本地估计值。
+	uint8_t friction_on; // What: 摩擦轮当前启停状态；Why: fric状态指示必须反映上板真实发射使能结果。
+	uint8_t cap_on; // What: 超电输出状态；Why: cap状态指示需要区分“模块在线但输出被关”和“真正可用”。
 } Referee_Interactive_info_t;
 
 // 裁判接收链路诊断信息，记录“中断触发->协议校验->离线判定”的阶段计数，便于快速定位首个失败环节
@@ -139,6 +119,16 @@ referee_info_t *RefereeInit(UART_HandleTypeDef *referee_usart_handle);
  * @param tx_len 发送长度
  */
 void RefereeSend(uint8_t *send, uint16_t tx_len);
+
+/**
+ * @brief 裁判系统原始发送接口
+ *
+ * @note 该接口不再附带115ms兼容延时，供新的UI任务自行按协议预算调度发包
+ *
+ * @param send 发送数据首地址
+ * @param tx_len 发送长度
+ */
+void RefereeSendRaw(uint8_t *send, uint16_t tx_len);
 
 /**
  * @brief 获取裁判接收链路诊断信息

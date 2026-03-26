@@ -61,6 +61,12 @@ void PowerControl_EnableSlopeComp(uint8_t enable)
     slope_comp_enable = enable;
 }
 
+float PowerControlGetChassisPower(void)
+{
+    // What: 向 UI 暴露功率控制内部维护的实时功率估计；Why: 超电离线时仍需要一个本地可信功率源显示到底盘选手端上。
+    return chassis_power;
+}
+
 /**
  * @brief [内部函数] PID 动态分配策略 (无前馈版)
  * @note  策略：根据重心位置，动态调整前后轮的 PID 输出比例。

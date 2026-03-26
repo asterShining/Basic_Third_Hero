@@ -51,4 +51,12 @@ void PowerControl_UpdateIMU(float pitch_rad, float roll_rad);
  * @param enable 1:开启, 0:关闭
  */
 void PowerControl_EnableSlopeComp(uint8_t enable);
+
+/**
+ * @brief 获取底盘功率控制模块估算的实时功率
+ *
+ * @return float 当前底盘功率估计值
+ */
+// What: 对外暴露底盘功率估计读取接口；Why: UI 在超电离线时仍需显示一份来自本地控制器的实时功率值。
+float PowerControlGetChassisPower(void);
 #endif // !DJI_MOTOR_H

@@ -25,6 +25,7 @@ static DaemonInstance *referee_daemon; // 裁判系统守护进程
 static referee_info_t referee_info; // 裁判系统数据
 static RefereeRxDiag_s referee_rx_diag; // 裁判链路诊断统计
 static uint32_t referee_parser_warn_tick_ms; // 解析告警限频时间戳
+static uint8_t referee_ui_tx_log_count; // What: 记录已打印的 UI 发包日志数量；Why: 现场需要确认首批 0x0301 UI 头字段是否正确，但不能无限刷日志影响实时性。
 
 // 记录“命令码已识别但长度不匹配”，目的是把协议版本不一致和链路损坏区分开，缩短定位路径
 static uint8_t RefereeRecordLengthMismatch(uint16_t cmd_id, uint16_t data_len)
@@ -110,6 +111,8 @@ static uint8_t RefereeDecodeFrameByCmdID(uint16_t cmd_id, const uint8_t *data_pt
     case ID_shoot_data: // 0x0207
         if (data_len == LEN_shoot_data) {
             memcpy(&referee_info.ShootData, data_ptr, LEN_shoot_data);
+            // What: 成功解析实时射击数据后记录到达时刻；Why: UI要在一段时间未开火后主动熄灭弹速显示，不能只看数值本身是否非零。
+            referee_info.last_shoot_data_tick_ms = HAL_GetTick();
             return 1u;
         }
         return RefereeRecordLengthMismatch(cmd_id, data_len);
@@ -412,9 +415,51 @@ referee_info_t *RefereeInit(UART_HandleTypeDef *referee_usart_handle)
  * @param send 发送首地址
  * @param tx_len 发送长度
  */
+void RefereeSendRaw(uint8_t *send, uint16_t tx_len)
+{
+    uint16_t cmd_id = 0u;
+    uint16_t sub_id = 0u;
+    uint16_t sender_id = 0u;
+    uint16_t receiver_id = 0u;
+
+    if (send == NULL || tx_len == 0u) {
+        return;
+    }
+
+    if (tx_len >= 11u) {
+        cmd_id = (uint16_t)((uint16_t)send[5] | ((uint16_t)send[6] << 8));
+        sub_id = (uint16_t)((uint16_t)send[7] | ((uint16_t)send[8] << 8));
+        sender_id = (uint16_t)((uint16_t)send[9] | ((uint16_t)send[10] << 8));
+        if (tx_len >= 13u) {
+            receiver_id = (uint16_t)((uint16_t)send[11] | ((uint16_t)send[12] << 8));
+        }
+    }
+
+    if (cmd_id == ID_student_interactive && referee_ui_tx_log_count < 24u) {
+        // What: 仅打印首批 UI 交互帧的关键信息；Why: 若客户端仍不显示，先确认 sub_id、sender_id、receiver_id 和长度是否与协议完全一致。
+        LOGINFO("[ui_tx] len:%u seq:%u sub:0x%04X sender:%u recv:0x%04X",
+                (unsigned int)tx_len,
+                (unsigned int)send[3],
+                (unsigned int)sub_id,
+                (unsigned int)sender_id,
+                (unsigned int)receiver_id);
+        referee_ui_tx_log_count++;
+    }
+
+    // What: 优先沿用DMA发送；Why: UI任务会按预算连续发短包，DMA可以把CPU占用压到最低。
+    if (USARTIsReady(referee_usart_instance) != 0u) {
+        USARTSend(referee_usart_instance, send, tx_len, USART_TRANSFER_DMA);
+        return;
+    }
+
+    // What: DMA忙时退回阻塞发送；Why: 现有USART抽象没有发送队列，初始化建图阶段若直接丢包会导致客户端图层缺失。
+    USARTSend(referee_usart_instance, send, tx_len, USART_TRANSFER_BLOCKING);
+}
+
 void RefereeSend(uint8_t *send, uint16_t tx_len)
 {
-    USARTSend(referee_usart_instance, send, tx_len, USART_TRANSFER_DMA);
+    RefereeSendRaw(send, tx_len);
+    // What: 保留旧接口的115ms兼容延时；Why: 老UI调用链仍按“接口内部限速”假设工作，避免本次改动把旧路径一起改坏。
     osDelay(115);
 }
 

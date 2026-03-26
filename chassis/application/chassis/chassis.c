@@ -28,6 +28,7 @@
 #include "general_def.h"
 #include "bsp_dwt.h"
 #include "referee_UI.h"
+#include "user_lib.h"
 #include "arm_math.h"
 
 /* 根据robot_def.h中的macro自动计算的参数 */
@@ -39,6 +40,9 @@
 #define LIFT_RELATIVE_MIN_ANGLE -20.0f // What: 定义相对进入点的最小抬升角；Why: 给机构保留回落空间并避免误操作顶到底部极限
 #define LIFT_RELATIVE_MAX_ANGLE 80.0f // What: 定义相对进入点的最大抬升角；Why: 用保守软件限位先保护机构，后续可按实车行程再放宽
 #define CHASSIS_TASK_DT_FALLBACK 0.005f // What: 定义底盘任务积分后备周期；Why: DWT异常时仍按200Hz近似积分，避免抬升目标突变
+#define CHASSIS_FOLLOW_DEADBAND_DEG 0.8f // What: 定义底盘跟随的小角度死区；Why: 云台与底盘已经基本对齐时不必继续反复纠偏，避免近零抖动。
+#define CHASSIS_FOLLOW_MIN_WZ_DPS 30.0f // What: 定义底盘跟随的最小有效角速度；Why: 静摩擦和地面阻力会吃掉过小控制量，必须给近零纠偏保留最小推力。
+#define CHASSIS_FOLLOW_GYRO_DAMP_K 0.7f // What: 定义底盘跟随的云台角速度阻尼系数；Why: 保留原有阻尼强度，避免这次最小修复顺手改坏既有手感。
 
 /* 底盘应用包含的模块和信息存储,底盘是单例模式,因此不需要为底盘建立单独的结构体 */
 #ifdef CHASSIS_BOARD // 如果是底盘板,使用板载IMU获取底盘转动角速度
@@ -450,6 +454,44 @@ static void EstimateSpeed()
     last_wz = real_wz;
 }
 
+static void RefereeUIUpdateData(void)
+{
+    // What: 汇总底盘板本地和双板下发的 UI 实时数据；Why: 把数据采集与 UI 绘制解耦后，裁判任务只关心显示调度，避免读多处模块造成状态不一致。
+    ui_data.chassis_yaw_rate_dps = Chassis_IMU_data->Gyro[Z] * RAD_2_DEGREE;
+
+#ifdef CHASSIS_BOARD
+    if (chasiss_can_comm != NULL && CANCommIsOnline(chasiss_can_comm) != 0u) {
+        // What: 双板在线时直接采用云台板下发的真实姿态、相对偏角与摩擦轮状态；Why: 这些量在双板协同控制链里已经对齐，底盘板本地无需再自行推导。
+        ui_data.gimbal_pitch_deg = chassis_cmd_recv.gimbal_pitch_deg;
+        ui_data.gimbal_yaw_rate_dps = chassis_cmd_recv.gimbal_gyro_z;
+        ui_data.chassis_gimbal_offset_deg = theta_format(chassis_cmd_recv.offset_angle);
+        ui_data.friction_on = chassis_cmd_recv.friction_on;
+    } else {
+        // What: 双板离线时冻结 pitch 和相对偏角并清零其余云台相关量；Why: 相对姿态保留最后一次有效值更利于排查问题，而角速度和摩擦轮状态必须立即回落避免误导操作手。
+        ui_data.gimbal_yaw_rate_dps = 0.0f;
+        ui_data.friction_on = 0u;
+    }
+#else
+    // What: 单板构型下先给云台相关 UI 量安全默认值；Why: 当前相对姿态方案主要面向双板，未补全单板数据通路前不能让显示读到未定义数据。
+    ui_data.gimbal_yaw_rate_dps = 0.0f;
+    ui_data.chassis_gimbal_offset_deg = 0.0f;
+    ui_data.friction_on = 0u;
+#endif
+
+#ifdef USE_SUPER_CAP
+    if (SuperCapIsOnline(cap) != 0u) {
+        // What: 超电在线时优先显示其回传的真实底盘功率与输出状态；Why: 该值最接近实际能量链路表现，能直接反映 buffer 与 DCDC 是否正在工作。
+        ui_data.chassis_power_w = SuperCapGetChassisPower(cap);
+        ui_data.cap_on = (SuperCapIsOutputDisabled(cap) == 0u) ? 1u : 0u;
+        return;
+    }
+#endif
+
+    // What: 超电离线时回退到底盘功率控制模块的本地估算值；Why: 即使辅助供电链路失效，选手端仍需要持续看到一个稳定更新的功率读数。
+    ui_data.chassis_power_w = PowerControlGetChassisPower();
+    ui_data.cap_on = 0u;
+}
+
 /* 机器人底盘控制核心任务 */
 void ChassisTask()
 {
@@ -530,11 +572,27 @@ void ChassisTask()
     switch (chassis_cmd_recv.chassis_mode) {
     case CHASSIS_NO_FOLLOW: // 底盘不旋转,但维持全向机动,一般用于调整云台姿态
         break;
-    case CHASSIS_FOLLOW_GIMBAL_YAW:
+    case CHASSIS_FOLLOW_GIMBAL_YAW: {
+        float offset_abs = fabsf(chassis_cmd_recv.offset_angle);
+        float follow_pos_wz = 0.0f;
+        float follow_damp_wz = -CHASSIS_FOLLOW_GYRO_DAMP_K * gimbal_wz;
 
-        chassis_cmd_recv.wz = -3.2f * chassis_cmd_recv.offset_angle * abs(chassis_cmd_recv.offset_angle) - 0.7 * gimbal_wz; // 考虑加入pid闭环会更好
-        // chassis_cmd_recv.wz = -1.0 * gimbal_wz;
-        break;
+        // What: 小于死区时直接认为底盘与云台已经基本对齐；Why: 接近零误差时继续用位置项硬追只会放大采样噪声和机构间隙，表现成左右来回找零。
+        if (offset_abs >= CHASSIS_FOLLOW_DEADBAND_DEG) {
+            // What: 对偏角使用浮点绝对值参与二次项放大；Why: 旧代码误用整型 abs 会把小角度截断成 0，导致底盘最后几度永远补不齐。
+            follow_pos_wz = -3.2f * chassis_cmd_recv.offset_angle * offset_abs;
+
+            // What: 位置项过小时强制补一个最小有效角速度；Why: 近零阶段若输出打不过静摩擦，底盘会停在可见残差上，看起来像“差一点不回正”。
+            if (fabsf(follow_pos_wz) < CHASSIS_FOLLOW_MIN_WZ_DPS) {
+                follow_pos_wz = (chassis_cmd_recv.offset_angle > 0.0f) ? -CHASSIS_FOLLOW_MIN_WZ_DPS : CHASSIS_FOLLOW_MIN_WZ_DPS;
+            }
+        }
+
+        // What: 最终角速度由位置纠偏项和云台角速度阻尼项叠加得到；Why: 保留原本的阻尼思路，在补齐小角度残差的同时避免跟随过程过冲。
+        chassis_cmd_recv.wz = follow_pos_wz + follow_damp_wz;
+    }
+    // chassis_cmd_recv.wz = -1.0 * gimbal_wz;
+    break;
     case CHASSIS_ROTATE: // 自旋,同时保持全向机动
                          // [修改] 优化小陀螺逻辑：区分变速/匀速，并统一应用平移优先策略
 #if VARIABLE_SPIN_ENABLED
@@ -577,6 +635,9 @@ void ChassisTask()
 
     // 根据裁判系统的反馈数据和电容数据对输出限幅并设定闭环参考值
     LimitChassisOutput();
+
+    // What: 在底盘输出与功率策略完成后刷新一份 UI 实时数据快照；Why: 这样 UI 读到的功率、超电和角速度都对应本拍最新控制结果。
+    RefereeUIUpdateData();
 
 #ifdef USE_ISLAND_ACTION
     if (chassis_cmd_recv.chassis_mode != CHASSIS_ZERO_FORCE) {

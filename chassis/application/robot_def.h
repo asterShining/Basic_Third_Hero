@@ -36,7 +36,7 @@
 #define YAW_CHASSIS_ALIGN_ECD 2711 // 云台和底盘对齐指向相同方向时的电机编码器值,若对云台有机械改动需要修改
 #define YAW_ECD_GREATER_THAN_4096 0 // ALIGN_ECD值是否大于4096,是为1,否为0;用于计算云台偏转角度
 #define PITCH_HORIZON_ECD 0 // 云台处于水平位置时编码器值,若对云台有机械改动需要修改
-#define PITCH_MAX_ANGLE 37 // 云台陀螺仪竖直方向最大角度
+#define PITCH_MAX_ANGLE 34 // What: 将底盘侧 UI 与限位映射共用的 pitch 上限统一到 34 度；Why: 选手端滑块必须与实机最高限位置一一对应，避免 34 度后仍残留虚假行程。
 #define PITCH_MIN_ANGLE -11 // 云台陀螺仪竖直方向最小角度
 // 发射参数
 #define ONE_BULLET_DELTA_ANGLE 40 // 发射一发弹丸拨盘转动的距离,由机械设计图纸给出
@@ -225,6 +225,8 @@ typedef struct
     chassis_mode_e chassis_mode;
     int chassis_speed_buff;
     super_cap_mode_e cap_mode;
+    float gimbal_pitch_deg; // What: 双板下发云台实际pitch角；Why: 底盘板绘制俯仰滑块时必须使用上板真实姿态而不是控制目标。
+    uint8_t friction_on; // What: 双板下发摩擦轮启停状态；Why: 裁判 UI 的 fric 指示需要跟随上板真实使能结果实时变化。
 #ifdef USE_ISLAND_ACTION // [条件编译] 仅在启用上岛机构时包含辅助机构控制字段
     front_track_mode_e front_track_mode; // What: 独立描述前履带开关状态；Why: 避免复用底盘主模式后让跟随与上岛辅助机构互相覆盖
     lift_mode_e lift_mode; // What: 独立描述抬升状态机；Why: 让抬升保持与调高语义在双板两侧都保持一致
