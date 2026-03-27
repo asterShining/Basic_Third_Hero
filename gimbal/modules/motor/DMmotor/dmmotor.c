@@ -41,6 +41,16 @@ void DMMotorChangeFeed(DMMotorInstance *motor, Closeloop_Type_e loop, Feedback_S
     // DM电机通常不需要像DJI那样检查指针越界，因为结构体是一样的
 }
 
+uint8_t DMMotorIsOnline(DMMotorInstance *motor)
+{
+    // What: 对外暴露 DM 电机在线状态查询；Why: 上层需要在 yaw 电机掉线时冻结跟随参考，不能直接跨模块读取 daemon 内部字段。
+    if (motor == NULL || motor->motor_daemon == NULL) {
+        return 0u;
+    }
+
+    return DaemonIsOnline(motor->motor_daemon);
+}
+
 static void DMMotorDecode(CANInstance *motor_can)
 {
     uint16_t tmp;

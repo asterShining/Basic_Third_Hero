@@ -227,6 +227,7 @@ typedef struct
     super_cap_mode_e cap_mode;
     float gimbal_pitch_deg; // What: 双板下发云台实际pitch角；Why: 底盘板绘制俯仰滑块时必须使用上板真实姿态而不是控制目标。
     uint8_t friction_on; // What: 双板下发摩擦轮启停状态；Why: 裁判 UI 的 fric 指示需要跟随上板真实使能结果实时变化。
+    uint8_t ui_refresh_request; // What: 接收来自上板的一次性 UI 刷新请求；Why: 底盘板只负责执行重绘，不应自己猜测操作者何时需要重建。
 #ifdef USE_ISLAND_ACTION // [条件编译] 仅在启用上岛机构时包含辅助机构控制字段
     front_track_mode_e front_track_mode; // What: 独立描述前履带开关状态；Why: 避免复用底盘主模式后让跟随与上岛辅助机构互相覆盖
     lift_mode_e lift_mode; // What: 独立描述抬升状态机；Why: 让抬升保持与调高语义在双板两侧都保持一致
@@ -283,6 +284,7 @@ typedef struct
 {
     attitude_t gimbal_imu_data;
     float yaw_motor_single_round_angle;
+    uint8_t yaw_motor_online; // What: 保持与云台板回传结构一致；Why: 双板协议定义必须严格同构，避免后续联调时字段错位。
 } Gimbal_Upload_Data_s;
 
 typedef struct

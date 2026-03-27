@@ -40,9 +40,11 @@
 #define LIFT_RELATIVE_MIN_ANGLE -20.0f // What: 定义相对进入点的最小抬升角；Why: 给机构保留回落空间并避免误操作顶到底部极限
 #define LIFT_RELATIVE_MAX_ANGLE 80.0f // What: 定义相对进入点的最大抬升角；Why: 用保守软件限位先保护机构，后续可按实车行程再放宽
 #define CHASSIS_TASK_DT_FALLBACK 0.005f // What: 定义底盘任务积分后备周期；Why: DWT异常时仍按200Hz近似积分，避免抬升目标突变
-#define CHASSIS_FOLLOW_DEADBAND_DEG 0.8f // What: 定义底盘跟随的小角度死区；Why: 云台与底盘已经基本对齐时不必继续反复纠偏，避免近零抖动。
-#define CHASSIS_FOLLOW_MIN_WZ_DPS 30.0f // What: 定义底盘跟随的最小有效角速度；Why: 静摩擦和地面阻力会吃掉过小控制量，必须给近零纠偏保留最小推力。
-#define CHASSIS_FOLLOW_GYRO_DAMP_K 0.7f // What: 定义底盘跟随的云台角速度阻尼系数；Why: 保留原有阻尼强度，避免这次最小修复顺手改坏既有手感。
+#define CHASSIS_FOLLOW_YAW_KP 24.0f // What: 定义历史跟随控制的位置环比例增益；Why: 直接按偏角线性生成回正角速度，便于恢复此前已经跑通过的手感。
+#define CHASSIS_FOLLOW_YAW_KD 0.1f // What: 定义历史跟随控制的底盘角速度阻尼增益；Why: D 项必须看被控对象自身角速度，才能在回正穿越时提供真实阻尼。
+#define CHASSIS_FOLLOW_YAW_KFF 1.2f // What: 定义历史跟随控制的云台角速度前馈增益；Why: 云台先转时提前带动底盘，减少单靠位置误差追赶造成的滞后。
+#define CHASSIS_FOLLOW_YAW_DEADBAND_DEG 0.5f // What: 定义历史跟随控制的小角度死区；Why: 回中附近直接忽略微小误差，避免机械间隙和测量噪声触发来回抖动。
+#define CHASSIS_FOLLOW_YAW_MAX_WZ_DPS 3500.0f // What: 定义历史跟随控制的角速度限幅；Why: 防止大偏角时外环给内环过猛目标，导致速度环饱和后再过冲。
 
 /* 底盘应用包含的模块和信息存储,底盘是单例模式,因此不需要为底盘建立单独的结构体 */
 #ifdef CHASSIS_BOARD // 如果是底盘板,使用板载IMU获取底盘转动角速度
@@ -94,13 +96,30 @@ static float real_vx = 0.0f; // 真实前进速度 m/s
 static float real_vy = 0.0f; // 真实横移速度 m/s
 static float real_wz = 0.0f; // 真实旋转速度 deg/s
 
-// [!code ++]
 // ==========================================
-// [新增] 小陀螺模式配置
+// 小陀螺模式配置
 // ==========================================
-#define VARIABLE_SPIN_ENABLED 1 // 1: 启用变速小陀螺; 0: 启用优化后的匀速小陀螺
-#define SPIN_TOP_MAX_SPEED 2000.0f // 小陀螺最大旋转速度 (deg/s) 降低转速以防电机过度饱和发生偏航漂移
-#define TRANSLATION_PRIORITY_RATIO 0.6f // 平移优先系数 (0~1)，越大则平移时旋转降速越明显
+#define VARIABLE_SPIN_ENABLED 1 // What: 保留小陀螺的轻微变速效果；Why: 贴边吃功率时仍保留一点扰动，降低被针对时的运动可预测性。
+#define SPIN_BASE_INIT_SPEED 1400.0f // What: 定义小陀螺进入时的初始基础角速度；Why: 首拍就给到中高转速，避免每次进小陀螺都要从很低速度慢慢爬升。
+#define SPIN_BASE_MIN_SPEED 900.0f // What: 定义功率闭环允许维持的最小基础角速度；Why: 即使功率余量吃紧也保留稳定自旋，不让姿态突然塌掉。
+#define SPIN_TOP_MAX_SPEED 3200.0f // What: 提高小陀螺基础角速度上限；Why: 让功率控制器在合法范围内有足够目标可追，才能把可用功率真正吃满。
+#define SPIN_POWER_TARGET_BASE_RATIO 0.96f // What: 定义小陀螺平均功率目标比例；Why: 让整段变速逻辑围绕贴边功率运行，而不是回到过去那种明显留手的保守状态。
+#define SPIN_POWER_TARGET_WAVE_AMPLITUDE 0.025f // What: 定义变速波形对功率目标比例的调制幅度；Why: 高速段略多吃一点功率、低速段略收一点，变速节奏会更明显但仍留有安全余量。
+#define SPIN_POWER_TRACK_GAIN 10.0f // What: 定义功率误差到角速度修正的比例系数；Why: 让小陀螺能跟着功率余量快速抬速，但不过分激进导致来回抽动。
+#define SPIN_POWER_STEP_UP_MAX 20.0f // What: 限制单周期最大提速量；Why: 200Hz任务下给平滑爬升，避免目标角速度阶跃过大把轮速环瞬间顶饱和。
+#define SPIN_POWER_STEP_DOWN_MAX 35.0f // What: 限制单周期最大降速量；Why: 超功率边缘时更快回收旋转目标，优先守住不超功率底线。
+#define SPIN_POWER_DEADBAND_W 2.0f // What: 定义功率误差死区；Why: 吃满附近直接忽略微小波动，减少由裁判功率抖动带来的转速抖动。
+#define SPIN_WAVE_SCALE_AMPLITUDE 0.15f // What: 定义小陀螺角速度包络波动幅度；Why: 把快慢节奏拉得更开一些，让变速逻辑在场上是明显可感知的。
+#define SPIN_WAVE_REFRESH_MIN_MS 180u // What: 定义无节奏变速目标的最短刷新时间；Why: 保证变速方向不会切得过快，避免底盘体感变成抖动。
+#define SPIN_WAVE_REFRESH_MAX_MS 520u // What: 定义无节奏变速目标的最长刷新时间；Why: 让目标保持时间也带随机性，避免形成“固定拍点”。
+#define SPIN_WAVE_SMOOTH_ALPHA 0.06f // What: 定义当前波形向随机目标逼近的平滑系数；Why: 让无节奏变速保持连续过渡，不出现突兀阶跃。
+#define TRANSLATION_PRIORITY_RATIO 0.6f // What: 定义平移优先系数；Why: 贴边吃功率时仍优先保证平移手感，避免横移一给就把整车拖死。
+
+static float spin_power_base_wz = SPIN_BASE_INIT_SPEED; // What: 缓存小陀螺基础角速度闭环状态；Why: 通过跨周期累积调节把实际功率稳定贴到上限附近。
+static float spin_wave_current = 0.0f; // What: 缓存当前无节奏变速波形值；Why: 通过连续状态平滑逼近随机目标，避免每拍直接跳变。
+static float spin_wave_target = 0.0f; // What: 缓存当前随机变速目标；Why: 让一段时间内的快慢趋势保持一致，而不是完全白噪声式乱跳。
+static uint32_t spin_wave_next_refresh_tick = 0u; // What: 记录下次刷新随机目标的时间戳；Why: 让每次目标切换间隔本身也不固定，进一步去掉节奏感。
+static uint32_t spin_wave_rng_state = 0x13572468u; // What: 保存轻量级伪随机状态；Why: 裸机/RTOS环境下不用标准库随机数也能稳定生成无节奏变速序列。
 
 /**
  * @brief 计算小陀螺的旋转目标速度 (核心优化逻辑：平移优先)
@@ -134,31 +153,102 @@ static float OptimizedSpinSpeed(float base_target_wz, float vx_cmd, float vy_cmd
 }
 
 /**
- * @brief 生成变速小陀螺的波形
+ * @brief 生成一个 -1.0 ~ 1.0 的伪随机值
  *
- * @return float 当前时刻的基础旋转速度
+ * @return float 归一化的伪随机值
  */
-static float GetVariableSpinBase()
+static float GetSpinRandomSignedUnit(void)
 {
-    // 使用 HAL_GetTick() 获取时间 (ms)
+    // What: 使用 xorshift 更新随机状态；Why: 算法开销极低，适合底盘高频任务里生成“无节奏但可控”的目标。
+    spin_wave_rng_state ^= spin_wave_rng_state << 13;
+    spin_wave_rng_state ^= spin_wave_rng_state >> 17;
+    spin_wave_rng_state ^= spin_wave_rng_state << 5;
+
+    // What: 将整数随机态映射到对称区间；Why: 后续同时调功率目标和角速度包络时需要一个中心在零点的有符号变量。
+    return ((float)(spin_wave_rng_state & 0xFFFFu) / 32767.5f) - 1.0f;
+}
+
+/**
+ * @brief 生成归一化的小陀螺无节奏变速波形
+ *
+ * @return float 当前时刻的波形值，范围约为 -1.0 ~ 1.0
+ */
+static float GetVariableSpinWave(void)
+{
+    // What: 使用系统节拍驱动随机目标刷新；Why: 只在到期时切换趋势，平时保持平滑逼近，才能兼顾无节奏与可控性。
     uint32_t current_time = HAL_GetTick();
 
-    // 周期设计：
-    // 正弦波: A * sin(2*pi*f*t) + Offset
-    // 设周期 T = 2秒 (f=0.5Hz)
-    // 为避免电机在小陀螺时转速溢出，我们将振幅和均值同比下调
-    float time_sec = current_time / 1000.0f;
-    const float SPIN_PERIOD = 2.0f; // 周期 2秒
-    const float SPIN_AMP = 150.0f; // 波动幅度 (降为原来的1/10)
-    const float SPIN_OFFSET = 450.0f; // 基础均值
+    if (spin_wave_next_refresh_tick == 0u || (int32_t)(current_time - spin_wave_next_refresh_tick) >= 0) {
+        uint32_t refresh_span = SPIN_WAVE_REFRESH_MAX_MS - SPIN_WAVE_REFRESH_MIN_MS;
+        float random_wave = GetSpinRandomSignedUnit();
 
-    // 2 * PI * f * t = 2 * PI * (1/T) * t
-    float phase = 2.0f * PI * (1.0f / SPIN_PERIOD) * time_sec;
+        // What: 刷新下一段随机变速目标；Why: 让快慢段的方向和幅度都不固定，避免被人听节奏或看轨迹读出来。
+        spin_wave_target = random_wave;
+        // What: 随机化下一次刷新间隔；Why: 即使目标幅度相近，切换时刻也不固定，进一步打散周期性。
+        spin_wave_next_refresh_tick = current_time + SPIN_WAVE_REFRESH_MIN_MS + (spin_wave_rng_state % (refresh_span + 1u));
+    }
 
-    // 生成波形
-    float wave = arm_sin_f32(phase) * SPIN_AMP + SPIN_OFFSET;
+    // What: 让当前波形缓慢追向随机目标；Why: 速度变化需要连续，不能因为目标随机就让输出也随机抽动。
+    spin_wave_current += (spin_wave_target - spin_wave_current) * SPIN_WAVE_SMOOTH_ALPHA;
+    LIMIT_MIN_MAX(spin_wave_current, -1.0f, 1.0f);
+    return spin_wave_current;
+}
 
-    return wave;
+/**
+ * @brief 按实时功率余量自适应调整小陀螺基础角速度
+ *
+ * @param power_limit 当前底盘允许使用的总功率上限
+ * @return float 已贴边调节后的基础角速度
+ */
+static float GetAdaptiveSpinBase(float power_limit)
+{
+    // What: 读取上一控制拍估算的底盘功率；Why: 功率限幅已经在电机层闭环完成，直接复用其估计值即可形成外层吃满控制。
+    float measured_power = PowerControlGetChassisPower();
+    float target_power_ratio = SPIN_POWER_TARGET_BASE_RATIO;
+    // What: 预留少量余量作为贴边目标；Why: 实车裁判值和功率模型都存在抖动，完全打满更容易出现“忽超忽回收”。
+#if VARIABLE_SPIN_ENABLED
+    float spin_wave = GetVariableSpinWave();
+    // What: 让变速波形直接调制功率目标比例；Why: 高速段会主动索取更多合法功率，确保变速逻辑不仅体现在目标值上，也体现在真实输出上。
+    target_power_ratio += spin_wave * SPIN_POWER_TARGET_WAVE_AMPLITUDE;
+#else
+    float spin_wave = 0.0f;
+#endif
+    LIMIT_MIN_MAX(target_power_ratio, 0.90f, 0.99f);
+    float target_power = power_limit * target_power_ratio;
+    float power_error = target_power - measured_power;
+    float wz_delta = 0.0f;
+
+    // What: 仅在偏离目标较明显时修正基础角速度；Why: 避免已经吃满附近时还被功率噪声推着来回抽动。
+    if (fabsf(power_error) > SPIN_POWER_DEADBAND_W) {
+        wz_delta = power_error * SPIN_POWER_TRACK_GAIN;
+        LIMIT_MIN_MAX(wz_delta, -SPIN_POWER_STEP_DOWN_MAX, SPIN_POWER_STEP_UP_MAX);
+    }
+
+    // What: 将功率误差积分到基础角速度状态上；Why: 让小陀螺能随着余量逐步抬速，直到后级功率控制开始稳定限幅。
+    spin_power_base_wz += wz_delta;
+    LIMIT_MIN_MAX(spin_power_base_wz, SPIN_BASE_MIN_SPEED, SPIN_TOP_MAX_SPEED);
+
+#if VARIABLE_SPIN_ENABLED
+    {
+        float variable_spin_scale = 1.0f + spin_wave * SPIN_WAVE_SCALE_AMPLITUDE;
+        float variable_spin_wz = spin_power_base_wz * variable_spin_scale;
+        // What: 对附加了明显变速包络的目标再做一次限幅；Why: 即使波峰阶段主动索取更多功率，也不能让目标角速度越过软件安全边界。
+        LIMIT_MIN_MAX(variable_spin_wz, SPIN_BASE_MIN_SPEED, SPIN_TOP_MAX_SPEED);
+        return variable_spin_wz;
+    }
+#else
+    return spin_power_base_wz;
+#endif
+}
+
+static void ResetAdaptiveSpinBase(void)
+{
+    // What: 在退出小陀螺时恢复基础角速度状态；Why: 避免上一次贴边学到的高转速在下次切入时直接带来过猛的瞬时冲击。
+    spin_power_base_wz = SPIN_BASE_INIT_SPEED;
+    // What: 在退出小陀螺时清空无节奏变速状态；Why: 下次进入重新生成一段新的随机趋势，避免固定沿用上一段未走完的节奏。
+    spin_wave_current = 0.0f;
+    spin_wave_target = 0.0f;
+    spin_wave_next_refresh_tick = 0u;
 }
 
 void ChassisInit()
@@ -505,6 +595,10 @@ void ChassisTask()
     chassis_cmd_recv = *(Chassis_Ctrl_Cmd_s *)CANCommGet(chasiss_can_comm);
 #endif // CHASSIS_BOARD
     gimbal_wz = chassis_cmd_recv.gimbal_gyro_z; // What: 使用最新一帧云台角速度前馈；Why: 避免先读取旧值再更新命令导致跟随支路固定滞后一个控制周期。
+    if (chassis_cmd_recv.ui_refresh_request != 0u) {
+        // What: 收到上板的一次性 UI 刷新请求后转交给裁判 UI 任务；Why: 真正的绘图发包必须在 UI 线程内串行执行，底盘控制线程不应直接插手。
+        UIRequestRefresh();
+    }
 
     /* 功率控制策略 */
     // 1. 获取裁判系统功率限制 (原始最大值)
@@ -571,45 +665,35 @@ void ChassisTask()
     // 根据控制模式设定旋转速度
     switch (chassis_cmd_recv.chassis_mode) {
     case CHASSIS_NO_FOLLOW: // 底盘不旋转,但维持全向机动,一般用于调整云台姿态
+        ResetAdaptiveSpinBase(); // What: 退出小陀螺时清空贴边状态；Why: 下次重新进入时从统一初始条件起步，避免继承旧工况的高转速记忆。
         break;
     case CHASSIS_FOLLOW_GIMBAL_YAW: {
-        float offset_abs = fabsf(chassis_cmd_recv.offset_angle);
-        float follow_pos_wz = 0.0f;
-        float follow_damp_wz = -CHASSIS_FOLLOW_GYRO_DAMP_K * gimbal_wz;
+        ResetAdaptiveSpinBase(); // What: 跟随模式下复位小陀螺状态；Why: 跟随控制依赖独立角度环，不应继续带着自旋功率闭环状态运行。
+        float chassis_wz = Chassis_IMU_data->Gyro[Z] * RAD_2_DEGREE; // What: 读取底盘当前真实角速度；Why: 历史控制律的 D 项依赖底盘自身速度，才能抑制回正穿越和反向摆动。
+        float angle_err = chassis_cmd_recv.offset_angle; // What: 缓存当前底盘相对云台的偏角；Why: 在进入控制律前统一做死区处理，避免零点附近位置项频繁翻转。
 
-        // What: 小于死区时直接认为底盘与云台已经基本对齐；Why: 接近零误差时继续用位置项硬追只会放大采样噪声和机构间隙，表现成左右来回找零。
-        if (offset_abs >= CHASSIS_FOLLOW_DEADBAND_DEG) {
-            // What: 对偏角使用浮点绝对值参与二次项放大；Why: 旧代码误用整型 abs 会把小角度截断成 0，导致底盘最后几度永远补不齐。
-            follow_pos_wz = -3.2f * chassis_cmd_recv.offset_angle * offset_abs;
-
-            // What: 位置项过小时强制补一个最小有效角速度；Why: 近零阶段若输出打不过静摩擦，底盘会停在可见残差上，看起来像“差一点不回正”。
-            if (fabsf(follow_pos_wz) < CHASSIS_FOLLOW_MIN_WZ_DPS) {
-                follow_pos_wz = (chassis_cmd_recv.offset_angle > 0.0f) ? -CHASSIS_FOLLOW_MIN_WZ_DPS : CHASSIS_FOLLOW_MIN_WZ_DPS;
-            }
+        // What: 小于死区时将偏角误差直接清零；Why: 历史版本就是靠死区切掉近零噪声，避免底盘在机械间隙附近来回找零。
+        if (fabsf(angle_err) < CHASSIS_FOLLOW_YAW_DEADBAND_DEG) {
+            angle_err = 0.0f;
         }
 
-        // What: 最终角速度由位置纠偏项和云台角速度阻尼项叠加得到；Why: 保留原本的阻尼思路，在补齐小角度残差的同时避免跟随过程过冲。
-        chassis_cmd_recv.wz = follow_pos_wz + follow_damp_wz;
+        // What: 按历史 P + D + FF 结构生成底盘跟随角速度；Why: 恢复此前更线性、可调性更强的控制律，同时保留云台先动时的前馈补偿。
+        chassis_cmd_recv.wz = -CHASSIS_FOLLOW_YAW_KP * angle_err - CHASSIS_FOLLOW_YAW_KD * chassis_wz - CHASSIS_FOLLOW_YAW_KFF * gimbal_wz;
+
+        // What: 对历史控制律输出做角速度限幅；Why: 避免大偏角时瞬时目标过大，把后级电机速度环推入饱和。
+        LIMIT_MIN_MAX(chassis_cmd_recv.wz, -CHASSIS_FOLLOW_YAW_MAX_WZ_DPS, CHASSIS_FOLLOW_YAW_MAX_WZ_DPS);
     }
-    // chassis_cmd_recv.wz = -1.0 * gimbal_wz;
     break;
     case CHASSIS_ROTATE: // 自旋,同时保持全向机动
-                         // [修改] 优化小陀螺逻辑：区分变速/匀速，并统一应用平移优先策略
-#if VARIABLE_SPIN_ENABLED
-                         // 1. 变速小陀螺
     {
-        float base_wz = GetVariableSpinBase(); // 获取随时间变化的基础速度
+        // What: 按实时功率余量闭环抬高小陀螺基础角速度；Why: 让后级功率限制器长期工作在贴边状态，从而把合法功率尽量吃满。
+        float base_wz = GetAdaptiveSpinBase(final_power_limit);
+        // What: 在功率贴边基础上继续应用平移优先；Why: 小陀螺再猛也不能把驾驶员横移和前后机动直接抢没。
         chassis_cmd_recv.wz = OptimizedSpinSpeed(base_wz, chassis_cmd_recv.vx, chassis_cmd_recv.vy);
     }
-#else
-                         // 2. 优化后的匀速小陀螺
-    {
-        float const_target = SPIN_TOP_MAX_SPEED; // 固定最大速度
-        chassis_cmd_recv.wz = OptimizedSpinSpeed(const_target, chassis_cmd_recv.vx, chassis_cmd_recv.vy);
-    }
-#endif
     break;
     default:
+        ResetAdaptiveSpinBase(); // What: 其它模式统一复位小陀螺状态；Why: 避免未覆盖模式残留旧的小陀螺闭环输出。
         break;
     }
 

@@ -47,6 +47,24 @@ static GimbalCali_Handler_t pitch_cali_handler; // 定义标定句柄
 static BMI088Instance *bmi088; // 云台IMU
 
 /**
+ * @brief 将角度归一化到 [0, 360)
+ *
+ * @param angle_deg 原始角度
+ * @return float 归一化后的角度
+ */
+static float NormalizeAngleTo360(float angle_deg)
+{
+    // What: 统一做 yaw 单圈角度归一化；Why: 电机离线/复活后的机械角输出必须始终落在同一坐标系里，避免不同调用点各写一套逻辑后出现偏差。
+    while (angle_deg < 0.0f) {
+        angle_deg += 360.0f;
+    }
+    while (angle_deg >= 360.0f) {
+        angle_deg -= 360.0f;
+    }
+    return angle_deg;
+}
+
+/**
  * @brief 清空单个 PID 的运行时状态
  *
  * @param pid 需要复位的 PID 实例
@@ -74,6 +92,21 @@ static void ResetPIDRuntimeState(PIDInstance *pid)
     pid->ERRORHandler.ERRORCount = 0u;
     pid->ERRORHandler.ERRORType = PID_ERROR_NONE;
     DWT_GetDeltaT(&pid->DWT_CNT);
+}
+
+/**
+ * @brief 清空 yaw 电机角度环和速度环的运行时状态
+ *
+ */
+static void ResetYawMotorRuntimeState(void)
+{
+    // What: 在 yaw 电机掉线/复活边沿统一清空角度环和速度环历史；Why: 电机失能期间反馈与目标会脱钩，残留状态会在重新上电时把头突然拉偏。
+    if (yaw_motor == NULL) {
+        return;
+    }
+
+    ResetPIDRuntimeState(&yaw_motor->angle_PID);
+    ResetPIDRuntimeState(&yaw_motor->speed_PID);
 }
 
 void GimbalCalibrate()
@@ -205,6 +238,9 @@ void GimbalInit()
 void GimbalTask()
 {
     static gimbal_mode_e last_gimbal_mode = GIMBAL_ZERO_FORCE; // What: 记录上一拍云台模式；Why: 只有在模式切换边沿才需要清空 yaw 速度环积分，避免每拍都把 Ki 的作用抹掉。
+    static uint8_t last_yaw_motor_online = 0u; // What: 记录 yaw 电机上一拍在线状态；Why: 只在掉线/复活边沿清一次 PID，避免正常运行时反复抹掉控制状态。
+    static float yaw_motor_single_round_cache_deg = 0.0f; // What: 缓存最后一次可信的 yaw 单圈机械角；Why: 电机离线时继续发布这个值，底盘跟随不会被脏反馈带偏。
+    uint8_t yaw_motor_online = 0u;
     // 获取云台控制数据
     // 后续增加未收到数据的处理
     if (gimbal_sub) {
@@ -212,16 +248,25 @@ void GimbalTask()
     } else {
         memset(&gimbal_cmd_recv, 0, sizeof(gimbal_cmd_recv));
     }
+    if (yaw_motor != NULL && DMMotorIsOnline(yaw_motor) != 0u) {
+        yaw_motor_online = 1u;
+    }
+    if (yaw_motor_online != last_yaw_motor_online) {
+        // What: yaw 电机在线状态变化时立即清掉控制残留；Why: 复活重新上电后的第一拍不能继续带着掉线前的历史误差工作。
+        ResetYawMotorRuntimeState();
+        last_yaw_motor_online = yaw_motor_online;
+    }
     if (gimbal_cmd_recv.yaw_pid_reset_request != 0u) {
         if (yaw_motor != NULL) {
             // What: 收到 cmd 侧的小陀螺切换复位请求时清空 yaw 速度环状态；Why: 进入/退出小陀螺只改了 chassis_mode，不会触发 gimbal_mode 边沿，必须靠显式请求来消掉残留积分。
             ResetPIDRuntimeState(&yaw_motor->speed_PID);
+            ResetPIDRuntimeState(&yaw_motor->angle_PID);
         }
     }
     if (gimbal_cmd_recv.gimbal_mode != last_gimbal_mode) {
         if (yaw_motor != NULL) {
             // What: 模式切换时清空 yaw 速度环运行时状态；Why: 小陀螺、自由和零力切换后若沿用旧积分，静止下来时很容易突然乱动一下。
-            ResetPIDRuntimeState(&yaw_motor->speed_PID);
+            ResetYawMotorRuntimeState();
         }
         last_gimbal_mode = gimbal_cmd_recv.gimbal_mode;
     }
@@ -318,23 +363,12 @@ void GimbalTask()
     // VideoLinkMotorTask();
 
     // 设置反馈数据,主要是imu和yaw的ecd
-    // 1. 获取 Yaw 电机当前的连续累计弧度值 (解决 ±12.5 rad 跳变与 2PI 不匹配的问题)
-    float yaw_rad = 0.0f;
-    if (yaw_motor) {
-        yaw_rad = yaw_motor->measure.total_angle; // 使用 total_angle 替代 position，避免多圈溢出问题
+    if (yaw_motor_online != 0u && yaw_motor != NULL) {
+        float yaw_rad = yaw_motor->measure.total_angle; // What: 读取 yaw 电机连续机械角；Why: 底盘跟随偏角仍应基于真实机构相对位置而不是纯 IMU 世界角。
+        yaw_motor_single_round_cache_deg = NormalizeAngleTo360(yaw_rad * RAD_2_DEGREE); // What: 更新单圈机械角缓存；Why: 只在反馈可信时刷新，离线期间保持上次有效值。
     }
-
-    // 2. 将弧度转换为角度 ( 1 rad ≈ 57.3 deg )
-    float yaw_deg = yaw_rad * RAD_2_DEGREE;
-
-    // 3. 将角度归一化到 0 ~ 360 度 (对应单圈角度)
-    while (yaw_deg < 0.0f)
-        yaw_deg += 360.0f;
-    while (yaw_deg >= 360.0f)
-        yaw_deg -= 360.0f;
-
-    // 4. 赋值给反馈数据
-    gimbal_feedback_data.yaw_motor_single_round_angle = yaw_deg;
+    gimbal_feedback_data.yaw_motor_single_round_angle = yaw_motor_single_round_cache_deg;
+    gimbal_feedback_data.yaw_motor_online = yaw_motor_online;
     /* 防御性拷贝 IMU 数据 */
     if (gimba_IMU_data)
         gimbal_feedback_data.gimbal_imu_data = *gimba_IMU_data;

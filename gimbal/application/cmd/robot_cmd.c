@@ -59,6 +59,10 @@
 // 键盘平移状态归零阈值，作用是避免斜坡尾巴长期残留极小数值；
 // 原因是 CAN 下发浮点微小残值也会让底盘低速爬行，看起来像没停干净。
 #define KEYBOARD_CHASSIS_CMD_EPSILON 1.0f
+// What: 定义键盘 yaw 硬件校准替代键为 C；Why: 当前协议没有 N 键，C 在现工程未被占用，且和 B 自由模式相邻，现场单手切模式后继续校准更顺手。
+#define KEYBOARD_YAW_CALI_KEY Key_C
+// What: 定义 C 键触发 yaw 校准后的蜂鸣器短鸣时长；Why: 键盘入口只有单次上升沿，没有 VT03 长按那样的松手关断时机，因此必须给一个固定超时防止长响。
+#define KEYBOARD_YAW_CALI_BEEP_MS 200u
 // 键鼠长按连发速率单独定义，作用是让鼠标连发不依赖遥控拨杆分支；
 // 原因是本轮需要让键鼠和遥控器并行控制，不能复用函数内局部宏。
 #define MOUSE_BURST_FIRE_RATE 8.0f
@@ -162,9 +166,21 @@ static uint8_t keyboard_friction_toggle_last = 0;
 // 键盘小陀螺开关键上一拍电平，作用是检测 X 键上升沿；
 // 原因是用户要求 X 键按一次切一次，不能按住期间每拍重复翻转小陀螺状态。
 static uint8_t keyboard_spin_toggle_last = 0u;
+// 键盘自由模式开关键上一拍电平，作用是检测 B 键上升沿；
+// 原因是自由模式需要做锁存切换，不能把按住期间的持续电平误判成多次切换。
+static uint8_t keyboard_free_toggle_last = 0u;
+// 键盘 UI 刷新键上一拍电平，作用是检测 G 键上升沿；
+// 原因是 UI 整页重建只能发一次请求，不能在按住期间每拍都重复触发底盘板删页重画。
+static uint8_t keyboard_ui_refresh_last = 0u;
+// 键盘 yaw 硬件校准键上一拍电平，作用是检测 C 键上升沿；
+// 原因是当前 DBUS/VT03 键盘协议不包含 N 键，因此把校准入口映射到当前未占用且便于单手操作的 C。
+static uint8_t keyboard_yaw_cali_last = 0u;
 // 键盘小陀螺锁存状态，作用是让 X 键一次切换后持续保持小陀螺；
 // 原因是用户明确要求 X 键直接作为小陀螺开关，而不是按住才生效。
 static uint8_t keyboard_spin_mode_latched = 0u;
+// 键盘自由模式锁存状态，作用是让 B 键一次切换后持续保持“云台自由 + 底盘自由”；
+// 原因是用户要求按一下进入该模式，而不是全程按住某个键保持。
+static uint8_t keyboard_free_mode_latched = 0u;
 // 键盘平移当前平滑输出，作用是保存斜坡状态跨周期延续；
 // 原因是 `PrepareControlCommandBase()` 每拍都会清零瞬态命令，平滑状态必须独立保存。
 static float keyboard_vx_smoothed = 0.0f;
@@ -192,10 +208,39 @@ static uint8_t vt03_pause_longpress_handled = 0u;
 static uint8_t vt03_mode_sw_last = VT03_MODE_SW_INVALID;
 // What: 记录 yaw PID 复位请求剩余保持拍数；Why: 小陀螺切换是边沿事件，做成多拍保持可以避免调度先后不同导致 gimbal 漏掉这一拍复位请求。
 static uint8_t yaw_pid_reset_hold_ticks = 0u;
+// What: 记录 yaw 电机上一拍在线状态；Why: 复活边沿需要把目标贴回当前姿态，常态下则不应反复打断控制。
+static uint8_t last_yaw_motor_online = 0u;
+// What: 缓存最后一次可信的底盘跟随偏角；Why: yaw 电机离线时继续沿用这个值，比用脏机械角实时重算更安全。
+static float last_valid_offset_angle = 0.0f;
+// What: 记录键盘 C 键校准提示蜂鸣器的自动关断时刻；Why: 蜂鸣器驱动是纯电平语义，若不补一个截止时间，C 键入口触发后会一直响到别的路径碰巧关掉它。
+static uint32_t keyboard_yaw_cali_buzzer_deadline_ms = 0u;
 static void ResetChassisAuxState(void);
 static void SyncGimbalTargetToCurrentAttitude(void);
 static void RequestYawSpeedPIDReset(void);
 static void SyncGimbalTargetAndRequestYawReset(void);
+
+/**
+ * @brief 周期性处理键盘 yaw 校准提示蜂鸣器的自动关断
+ *
+ * @param now_ms 当前系统时间戳，单位 ms
+ */
+static void UpdateKeyboardYawCalibrationBuzzer(uint32_t now_ms)
+{
+    uint8_t vt03_hold_buzzer_active =
+        (uint8_t)(vt03_pause_last != 0u && vt03_pause_longpress_handled != 0u);
+
+    // What: 仅在键盘短鸣超时且没有被其它校准入口占用时自动关蜂鸣器；Why: VT03 长按和急停内八都有自己的显式关断时机，不能被这里提前截断。
+    if (keyboard_yaw_cali_buzzer_deadline_ms == 0u || cali_triggered != 0u || vt03_hold_buzzer_active != 0u) {
+        return;
+    }
+
+    if ((int32_t)(now_ms - keyboard_yaw_cali_buzzer_deadline_ms) >= 0) {
+        if (hint_buzzer != NULL) {
+            AlarmSetStatus(hint_buzzer, ALARM_OFF);
+        }
+        keyboard_yaw_cali_buzzer_deadline_ms = 0u;
+    }
+}
 
 /**
  * @brief 清空 VT03 Pause 本次按压会话状态
@@ -211,20 +256,21 @@ static void ResetVT03PausePressState()
         // What: 清状态时同步关掉校准提示蜂鸣器；Why: 长按校准提示只应覆盖当前一次按压，不能跨会话残留鸣叫。
         AlarmSetStatus(hint_buzzer, ALARM_OFF);
     }
+    keyboard_yaw_cali_buzzer_deadline_ms = 0u;
 }
 
 /**
- * @brief 执行一次 VT03 的 yaw 轴零点校准
+ * @brief 执行一次 yaw 轴硬件零点校准
  *
  */
-static void TriggerVT03YawCalibration()
+static void TriggerYawHardwareCalibration()
 {
-    // What: 统一封装 VT03 长按 Pause 的 yaw 轴校零动作；Why: 校零后还要同步软件零位和云台目标，集中处理能避免漏改导致恢复后跳头。
+    // What: 统一封装所有入口共用的 yaw 硬件校零动作；Why: 校零后还要同步软件零位和云台目标，集中处理能避免不同入口漏改导致恢复后跳头。
     GimbalCalibrate();
     yaw_align_offset_deg = 0.0f;
     SyncGimbalTargetAndRequestYawReset();
     if (hint_buzzer != NULL) {
-        // What: 校零真正触发后打开蜂鸣器提示；Why: 需要给操作者一个明确反馈，避免零力长按时不知道是否已经完成校准。
+        // What: 校零真正触发后打开蜂鸣器提示；Why: 需要给操作者一个明确反馈，避免触发后误以为命令没有生效。
         AlarmSetStatus(hint_buzzer, ALARM_ON);
     }
 }
@@ -265,10 +311,14 @@ static void ResetMouseFireState()
  */
 static void ResetMouseControlLatchState()
 {
-    // What: 一次性清空键鼠发射和小陀螺锁存；Why: 急停、断链和切源后不应继续沿用上一拍的火力或模式意图。
+    // What: 一次性清空键鼠发射、小陀螺和自由模式锁存；Why: 急停、断链和切源后不应继续沿用上一拍的火力或模式意图。
     ResetMouseFireState();
     keyboard_spin_toggle_last = 0u;
+    keyboard_free_toggle_last = 0u;
+    keyboard_ui_refresh_last = 0u;
+    keyboard_yaw_cali_last = 0u;
     keyboard_spin_mode_latched = 0u;
+    keyboard_free_mode_latched = 0u;
 }
 
 /**
@@ -379,6 +429,12 @@ static void SyncMouseKeyEdgeState(const RC_ctrl_t *mouse_key_source)
 
     // What: 切换输入源时对齐键盘 F 键和鼠标左键边沿历史；Why: 否则切源首拍会把“已经按住”的键误判成新的上升沿。
     keyboard_friction_toggle_last = (uint8_t)((key_bits >> Key_F) & 0x1u);
+    // What: 同步对齐 B 键边沿历史；Why: 主控切换时若用户正按着 B，不应在切源首拍被误判成新的自由模式切换。
+    keyboard_free_toggle_last = (uint8_t)((key_bits >> Key_B) & 0x1u);
+    // What: 同步对齐 G 键边沿历史；Why: 主控切换时用户若正按着 G，不应该在切源首拍误触发一次 UI 全量刷新。
+    keyboard_ui_refresh_last = (uint8_t)((key_bits >> Key_G) & 0x1u);
+    // What: 同步对齐 C 键边沿历史；Why: 自由模式校准必须只响应真实的新按下，不能在切源时被旧电平误触发。
+    keyboard_yaw_cali_last = (uint8_t)((key_bits >> KEYBOARD_YAW_CALI_KEY) & 0x1u);
     // What: 同步对齐 X 键边沿历史；Why: 主控切换时若用户正按着 X，不应在切源首拍被误判成新的小陀螺切换。
     keyboard_spin_toggle_last = (uint8_t)((key_bits >> Key_X) & 0x1u);
 }
@@ -551,6 +607,7 @@ static void PrepareControlCommandBase()
     chassis_cmd_send.chassis_speed_buff = 0;
     chassis_cmd_send.gimbal_pitch_deg = 0.0f; // What: 每拍先清空下发到底盘的云台pitch实测值；Why: 若后续链路异常或本拍未完成赋值，底盘 UI 不应沿用上一拍旧姿态。
     chassis_cmd_send.friction_on = 0u; // What: 每拍先清空摩擦轮状态位；Why: 断链或状态机切换时优先回到关闭显示，避免底盘 UI 继续误报摩擦轮开启。
+    chassis_cmd_send.ui_refresh_request = 0u; // What: 每拍默认清空 UI 刷新请求；Why: 该请求是一次性边沿语义，不能像锁存状态一样跨周期保留。
 #ifdef USE_ISLAND_ACTION
     chassis_cmd_send.front_track_mode = FRONT_TRACK_OFF;
     chassis_cmd_send.lift_mode = LIFT_OFF;
@@ -573,6 +630,8 @@ void RobotCMDInit()
 {
     // What: 开机时把 yaw 软件对齐基准直接设为 0 度；Why: 让底盘跟随从第一拍就围绕 DM 硬件零点闭环，避免首帧回到旧机械角。
     yaw_align_offset_deg = 0.0f;
+    last_yaw_motor_online = 0u;
+    last_valid_offset_angle = 0.0f;
     rc_data = RemoteControlInit(&huart3); // 修改为对应串口,注意如果是自研板dbus协议串口需选用添加了反相器的那个
     // What: 将 VT03 图传链路恢复到 USART6；Why: 当前实车接线走的是云台板 USART6，挂到 USART1 会导致 VT03 遥控和键鼠都收不到有效帧。
     video_link_data = VideoLinkKMInit(&huart6);
@@ -649,6 +708,12 @@ void RobotCMDInit()
 
 static void CalcOffsetAngle()
 {
+    if (gimbal_fetch_data.yaw_motor_online == 0u) {
+        // What: yaw 电机离线时冻结到底盘的 offset；Why: 掉电或复活抖动阶段的机械角不可信，继续重算只会把跟随参考污染掉。
+        chassis_cmd_send.offset_angle = last_valid_offset_angle;
+        return;
+    }
+
     // 获取你在 gimbal.c 中计算出的 0~360 度角度
     float gimbal_angle = gimbal_fetch_data.yaw_motor_single_round_angle;
 
@@ -670,6 +735,9 @@ static void CalcOffsetAngle()
     } else {
         chassis_cmd_send.offset_angle = error; // 例如 10 -> 10
     }
+
+    // What: 仅在 yaw 电机在线时刷新最后有效 offset 缓存；Why: 后续离线冻结必须拿最近一帧可信偏角，而不是默认值或抖动值。
+    last_valid_offset_angle = chassis_cmd_send.offset_angle;
 }
 /**
  * @brief  紧急停止,包括遥控器左上侧拨轮打满/重要模块离线/双板通信失效等
@@ -788,12 +856,7 @@ static void RemoteControlSetDT7(void)
         if (is_inner_eight) {
             if (cali_triggered == 0u) {
                 // 1. 调用校准
-                GimbalCalibrate();
-                // 手动 DM 校零后，将底盘跟随基准切到运行时零位。
-                // 原因是当前 yaw_motor_single_round_angle 会围绕 0 反馈，继续减旧机械角会让校零看起来“没生效”。
-                yaw_align_offset_deg = 0.0f;
-                // What: 校零后同步刷新目标并申请清 yaw 速度环状态；Why: 硬件零点已经变化，若还沿用旧参考和旧积分，恢复后极易瞬时回拉或歪头。
-                SyncGimbalTargetAndRequestYawReset();
+                TriggerYawHardwareCalibration();
 
                 // 2. 【新增】开启蜂鸣器提示
                 if (hint_buzzer != NULL) {
@@ -808,6 +871,7 @@ static void RemoteControlSetDT7(void)
                 if (hint_buzzer != NULL) {
                     AlarmSetStatus(hint_buzzer, ALARM_OFF);
                 }
+                keyboard_yaw_cali_buzzer_deadline_ms = 0u;
                 cali_triggered = 0u;
             }
         }
@@ -1090,7 +1154,7 @@ static void RemoteControlSetVT03(void)
                vt03_pause_longpress_handled == 0u &&
                (now_ms - vt03_pause_press_start_ms) >= VT03_PAUSE_CALIB_HOLD_MS) {
         // What: 零力中长按 2 秒后仅触发一次 yaw 校零；Why: DM 零点指令是重动作，同一次长按里重复发送会徒增风险且没有收益。
-        TriggerVT03YawCalibration();
+            TriggerYawHardwareCalibration();
         vt03_pause_longpress_handled = 1u;
     } else if (!pause_pressed && vt03_pause_last) {
         if (vt03_pause_press_started_in_zero_force != 0u && vt03_pause_longpress_handled == 0u) {
@@ -1180,6 +1244,9 @@ static void MouseKeySet()
     uint8_t video_link_online = IsVideoLinkControlReady();
     uint16_t key_bits = mouse_key_source->key[KEY_PRESS].keys;
     uint8_t friction_toggle_pressed = (uint8_t)((key_bits >> Key_F) & 0x1u);
+    uint8_t free_toggle_pressed = (uint8_t)((key_bits >> Key_B) & 0x1u);
+    uint8_t ui_refresh_pressed = (uint8_t)((key_bits >> Key_G) & 0x1u);
+    uint8_t yaw_cali_pressed = (uint8_t)((key_bits >> KEYBOARD_YAW_CALI_KEY) & 0x1u);
     uint8_t spin_toggle_pressed = (uint8_t)((key_bits >> Key_X) & 0x1u);
     int8_t keyboard_vx = (int8_t)((key_bits >> Key_W) & 0x1u) - (int8_t)((key_bits >> Key_S) & 0x1u);
     int8_t keyboard_vy = (int8_t)((key_bits >> Key_D) & 0x1u) - (int8_t)((key_bits >> Key_A) & 0x1u);
@@ -1249,13 +1316,43 @@ static void MouseKeySet()
     }
     keyboard_friction_toggle_last = friction_toggle_pressed;
 
+    if (free_toggle_pressed && !keyboard_free_toggle_last) {
+        // What: 用 B 键上升沿翻转“云台自由 + 底盘自由”锁存；Why: 用户希望按一下直接进入该模式，而不是依赖遥控器档位或持续按住按键。
+        keyboard_free_mode_latched = (uint8_t)!keyboard_free_mode_latched;
+        // What: 进入自由模式时主动清掉小陀螺锁存；Why: 自由模式与小陀螺控制语义互斥，保留旧锁存会导致模式争抢。
+        if (keyboard_free_mode_latched != 0u) {
+            keyboard_spin_mode_latched = 0u;
+        }
+        // What: 自由模式切换边沿统一贴齐当前姿态并清 yaw 残留；Why: 避免模式切换后继续追旧目标导致云台突跳。
+        SyncGimbalTargetAndRequestYawReset();
+    }
+    keyboard_free_toggle_last = free_toggle_pressed;
+
+    if (ui_refresh_pressed && !keyboard_ui_refresh_last) {
+        // What: 用 G 键上升沿触发一次底盘 UI 全量刷新；Why: 复用现有底盘 UI 重建入口，比临时拼局部刷新包更稳。
+        chassis_cmd_send.ui_refresh_request = 1u;
+    }
+    keyboard_ui_refresh_last = ui_refresh_pressed;
+
     if (spin_toggle_pressed && !keyboard_spin_toggle_last) {
         // What: 用 X 键上升沿翻转键鼠小陀螺锁存；Why: 用户要求按一次切一次，而不是按住期间临时进入小陀螺。
         keyboard_spin_mode_latched = (uint8_t)!keyboard_spin_mode_latched;
+        // What: 进入小陀螺时主动退出自由模式锁存；Why: 两种模式都要最终覆盖底盘/云台状态，互斥处理能避免分支互相打架。
+        if (keyboard_spin_mode_latched != 0u) {
+            keyboard_free_mode_latched = 0u;
+        }
         // What: 小陀螺开关切换时同步云台目标到当前姿态；Why: 避免在自由/跟随/小陀螺之间切换时继续追旧目标产生瞬时跳变。
         SyncGimbalTargetAndRequestYawReset();
     }
     keyboard_spin_toggle_last = spin_toggle_pressed;
+
+    if (yaw_cali_pressed && !keyboard_yaw_cali_last && keyboard_free_mode_latched != 0u) {
+        // What: 仅在自由模式锁存生效时响应一次 yaw 硬件校准；Why: 硬件零位校准是重动作，限制在明确的自由模式下更不容易误触。
+        TriggerYawHardwareCalibration();
+        // What: 为 C 键校准安排一次限时短鸣；Why: 键盘入口是边沿触发，没有独立松手回调可以关蜂鸣器，因此要靠定时自动收口。
+        keyboard_yaw_cali_buzzer_deadline_ms = now_ms + KEYBOARD_YAW_CALI_BEEP_MS;
+    }
+    keyboard_yaw_cali_last = yaw_cali_pressed;
 
     // 鼠标首次请求开火时锁存摩擦轮开启，作用是让后续短按/长按都不需要额外按键预热；
     // 原因是你本轮只要求接入 mouse.press_l，不能再依赖 F/Q/E 之类的旧调试键位。
@@ -1294,6 +1391,10 @@ static void MouseKeySet()
         // What: X 锁存生效后在键鼠层最终覆盖成小陀螺 + 陀螺仪模式；Why: 用户要求 X 优先于当前遥控器挡位，直到再次按 X 或被安全链清锁。
         chassis_cmd_send.chassis_mode = CHASSIS_ROTATE;
         gimbal_cmd_send.gimbal_mode = GIMBAL_GYRO_MODE;
+    } else if (keyboard_free_mode_latched != 0u) {
+        // What: B 锁存生效后最终覆盖成底盘自由平移 + 云台自由控制；Why: 用户要求键盘提供一个不依赖遥控器档位的自由模式快捷入口。
+        chassis_cmd_send.chassis_mode = CHASSIS_NO_FOLLOW;
+        gimbal_cmd_send.gimbal_mode = GIMBAL_FREE_MODE;
     }
 
     mouse_left_last = mouse_left_pressed;
@@ -1314,6 +1415,13 @@ void RobotCMDTask()
 #endif // GIMBAL_BOARD
     SubGetMessage(shoot_feed_sub, &shoot_fetch_data);
     SubGetMessage(gimbal_feed_sub, &gimbal_fetch_data);
+    if (gimbal_fetch_data.yaw_motor_online != 0u && last_yaw_motor_online == 0u) {
+        // What: yaw 电机复活第一拍就把目标贴回当前姿态；Why: 死亡期间若仍保留旧 yaw 目标，恢复后云台会试图回拉到旧参考导致头发歪。
+        SyncGimbalTargetAndRequestYawReset();
+    }
+    last_yaw_motor_online = gimbal_fetch_data.yaw_motor_online;
+    // What: 周期性轮询 C 键校准短鸣是否到时；Why: 蜂鸣器是电平保持设备，短鸣结束必须由主任务主动关断。
+    UpdateKeyboardYawCalibrationBuzzer((uint32_t)DWT_GetTimeline_ms());
 
     // 每拍先清理一次瞬态控制量，作用是让后续遥控器和键鼠都从同一安全基线开始叠加；
     // 原因是当前 `robot_cmd` 已经不是互斥控制源，直接沿用上拍结果会产生残留指令。

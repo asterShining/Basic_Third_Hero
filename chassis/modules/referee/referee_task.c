@@ -206,6 +206,7 @@ static Graph_Data_t ui_static_figures[UI_STATIC_FIGURE_COUNT];
 static Graph_Data_t ui_move_figures[UI_MOVE_FIGURE_COUNT];
 static Graph_Data_t ui_data_figures[UI_DATA_FIGURE_COUNT];
 static String_Data_t ui_strings[UI_STRING_COUNT];
+static volatile uint8_t ui_manual_refresh_request = 0u; // What: 锁存外部手动刷新请求；Why: UI 任务与底盘控制任务分离，需用轻量标志跨任务触发重建。
 
 static void DetermineRobotID(void);
 static void UIRuntimeReset(void);
@@ -262,11 +263,25 @@ void MyUIInit(void)
             (unsigned int)referee_recv_info->referee_id.Cilent_ID);
 }
 
+void UIRequestRefresh(void)
+{
+    // What: 提供给底盘控制层的一次性 UI 刷新接口；Why: 外部不应直接调用本文件 static 状态机入口，保持任务边界清晰更安全。
+    ui_manual_refresh_request = 1u;
+}
+
 void UITask(void)
 {
     const uint32_t now_tick_ms = HAL_GetTick();
 
     if (referee_recv_info == NULL || interactive_data == NULL) {
+        return;
+    }
+
+    if (ui_manual_refresh_request != 0u) {
+        // What: 收到手动刷新后立即重新走 delete-all 建图流程；Why: 复用现有稳定重建路径，比临时发送一串局部 Change 包更不容易漏层。
+        ui_manual_refresh_request = 0u;
+        LOGINFO("[ui] manual_refresh");
+        UIStartInitCycle(now_tick_ms);
         return;
     }
 
