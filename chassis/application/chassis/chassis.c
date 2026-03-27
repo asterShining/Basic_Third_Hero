@@ -114,6 +114,8 @@ static float real_wz = 0.0f; // 真实旋转速度 deg/s
 #define SPIN_WAVE_REFRESH_MAX_MS 520u // What: 定义无节奏变速目标的最长刷新时间；Why: 让目标保持时间也带随机性，避免形成“固定拍点”。
 #define SPIN_WAVE_SMOOTH_ALPHA 0.06f // What: 定义当前波形向随机目标逼近的平滑系数；Why: 让无节奏变速保持连续过渡，不出现突兀阶跃。
 #define TRANSLATION_PRIORITY_RATIO 0.6f // What: 定义平移优先系数；Why: 贴边吃功率时仍优先保证平移手感，避免横移一给就把整车拖死。
+#define CHASSIS_SUPER_CAP_POWER_BONUS_W 60.0f // What: 定义超电介入时附加到底盘的额外功率预算；Why: 用户要求放大上限，让超电放电效果在平地机动中也更明显。
+#define CHASSIS_TOTAL_POWER_LIMIT_MAX_W 150.0f // What: 定义超电介入后的底盘总功率硬上限；Why: 与超电协议允许的上限对齐，避免额外加成还没生效就被旧的 130W 截断。
 
 static float spin_power_base_wz = SPIN_BASE_INIT_SPEED; // What: 缓存小陀螺基础角速度闭环状态；Why: 通过跨周期累积调节把实际功率稳定贴到上限附近。
 static float spin_wave_current = 0.0f; // What: 缓存当前无节奏变速波形值；Why: 通过连续状态平滑逼近随机目标，避免每拍直接跳变。
@@ -636,14 +638,14 @@ void ChassisTask()
         (chassis_cmd_recv.cap_mode == SUPER_CAP_ON || fabsf(Chassis_IMU_data->Pitch) > CHASSIS_SLOPE_THRESHOLD) &&
         cap->rx_msg.capEnergyPercent > 30 &&
         cap->tx_msg.enableDCDC == 1) {
-        // What: 将超电额外功率加成从 35W 提到 45W；Why: 让底盘在超电介入时放电更积极一点，但仍控制在“小幅上调”范围内。
-        final_power_limit += 45.0f;
+        // What: 在超电在线且允许介入时追加更大的功率预算；Why: 用户要求平时常开并增强放电体感，必须把爆发加成继续放大。
+        final_power_limit += CHASSIS_SUPER_CAP_POWER_BONUS_W;
     }
 #endif // USE_SUPER_CAP
 
     // 4. 最终限幅保护
-    if (final_power_limit > 130.0f)
-        final_power_limit = 130.0f; // What: 将底盘侧总功率硬上限提高到 130W；Why: 避免新增的超电加成被原先 120W 上限立刻截断。
+    if (final_power_limit > CHASSIS_TOTAL_POWER_LIMIT_MAX_W)
+        final_power_limit = CHASSIS_TOTAL_POWER_LIMIT_MAX_W; // What: 将底盘侧总功率硬上限放宽到 150W；Why: 让更大的超电加成真正落到底盘电机功率控制，而不是被旧上限提前卡死。
     // 5. 设置给底盘功率控制算法 (这个函数控制电机的电流)
     SetPowerLimit(final_power_limit);
 

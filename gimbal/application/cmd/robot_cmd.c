@@ -1464,6 +1464,10 @@ void RobotCMDTask()
 
     // 推送消息,双板通信,视觉通信等
     // 其他应用所需的控制数据在remotecontrolsetmode和mousekeysetmode中完成设置
+    if (chassis_cmd_send.chassis_mode != CHASSIS_ZERO_FORCE) {
+        // What: 机器人处于有力模式时默认请求超电介入；Why: 用户要求平时超电常开，且底盘侧额外功率策略依赖 cap_mode，必须在非零力态持续置位。
+        chassis_cmd_send.cap_mode = SUPER_CAP_ON;
+    }
     chassis_cmd_send.gimbal_gyro_z = gimbal_fetch_data.gimbal_imu_data.Gyro[2] * RAD_2_DEGREE; // 假设原始是弧度，转成度
     chassis_cmd_send.gimbal_pitch_deg = gimbal_fetch_data.gimbal_imu_data.Pitch; // What: 把云台实际pitch姿态随底盘命令一起下发；Why: 底盘裁判 UI 的俯仰滑块必须跟随机构真实位置实时移动。
     chassis_cmd_send.friction_on = (shoot_cmd_send.friction_mode == FRICTION_ON) ? 1u : 0u; // What: 把摩擦轮真实启停状态显式下发到底盘；Why: fric 指示要反映上板最终发射使能，而不是底盘侧猜测。
