@@ -72,6 +72,8 @@
 #define VT03_MODE_SW_INVALID 0xFFu
 // What: 定义 yaw PID 复位请求保持拍数；Why: `message_center` 队列深度只有 1，边沿请求只发一拍有可能被下一拍覆盖，因此需要短暂保持几拍确保 gimbal 侧必然收到。
 #define YAW_PID_RESET_HOLD_TICKS 4u
+// What: 定义底盘跟随接管请求保持拍数；Why: 双板任务相位可能错开，只发单拍容易被覆盖，保持几拍才能确保底盘板收到“小陀螺退跟随”边沿。
+#define FOLLOW_TRANSITION_REQUEST_HOLD_TICKS 4u
 
 typedef enum {
     CONTROL_SOURCE_NONE = 0,
@@ -124,7 +126,7 @@ BMI088_Data_t bmi088_data;
 // 定义一个静态变量来保存上一次的开关状态，初始化为下（急停/停止状态）
 static uint16_t last_switch_right = RC_SW_DOWN;
 static uint16_t last_switch_left = RC_SW_DOWN; // What: 保存左拨杆上一拍状态；Why: 上岛逻辑依赖中位切换边沿，不能把持续保持误判成重复触发。
-// What: 保存底盘跟随使用的 yaw 软件对齐基准角；Why: 初始值必须与云台对正角保持一致，这能          避免每次开机偏置角度均为 0.0f 而引发强行偏离 119度 或者 358度 安装位的严重 bug。
+// What: 保存底盘跟随使用的 yaw 软件对齐基准角；Why: 当前链路已统一围绕 DM 硬件零点闭环，保留独立变量是为了后续手动校零时仍有单一基准可改。
 static float yaw_align_offset_deg = YAW_CHASSIS_ALIGN_DEG;
 static uint8_t friction_switch_state = 0u; // What: 记录遥控器摩擦轮锁存状态；Why: 左拨杆上拨需要做一次一切换而不是按住就反复翻转。
 static uint8_t fire_mode_state = 0u; // What: 记录当前遥控器发射模式；Why: 保留现有单发/二连发/连发切换状态，不把上岛迁移变成发射重构。
@@ -188,13 +190,18 @@ static uint8_t vt03_pause_zero_force_latched = 0u;
 static uint8_t vt03_mode_sw_last = VT03_MODE_SW_INVALID;
 // What: 记录 yaw PID 复位请求剩余保持拍数；Why: 小陀螺切换是边沿事件，做成多拍保持可以避免调度先后不同导致 gimbal 漏掉这一拍复位请求。
 static uint8_t yaw_pid_reset_hold_ticks = 0u;
+// What: 记录底盘跟随接管请求剩余保持拍数；Why: 退出小陀螺进跟随时，底盘板必须稳定收到边沿才能进入先刹停再回正的接管窗口。
+static uint8_t follow_transition_request_hold_ticks = 0u;
 // What: 记录 yaw 电机上一拍在线状态；Why: 复活边沿需要把目标贴回当前姿态，常态下则不应反复打断控制。
 static uint8_t last_yaw_motor_online = 0u;
 // What: 缓存最后一次可信的底盘跟随偏角；Why: yaw 电机离线时继续沿用这个值，比用脏机械角实时重算更安全。
 static float last_valid_offset_angle = 0.0f;
+// What: 记录上一拍最终下发到底盘的模式；Why: 底盘模式会被遥控器、VT03 和键鼠锁存多次覆盖，只有在最终结果层面检测边沿才不会漏掉小陀螺退跟随。
+static chassis_mode_e last_effective_chassis_mode = CHASSIS_ZERO_FORCE;
 static void ResetChassisAuxState(void);
 static void SyncGimbalTargetToCurrentAttitude(void);
 static void RequestYawSpeedPIDReset(void);
+static void RequestFollowTransition(void);
 static void SyncGimbalTargetAndRequestYawReset(void);
 
 
@@ -294,6 +301,17 @@ static void RequestYawSpeedPIDReset(void)
     // What: 本拍立即拉高 yaw PID 复位请求并启动多拍保持；Why: 小陀螺切换边沿如果只发单拍，可能被下一拍普通命令覆盖，导致 gimbal 侧漏复位。
     gimbal_cmd_send.yaw_pid_reset_request = 1u;
     yaw_pid_reset_hold_ticks = YAW_PID_RESET_HOLD_TICKS;
+}
+
+/**
+ * @brief 请求底盘侧进入“小陀螺退跟随”接管窗口
+ *
+ */
+static void RequestFollowTransition(void)
+{
+    // What: 本拍立即拉高底盘接管请求并启动多拍保持；Why: 退出小陀螺到跟随是边沿事件，保持几拍才能避免双板调度相位错开时底盘漏收。
+    chassis_cmd_send.follow_transition_request = 1u;
+    follow_transition_request_hold_ticks = FOLLOW_TRANSITION_REQUEST_HOLD_TICKS;
 }
 
 /**
@@ -529,6 +547,7 @@ static void PrepareControlCommandBase()
     chassis_cmd_send.gimbal_pitch_deg = 0.0f; // What: 每拍先清空下发到底盘的云台pitch实测值；Why: 若后续链路异常或本拍未完成赋值，底盘 UI 不应沿用上一拍旧姿态。
     chassis_cmd_send.friction_on = 0u; // What: 每拍先清空摩擦轮状态位；Why: 断链或状态机切换时优先回到关闭显示，避免底盘 UI 继续误报摩擦轮开启。
     chassis_cmd_send.ui_refresh_request = 0u; // What: 每拍默认清空 UI 刷新请求；Why: 该请求是一次性边沿语义，不能像锁存状态一样跨周期保留。
+    chassis_cmd_send.follow_transition_request = 0u; // What: 每拍默认清空底盘跟随接管请求；Why: 该请求只表达一次模式边沿，不能像持续模式值一样长期保持。
 #ifdef USE_ISLAND_ACTION
     chassis_cmd_send.front_track_mode = FRONT_TRACK_OFF;
     chassis_cmd_send.lift_mode = LIFT_OFF;
@@ -553,6 +572,8 @@ void RobotCMDInit()
     yaw_align_offset_deg = 0.0f;
     last_yaw_motor_online = 0u;
     last_valid_offset_angle = 0.0f;
+    last_effective_chassis_mode = CHASSIS_ZERO_FORCE;
+    follow_transition_request_hold_ticks = 0u;
     rc_data = RemoteControlInit(&huart3); // 修改为对应串口,注意如果是自研板dbus协议串口需选用添加了反相器的那个
     // What: 将 VT03 图传链路恢复到 USART6；Why: 当前实车接线走的是云台板 USART6，挂到 USART1 会导致 VT03 遥控和键鼠都收不到有效帧。
     video_link_data = VideoLinkKMInit(&huart6);
@@ -731,6 +752,7 @@ static void ApplyRemoteGimbalStickControl(float rocker_lx, float rocker_ly, int1
     // What: 仅在低角速度且非小陀螺工况下，才把 yaw 目标缓慢拉向当前反馈；Why: 原逻辑在小陀螺时会把真实扰动当成“新目标”写回去，表现成云台越转越歪。
     if (rocker_lx == 0.0f &&
         chassis_cmd_send.chassis_mode != CHASSIS_ROTATE &&
+        chassis_cmd_send.chassis_mode != CHASSIS_FOLLOW_GIMBAL_YAW &&
         yaw_gyro_dps < YAW_DRIFT_LOCK_GYRO_TH_DPS &&
         yaw_gyro_dps > -YAW_DRIFT_LOCK_GYRO_TH_DPS) {
         gimbal_cmd_send.yaw = YAW_DRIFT_LOCK_COEF * gimbal_cmd_send.yaw +
@@ -1040,22 +1062,16 @@ static void RemoteControlSetVT03(void)
 
     pause_pressed = video_link_remote_state->pause_button_down;
     if (pause_pressed && !vt03_pause_last) {
+        // What: Pause 上升沿翻转零力锁存；Why: 短按一次进零力、再短按一次退零力，松开沿不操作，否则短按会先进后出等于没效果。
         if (vt03_pause_zero_force_latched == 0u) {
-            // What: 非零力态按下 Pause 时立即进入零力；Why: 保留 VT03 原有短按失能入口
             vt03_pause_zero_force_latched = 1u;
-            vt03_fn_right_last = video_link_remote_state->fn_right_button_down;
-            vt03_trigger_last = video_link_remote_state->trigger_button_down;
-            vt03_mode_sw_last = video_link_remote_state->mode_sw;
-        }
-    } else if (!pause_pressed && vt03_pause_last) {
-        if (vt03_pause_zero_force_latched != 0u) {
-            // What: 零力中短按并松开时退出零力；Why: 用户要求 Pause 在零力态下短按恢复有力，而不是继续锁在停止状态。
+        } else {
             vt03_pause_zero_force_latched = 0u;
-            vt03_fn_right_last = video_link_remote_state->fn_right_button_down;
-            vt03_trigger_last = video_link_remote_state->trigger_button_down;
-            vt03_mode_sw_last = video_link_remote_state->mode_sw;
             SyncGimbalTargetAndRequestYawReset();
         }
+        vt03_fn_right_last = video_link_remote_state->fn_right_button_down;
+        vt03_trigger_last = video_link_remote_state->trigger_button_down;
+        vt03_mode_sw_last = video_link_remote_state->mode_sw;
     }
     vt03_pause_last = pause_pressed;
 
@@ -1326,6 +1342,12 @@ void RobotCMDTask()
         RemoteControlSet(active_control_source);
         MouseKeySet();
     }
+    if (last_effective_chassis_mode == CHASSIS_ROTATE &&
+        chassis_cmd_send.chassis_mode == CHASSIS_FOLLOW_GIMBAL_YAW) {
+        // What: 仅在最终有效模式从小陀螺切到底盘跟随时请求接管窗口；Why: 只有最终输出层的边沿才覆盖了遥控器、VT03 与键鼠锁存的全部竞争结果。
+        RequestFollowTransition();
+    }
+    last_effective_chassis_mode = chassis_cmd_send.chassis_mode;
 
     // EmergencyHandler(); // 处理模块离线和遥控器急停等紧急情况
 
@@ -1345,6 +1367,11 @@ void RobotCMDTask()
     if (chassis_cmd_send.chassis_mode != CHASSIS_ZERO_FORCE) {
         // What: 机器人处于有力模式时默认请求超电介入；Why: 用户要求平时超电常开，且底盘侧额外功率策略依赖 cap_mode，必须在非零力态持续置位。
         chassis_cmd_send.cap_mode = SUPER_CAP_ON;
+    }
+    if (follow_transition_request_hold_ticks != 0u) {
+        // What: 在请求后的若干拍持续下发底盘跟随接管位；Why: 双板命令缓冲只保留最新帧，持续几拍才能避免边沿请求被覆盖丢失。
+        chassis_cmd_send.follow_transition_request = 1u;
+        follow_transition_request_hold_ticks--;
     }
     chassis_cmd_send.gimbal_gyro_z = gimbal_fetch_data.gimbal_imu_data.Gyro[2] * RAD_2_DEGREE; // 假设原始是弧度，转成度
     chassis_cmd_send.gimbal_pitch_deg = gimbal_fetch_data.gimbal_imu_data.Pitch; // What: 把云台实际pitch姿态随底盘命令一起下发；Why: 底盘裁判 UI 的俯仰滑块必须跟随机构真实位置实时移动。

@@ -31,7 +31,7 @@
 
 /* 机器人重要参数定义,注意根据不同机器人进行修改,浮点数需要以.0或f结尾,无符号以u结尾 */
 // 云台参数
-#define YAW_CHASSIS_ALIGN_DEG 358.327972f // What: 固定记录云台与底盘机械对正时的 yaw 单圈硬件角度；Why: 该值与旧 DJI 风格硬编码 `2711` 等价，先保证行为不变，再允许后续按 Ozone 读数直接覆盖。
+#define YAW_CHASSIS_ALIGN_DEG 0.0f // What: 将 yaw 对正基准统一成 DM 硬件零点 0 度；Why: cmd 初始化与 offset 计算都已围绕 0 度闭环，继续保留旧机械角只会让双板调试语义分叉。
 #define PITCH_HORIZON_ECD 0 // 云台处于水平位置时编码器值,若对云台有机械改动需要修改
 #define PITCH_MAX_ANGLE 34 // What: 将云台上抬软件限位收紧到 25 度；Why: 用户反馈 45 度抬头过高，降低上限同时保留足够仰角空间。
 #define PITCH_MIN_ANGLE -11 // 云台陀螺仪竖直方向最小角度
@@ -224,6 +224,7 @@ typedef struct
     float gimbal_pitch_deg; // What: 把云台实际pitch角随双板命令发送到底盘；Why: 底盘板 UI 需要基于机构真实位置驱动俯仰滑块。
     uint8_t friction_on; // What: 把摩擦轮实际启停状态随双板命令发送到底盘；Why: 底盘板 UI 的 fric 指示必须和上板发射使能保持一致。
     uint8_t ui_refresh_request; // What: 发送一次性 UI 刷新请求到底盘板；Why: 手动重绘必须复用现有双板命令链，而不是额外开一条旁路。
+    uint8_t follow_transition_request; // What: 显式标记“小陀螺退跟随”的接管边沿；Why: 双板链路是覆盖式最新帧语义，只靠模式值本身无法稳定表达边沿事件。
 #ifdef USE_ISLAND_ACTION // [条件编译] 仅在启用上岛机构时包含辅助机构控制字段
     front_track_mode_e front_track_mode; // What: 独立描述前履带开关状态；Why: 避免复用底盘主模式后让跟随与上岛辅助机构互相覆盖
     lift_mode_e lift_mode; // What: 独立描述抬升状态机；Why: 让抬升保持与调高语义在双板两侧都保持一致
