@@ -31,8 +31,7 @@
 
 /* 机器人重要参数定义,注意根据不同机器人进行修改,浮点数需要以.0或f结尾,无符号以u结尾 */
 // 云台参数
-#define YAW_CHASSIS_ALIGN_ECD 2711 // 云台和底盘对齐指向相同方向时的电机编码器值,若对云台有机械改动需要修改
-#define YAW_ECD_GREATER_THAN_4096 0 // ALIGN_ECD值是否大于4096,是为1,否为0;用于计算云台偏转角度
+#define YAW_CHASSIS_ALIGN_DEG 358.327972f // What: 固定记录云台与底盘机械对正时的 yaw 单圈硬件角度；Why: 该值与旧 DJI 风格硬编码 `2711` 等价，先保证行为不变，再允许后续按 Ozone 读数直接覆盖。
 #define PITCH_HORIZON_ECD 0 // 云台处于水平位置时编码器值,若对云台有机械改动需要修改
 #define PITCH_MAX_ANGLE 34 // What: 将云台上抬软件限位收紧到 25 度；Why: 用户反馈 45 度抬头过高，降低上限同时保留足够仰角空间。
 #define PITCH_MIN_ANGLE -11 // 云台陀螺仪竖直方向最小角度

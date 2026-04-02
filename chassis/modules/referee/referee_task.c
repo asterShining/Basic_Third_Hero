@@ -36,9 +36,9 @@
 #define UI_COORD_MAX 2047u
 
 #define UI_CROSSHAIR_START_X 585u
-#define UI_CROSSHAIR_START_Y 653u
+#define UI_CROSSHAIR_START_Y 427u // What: 基准线在540基础上再下移113像素；Why: 用户要求继续向下调整准星位置。
 #define UI_CROSSHAIR_END_X 1330u
-#define UI_CROSSHAIR_END_Y 658u
+#define UI_CROSSHAIR_END_Y 432u // What: 终点Y同步下移113像素；Why: 保持起终点水平一致。
 #define UI_CROSSHAIR_WIDTH 2u // What: 将中心上方黄色准星线改细；Why: 用户明确要求弱化该线条的视觉占比。
 
 #define UI_BUFFER_START_X 563u

@@ -13,6 +13,4 @@ void GimbalInit();
  */
 void GimbalTask();
 
-void GimbalCalibrate();
-
 #endif // GIMBAL_H

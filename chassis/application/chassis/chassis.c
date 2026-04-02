@@ -40,11 +40,7 @@
 #define LIFT_RELATIVE_MIN_ANGLE -20.0f // What: 定义相对进入点的最小抬升角；Why: 给机构保留回落空间并避免误操作顶到底部极限
 #define LIFT_RELATIVE_MAX_ANGLE 80.0f // What: 定义相对进入点的最大抬升角；Why: 用保守软件限位先保护机构，后续可按实车行程再放宽
 #define CHASSIS_TASK_DT_FALLBACK 0.005f // What: 定义底盘任务积分后备周期；Why: DWT异常时仍按200Hz近似积分，避免抬升目标突变
-#define CHASSIS_FOLLOW_YAW_KP 24.0f // What: 定义历史跟随控制的位置环比例增益；Why: 直接按偏角线性生成回正角速度，便于恢复此前已经跑通过的手感。
-#define CHASSIS_FOLLOW_YAW_KD 0.1f // What: 定义历史跟随控制的底盘角速度阻尼增益；Why: D 项必须看被控对象自身角速度，才能在回正穿越时提供真实阻尼。
-#define CHASSIS_FOLLOW_YAW_KFF 1.2f // What: 定义历史跟随控制的云台角速度前馈增益；Why: 云台先转时提前带动底盘，减少单靠位置误差追赶造成的滞后。
-#define CHASSIS_FOLLOW_YAW_DEADBAND_DEG 0.5f // What: 定义历史跟随控制的小角度死区；Why: 回中附近直接忽略微小误差，避免机械间隙和测量噪声触发来回抖动。
-#define CHASSIS_FOLLOW_YAW_MAX_WZ_DPS 3500.0f // What: 定义历史跟随控制的角速度限幅；Why: 防止大偏角时外环给内环过猛目标，导致速度环饱和后再过冲。
+
 
 /* 底盘应用包含的模块和信息存储,底盘是单例模式,因此不需要为底盘建立单独的结构体 */
 #ifdef CHASSIS_BOARD // 如果是底盘板,使用板载IMU获取底盘转动角速度
@@ -96,6 +92,8 @@ static float real_vx = 0.0f; // 真实前进速度 m/s
 static float real_vy = 0.0f; // 真实横移速度 m/s
 static float real_wz = 0.0f; // 真实旋转速度 deg/s
 
+
+
 // ==========================================
 // 小陀螺模式配置
 // ==========================================
@@ -114,14 +112,67 @@ static float real_wz = 0.0f; // 真实旋转速度 deg/s
 #define SPIN_WAVE_REFRESH_MAX_MS 520u // What: 定义无节奏变速目标的最长刷新时间；Why: 让目标保持时间也带随机性，避免形成“固定拍点”。
 #define SPIN_WAVE_SMOOTH_ALPHA 0.06f // What: 定义当前波形向随机目标逼近的平滑系数；Why: 让无节奏变速保持连续过渡，不出现突兀阶跃。
 #define TRANSLATION_PRIORITY_RATIO 0.6f // What: 定义平移优先系数；Why: 贴边吃功率时仍优先保证平移手感，避免横移一给就把整车拖死。
-#define CHASSIS_SUPER_CAP_POWER_BONUS_W 60.0f // What: 定义超电介入时附加到底盘的额外功率预算；Why: 用户要求放大上限，让超电放电效果在平地机动中也更明显。
-#define CHASSIS_TOTAL_POWER_LIMIT_MAX_W 150.0f // What: 定义超电介入后的底盘总功率硬上限；Why: 与超电协议允许的上限对齐，避免额外加成还没生效就被旧的 130W 截断。
+#define DEFAULT_TEST_BUFFER_ENERGY_J 60.0f // What: 定义无裁判系统时的默认缓冲能量；Why: 场下调车也要能走通超电功率策略，不能因为没裁判就永远进不到激进分支。
+#define CHASSIS_SUPER_CAP_BONUS_LOW_W 35.0f // What: 定义超电低能量档的附加功率；Why: 电容电量不高时也先给一小档放电，让体感尽快从“没反应”变成“有帮助”。
+#define CHASSIS_SUPER_CAP_BONUS_MID_W 60.0f // What: 定义超电中能量档的附加功率；Why: 电容进入可用区后直接给明显增益，体现比基础模式更激进的输出。
+#define CHASSIS_SUPER_CAP_BONUS_HIGH_W 75.0f // What: 定义超电高能量档的附加功率；Why: 电容和裁判缓冲都充足时允许更猛地放电，把爆发优势真正打出来。
+#define CHASSIS_SUPER_CAP_ROTATE_EXTRA_W 10.0f // What: 定义小陀螺工况额外附加的超电功率；Why: 自旋时功率起伏最大，需要再补一档预算才能让实际转速更敢放。
+#define CHASSIS_SUPER_CAP_MIN_PERCENT 15.0f // What: 定义超电开始介入的最低电量百分比；Why: 把起放门槛从保守值下探，让超电更早参与而不是一直等到很满才出手。
+#define CHASSIS_SUPER_CAP_MID_PERCENT 35.0f // What: 定义超电中档功率的电量阈值；Why: 分档控制比单阈值更容易同时兼顾激进体感和低电量保护。
+#define CHASSIS_SUPER_CAP_HIGH_PERCENT 60.0f // What: 定义超电高档功率的电量阈值；Why: 只有电容余量明显充足时才拉到最高 bonus，避免长期贴顶后一下子掉空。
+#define CHASSIS_SUPER_CAP_MIN_BUFFER_J 15.0f // What: 定义超电开始介入的最小裁判缓冲能量；Why: 即使电容电量一般，只要裁判缓冲还厚，也允许先上低档爆发。
+#define CHASSIS_SUPER_CAP_MID_BUFFER_J 35.0f // What: 定义超电中档功率的裁判缓冲阈值；Why: 把裁判缓冲一起纳入决策，避免只看电容百分比导致机会窗口利用不足。
+#define CHASSIS_SUPER_CAP_HIGH_BUFFER_J 60.0f // What: 定义超电高档功率的裁判缓冲阈值；Why: 缓冲和电容都高时直接进入最猛档，让整车更敢吃功率。
+#define CHASSIS_TOTAL_POWER_LIMIT_MAX_W 165.0f // What: 定义超电介入后的底盘总功率硬上限；Why: 用户要求更激进，就把总预算再往上抬一档，但仍保留硬上限避免完全失控。
 
 static float spin_power_base_wz = SPIN_BASE_INIT_SPEED; // What: 缓存小陀螺基础角速度闭环状态；Why: 通过跨周期累积调节把实际功率稳定贴到上限附近。
 static float spin_wave_current = 0.0f; // What: 缓存当前无节奏变速波形值；Why: 通过连续状态平滑逼近随机目标，避免每拍直接跳变。
 static float spin_wave_target = 0.0f; // What: 缓存当前随机变速目标；Why: 让一段时间内的快慢趋势保持一致，而不是完全白噪声式乱跳。
 static uint32_t spin_wave_next_refresh_tick = 0u; // What: 记录下次刷新随机目标的时间戳；Why: 让每次目标切换间隔本身也不固定，进一步去掉节奏感。
 static uint32_t spin_wave_rng_state = 0x13572468u; // What: 保存轻量级伪随机状态；Why: 裸机/RTOS环境下不用标准库随机数也能稳定生成无节奏变速序列。
+
+#ifdef USE_SUPER_CAP
+static float GetAggressiveSuperCapBonus(float buffer_energy_j, uint8_t chassis_output_allowed)
+{
+    float cap_percent;
+    float bonus = 0.0f;
+
+    // What: 统一封装超电激进功率加成决策；Why: 超电阈值、错误保护和模式判断分散写在任务里很容易互相打架，抽成单函数更不容易改坏。
+    if (cap == NULL || cap->is_online == 0u || chassis_output_allowed == 0u) {
+        return 0.0f;
+    }
+
+    if (SuperCapGetErrorCode(cap) != 0u || SuperCapIsOutputDisabled(cap) != 0u) {
+        // What: 超电报真实错误或输出被禁用时直接不给 bonus；Why: 此时继续放大底盘功率预算只会制造“指令很猛但电源不给”的假象。
+        return 0.0f;
+    }
+
+    if (chassis_cmd_recv.cap_mode != SUPER_CAP_ON &&
+        fabsf(Chassis_IMU_data->Pitch) <= CHASSIS_SLOPE_THRESHOLD) {
+        // What: 非常规爆发模式且不在坡道时不介入激进 bonus；Why: 让超电加成仍受上层意图约束，避免全工况都顶着最高功率跑。
+        return 0.0f;
+    }
+
+    cap_percent = SuperCapGetEnergyPercent(cap);
+    if (cap_percent >= CHASSIS_SUPER_CAP_HIGH_PERCENT ||
+        buffer_energy_j >= CHASSIS_SUPER_CAP_HIGH_BUFFER_J) {
+        bonus = CHASSIS_SUPER_CAP_BONUS_HIGH_W;
+    } else if (cap_percent >= CHASSIS_SUPER_CAP_MID_PERCENT ||
+               buffer_energy_j >= CHASSIS_SUPER_CAP_MID_BUFFER_J) {
+        bonus = CHASSIS_SUPER_CAP_BONUS_MID_W;
+    } else if (cap_percent >= CHASSIS_SUPER_CAP_MIN_PERCENT ||
+               buffer_energy_j >= CHASSIS_SUPER_CAP_MIN_BUFFER_J) {
+        bonus = CHASSIS_SUPER_CAP_BONUS_LOW_W;
+    }
+
+    if (bonus > 0.0f && chassis_cmd_recv.chassis_mode == CHASSIS_ROTATE) {
+        // What: 小陀螺工况额外叠一档 bonus；Why: 自旋时轮组功率波动最大，只靠通用 bonus 往往还不够把转速真正托起来。
+        bonus += CHASSIS_SUPER_CAP_ROTATE_EXTRA_W;
+    }
+
+    return bonus;
+}
+#endif // USE_SUPER_CAP
 
 /**
  * @brief 计算小陀螺的旋转目标速度 (核心优化逻辑：平移优先)
@@ -253,6 +304,7 @@ static void ResetAdaptiveSpinBase(void)
     spin_wave_next_refresh_tick = 0u;
 }
 
+
 void ChassisInit()
 {
     Chassis_IMU_data = INS_Init();
@@ -314,7 +366,7 @@ void ChassisInit()
             .rx_id = 0x051, // 超级电容默认发送id,注意tx和rx在其他人看来是反的
         }
     };
-    cap = SuperCapInit(&cap_conf); // 初始化超级电容模块
+    cap = SuperCapInit(&cap_conf); // 初始化超级电容模块./.....
 #endif // USE_SUPER_CAP
 
     // 发布订阅初始化,如果为双板,则需要can comm来传递消息
@@ -402,23 +454,29 @@ static void LimitChassisOutput()
 #ifdef USE_SUPER_CAP
     // [条件编译] 超级电容功率控制逻辑
     if (cap) {
+        uint16_t referee_buffer_j = (uint16_t)DEFAULT_TEST_BUFFER_ENERGY_J;
+        float referee_limit = DEFAULT_TEST_POWER;
+        uint8_t chassis_output_allowed = 1u;
+
+        if (referee_data != NULL) {
+            referee_buffer_j = referee_data->PowerHeatData.buffer_energy;
+            referee_limit = referee_data->GameRobotState.chassis_power_limit;
+            if (referee_limit < 1.0f) {
+                referee_limit = DEFAULT_TEST_POWER;
+            }
+            chassis_output_allowed = (uint8_t)(referee_data->GameRobotState.power_management_chassis_output != 0u);
+        }
+
         // 1. 发送能量缓冲 (告诉超电当前裁判系统里还有多少缓冲能量)
-        // 保持原样，发送实时buffer是正确的，超电板会根据这个决定是否全力充电
-        cap->tx_msg.refereeEnergyBuffer = referee_data->PowerHeatData.buffer_energy;
+        // What: 通过现有 helper 下发裁判缓冲能量；Why: 统一复用范围限幅逻辑，避免后续超电协议调整后底盘侧还在直接写裸字段。
+        SuperCapSetEnergyBuffer(cap, referee_buffer_j);
 
         // 2. 发送功率限制
-        float referee_limit = referee_data->GameRobotState.chassis_power_limit;
-
-        float safe_limit = referee_limit;
-        if (safe_limit < 30.0f)
-            safe_limit = 30.0f; // 兆底防止过低
-
-        // 无论是否开启爆发模式，给超电的永远是"合法的电池功率上限"
-        cap->tx_msg.refereePowerLimit = (uint16_t)safe_limit;
+        // What: 始终把当前合法裁判功率限制同步给超电板；Why: 更激进的是底盘侧 bonus 策略，不是让超电板盲目突破裁判功率红线。
+        SuperCapSetPowerLimit(cap, (uint16_t)referee_limit);
 
         // What: 只要裁判系统允许底盘输出且超电在线，就持续发送 DCDC 使能请求；Why: 让 C 板侧忽略 bit7=128，避免“输出禁用”状态被上层再次锁死。
-        if (referee_data->GameRobotState.power_management_chassis_output != 0 &&
-            cap->is_online) {
+        if (chassis_output_allowed != 0u && cap->is_online) {
             cap->tx_msg.enableDCDC = 1;
         } else {
             cap->tx_msg.enableDCDC = 0;
@@ -597,6 +655,7 @@ void ChassisTask()
     chassis_cmd_recv = *(Chassis_Ctrl_Cmd_s *)CANCommGet(chasiss_can_comm);
 #endif // CHASSIS_BOARD
     gimbal_wz = chassis_cmd_recv.gimbal_gyro_z; // What: 使用最新一帧云台角速度前馈；Why: 避免先读取旧值再更新命令导致跟随支路固定滞后一个控制周期。
+
     if (chassis_cmd_recv.ui_refresh_request != 0u) {
         // What: 收到上板的一次性 UI 刷新请求后转交给裁判 UI 任务；Why: 真正的绘图发包必须在 UI 线程内串行执行，底盘控制线程不应直接插手。
         UIRequestRefresh();
@@ -619,33 +678,41 @@ void ChassisTask()
         }
     }
 
+    float referee_buffer_energy = DEFAULT_TEST_BUFFER_ENERGY_J;
+    uint8_t chassis_output_allowed = 1u;
+    if (referee_data != NULL) {
+        // What: 同步取一份裁判缓冲能量与输出许可；Why: 超电 bonus 需要和同一拍裁判状态对齐，不能只靠上一次的超电板回包做决策。
+        referee_buffer_energy = (float)referee_data->PowerHeatData.buffer_energy;
+        chassis_output_allowed = (uint8_t)(referee_data->GameRobotState.power_management_chassis_output != 0u);
+    }
+
     // 2. [新增] 平地/坡道功率缩放策略
-    // 平地：使用裁判系统限制的 75%，节省缓冲能量
-    // 坡道：使用裁判系统限制的 100%，全力冲坡
+    // 平地：当前同样使用裁判系统允许的 100%，优先把更激进的功率策略完整打出来
+    // 坡道：同样保持 100%，避免冲坡时再被额外的软件缩放拖慢
     float final_power_limit;
     if (fabsf(Chassis_IMU_data->Pitch) > CHASSIS_SLOPE_THRESHOLD) {
         // 坡道模式：使用 100% 功率
         final_power_limit = referee_power_limit * 1.00f;
     } else {
-        // 平地模式：使用 75% 功率
+        // 平地模式：同样使用 100% 功率
         final_power_limit = referee_power_limit * 1.0f;
     }
 
     // 3. [条件编译] 超电爆发功率策略
-    // 判断是否可以爆发 (电容模式开启 或 坡道检测触发 + 电容在线 + 电量充足 + DCDC已使能)
+    // 判断是否可以爆发 (上层允许超电或坡道触发，且超电在线、无故障、输出未禁用)
 #ifdef USE_SUPER_CAP
-    if (cap && cap->is_online &&
-        (chassis_cmd_recv.cap_mode == SUPER_CAP_ON || fabsf(Chassis_IMU_data->Pitch) > CHASSIS_SLOPE_THRESHOLD) &&
-        cap->rx_msg.capEnergyPercent > 30 &&
-        cap->tx_msg.enableDCDC == 1) {
-        // What: 在超电在线且允许介入时追加更大的功率预算；Why: 用户要求平时常开并增强放电体感，必须把爆发加成继续放大。
-        final_power_limit += CHASSIS_SUPER_CAP_POWER_BONUS_W;
+    {
+        float super_cap_bonus = GetAggressiveSuperCapBonus(referee_buffer_energy, chassis_output_allowed);
+        if (super_cap_bonus > 0.0f) {
+            // What: 按电容电量和裁判缓冲动态叠加更激进的超电 bonus；Why: 固定 bonus 只能在一种工况下合适，分档后才能既更猛又不至于一下子放空。
+            final_power_limit += super_cap_bonus;
+        }
     }
 #endif // USE_SUPER_CAP
 
     // 4. 最终限幅保护
     if (final_power_limit > CHASSIS_TOTAL_POWER_LIMIT_MAX_W)
-        final_power_limit = CHASSIS_TOTAL_POWER_LIMIT_MAX_W; // What: 将底盘侧总功率硬上限放宽到 150W；Why: 让更大的超电加成真正落到底盘电机功率控制，而不是被旧上限提前卡死。
+        final_power_limit = CHASSIS_TOTAL_POWER_LIMIT_MAX_W; // What: 将底盘侧总功率硬上限放宽到 165W；Why: 让更大的超电加成真正落到底盘电机功率控制，而不是被旧上限提前卡死。
     // 5. 设置给底盘功率控制算法 (这个函数控制电机的电流)
     SetPowerLimit(final_power_limit);
 
@@ -671,29 +738,29 @@ void ChassisTask()
         break;
     case CHASSIS_FOLLOW_GIMBAL_YAW: {
         ResetAdaptiveSpinBase(); // What: 跟随模式下复位小陀螺状态；Why: 跟随控制依赖独立角度环，不应继续带着自旋功率闭环状态运行。
-        float chassis_wz = Chassis_IMU_data->Gyro[Z] * RAD_2_DEGREE; // What: 读取底盘当前真实角速度；Why: 历史控制律的 D 项依赖底盘自身速度，才能抑制回正穿越和反向摆动。
-        float angle_err = chassis_cmd_recv.offset_angle; // What: 缓存当前底盘相对云台的偏角；Why: 在进入控制律前统一做死区处理，避免零点附近位置项频繁翻转。
+        const float follow_yaw_kp = 24.0f; // What: 跟随模式位置环比例增益；Why: 直接按角度误差生成回正速度，比二次项更线性且更容易调到“快但不炸”
+        const float follow_yaw_kd = 0.1f; // What: 跟随模式底盘角速度阻尼增益；Why: 使用底盘真实角速度做D项，专门抑制回中穿越和反向摆动
+        const float follow_yaw_kff = 1.2f; // What: 跟随模式云台角速度前馈增益；Why: 云台先动时提前拉动底盘，减少纯靠角度误差追赶带来的滞后
+        const float follow_yaw_deadband = 0.5f; // What: 跟随模式角度死区；Why: 回中附近直接清零小误差，避免机械间隙和噪声触发来回抖动
+        const float follow_yaw_max_wz = 3500.0f; // What: 跟随模式角速度输出上限；Why: 防止大角度时给电机速度环过猛目标，降低饱和后再过冲的概率
+        float chassis_wz = Chassis_IMU_data->Gyro[Z] * RAD_2_DEGREE; // What: 读取底盘当前真实角速度；Why: D项必须基于被控对象自身速度才能形成真实阻尼
+        float angle_err = chassis_cmd_recv.offset_angle; // What: 缓存当前底盘相对云台的角度误差；Why: 便于在进入控制律前统一做死区处理
 
-        // What: 小于死区时将偏角误差直接清零；Why: 历史版本就是靠死区切掉近零噪声，避免底盘在机械间隙附近来回找零。
-        if (fabsf(angle_err) < CHASSIS_FOLLOW_YAW_DEADBAND_DEG) {
-            angle_err = 0.0f;
+        if (fabsf(angle_err) < follow_yaw_deadband) {
+            angle_err = 0.0f; // What: 清零死区内误差；Why: 小角度时让前馈和阻尼接管，避免位置项在零点附近反复翻转
         }
 
-        // What: 按历史 P + D + FF 结构生成底盘跟随角速度；Why: 恢复此前更线性、可调性更强的控制律，同时保留云台先动时的前馈补偿。
-        chassis_cmd_recv.wz = -CHASSIS_FOLLOW_YAW_KP * angle_err - CHASSIS_FOLLOW_YAW_KD * chassis_wz - CHASSIS_FOLLOW_YAW_KFF * gimbal_wz;
-
-        // What: 对历史控制律输出做角速度限幅；Why: 避免大偏角时瞬时目标过大，把后级电机速度环推入饱和。
-        LIMIT_MIN_MAX(chassis_cmd_recv.wz, -CHASSIS_FOLLOW_YAW_MAX_WZ_DPS, CHASSIS_FOLLOW_YAW_MAX_WZ_DPS);
+        chassis_cmd_recv.wz = -follow_yaw_kp * angle_err - follow_yaw_kd * chassis_wz - follow_yaw_kff * gimbal_wz; // What: 生成底盘跟随云台的角速度指令；Why: 用P保证回中速度、用D抑制过冲、用前馈减少跟随滞后
+        LIMIT_MIN_MAX(chassis_cmd_recv.wz, -follow_yaw_max_wz, follow_yaw_max_wz); // What: 限制跟随模式角速度输出；Why: 避免外环瞬时给出过大目标把电机内环推入饱和
+        break;
     }
-    break;
     case CHASSIS_ROTATE: // 自旋,同时保持全向机动
     {
         // What: 按实时功率余量闭环抬高小陀螺基础角速度；Why: 让后级功率限制器长期工作在贴边状态，从而把合法功率尽量吃满。
         float base_wz = GetAdaptiveSpinBase(final_power_limit);
         // What: 在功率贴边基础上继续应用平移优先；Why: 小陀螺再猛也不能把驾驶员横移和前后机动直接抢没。
         chassis_cmd_recv.wz = OptimizedSpinSpeed(base_wz, chassis_cmd_recv.vx, chassis_cmd_recv.vy);
-    }
-    break;
+    } break;
     default:
         ResetAdaptiveSpinBase(); // What: 其它模式统一复位小陀螺状态；Why: 避免未覆盖模式残留旧的小陀螺闭环输出。
         break;

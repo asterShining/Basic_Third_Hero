@@ -109,15 +109,6 @@ static void ResetYawMotorRuntimeState(void)
     ResetPIDRuntimeState(&yaw_motor->speed_PID);
 }
 
-void GimbalCalibrate()
-{
-    if (yaw_motor != NULL) {
-        DMMotorCaliEncoder(yaw_motor);
-    }
-    // if (pitch_motor != NULL) {
-    //     DMMotorCaliEncoder(pitch_motor);
-    // }
-}
 void GimbalInit()
 {
     gimba_IMU_data = INS_Init(); // IMU先初始化,获取姿态数据指针赋给yaw电机的其他数据来源
@@ -229,7 +220,7 @@ void GimbalInit()
 
     // [新增] 初始化图传固定电机(M2006, CAN2 ID7)
     // Why: 在云台初始化中统一注册, 确保CAN外设就绪后再初始化电机
-    VideoLinkMotorInit();
+    // VideoLinkMotorInit();
 
     // GimbalCali_Init(&pitch_cali_handler);
 }
@@ -364,8 +355,8 @@ void GimbalTask()
 
     // 设置反馈数据,主要是imu和yaw的ecd
     if (yaw_motor_online != 0u && yaw_motor != NULL) {
-        float yaw_rad = yaw_motor->measure.total_angle; // What: 读取 yaw 电机连续机械角；Why: 底盘跟随偏角仍应基于真实机构相对位置而不是纯 IMU 世界角。
-        yaw_motor_single_round_cache_deg = NormalizeAngleTo360(yaw_rad * RAD_2_DEGREE); // What: 更新单圈机械角缓存；Why: 只在反馈可信时刷新，离线期间保持上次有效值。
+        float yaw_rad = yaw_motor->measure.position; // What: 直接读取 yaw 电机当前帧的单圈硬件位置；Why: 固定绝对编码值方案要避开 total_round 复活误判，不能再把多圈累计量混进 offset。
+        yaw_motor_single_round_cache_deg = NormalizeAngleTo360(yaw_rad * RAD_2_DEGREE); // What: 将单圈硬件位置统一换算到 0~360 度；Why: 固定对正角 YAW_CHASSIS_ALIGN_DEG 也是 0~360 度坐标，二者必须落在同一坐标系里比较。
     }
     gimbal_feedback_data.yaw_motor_single_round_angle = yaw_motor_single_round_cache_deg;
     gimbal_feedback_data.yaw_motor_online = yaw_motor_online;
