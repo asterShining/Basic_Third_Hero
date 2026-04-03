@@ -46,7 +46,10 @@
 // 鼠标灵敏度按当前车体手感分别调整，作用是让 yaw 更跟手、pitch 方向与实际操控一致；
 // 原因是用户反馈 yaw 偏慢且 pitch 反向，因此这里同时上调 yaw 系数并翻转 pitch 符号。
 #define MOUSE_YAW_SENSITIVITY_DEG (0.00012f * RAD_2_DEGREE) // What: 小幅上调键鼠 yaw 灵敏度；Why: 用户要求更跟手，但这次只做轻微增益，避免一次加太多后瞄准发飘。
-#define MOUSE_PITCH_SENSITIVITY_DEG (0.000018f * RAD_2_DEGREE)
+// What: 小幅上调键鼠 Pitch 灵敏度；Why: 用户希望抬头压头更跟手，但暂时只提高约25%，避免直接把超调和抖动风险放大。
+#define MOUSE_PITCH_SENSITIVITY_DEG (0.0000225f * RAD_2_DEGREE)
+// What: 定义遥控器 Pitch 灵敏度；Why: 让 DT7 和 VT03 共用一套更高一点的 Pitch 手感，而不是在函数体里留裸值难以统一调整。
+#define REMOTE_PITCH_SENSITIVITY 0.000375f
 // 键盘底盘指令沿用当前摇杆分支的量纲，作用是让 WSAD 和摇杆给到底盘的速度处于同一数量级；
 // 原因是底盘侧现在仍按“摇杆值×10”的历史量纲做解算，直接发 6.0f 会小到几乎看不出运动。
 #define KEYBOARD_CHASSIS_CMD_SCALE 6600.0f
@@ -798,7 +801,7 @@ static void EmergencyHandler()
 static void ApplyRemoteGimbalStickControl(float rocker_lx, float rocker_ly, int16_t dial_input)
 {
     float yaw_sensitivity = 0.001f;
-    float pitch_sensitivity = 0.0003f;
+    float pitch_sensitivity = REMOTE_PITCH_SENSITIVITY;
     float yaw_gyro_dps = gimbal_fetch_data.gimbal_imu_data.Gyro[2] * RAD_2_DEGREE;
 
     if (dial_input > 100) {
