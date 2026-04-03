@@ -16,8 +16,8 @@
 #define CALI_STABLE_TIME_MS 1500
 // 稳定后采集数据的窗口时间
 #define CALI_RECORD_TIME_MS 500
-// 任务循环调用周期 (假设GimbalTask是2ms一次，这里填2)
-#define CALI_TASK_PERIOD_MS 2
+// What: 定义标定状态机默认周期；Why: 当前 GimbalTask 标称运行在 5ms，继续沿用旧的 2ms 假设会让稳定等待时间整体失真。
+#define CALI_TASK_PERIOD_MS 5
 
 /* ================== 结构体定义 ================== */
 typedef enum {
@@ -62,9 +62,9 @@ void GimbalCali_Start(GimbalCali_Handler_t *handler);
  * @brief 标定状态机更新函数 (需在GimbalTask循环中持续调用)
  * * @param handler 句柄指针
  * @param motor   Pitch电机实例
- * @param current_roll_deg 当前IMU的Roll轴角度(单位:度)
+ * @param current_pitch_deg 当前IMU的物理 Pitch 角度(单位:度)
  * @return uint8_t 1: 正在标定中(屏蔽原控制逻辑) 0: 未标定(正常运行)
  */
-uint8_t GimbalCali_Update(GimbalCali_Handler_t *handler, DMMotorInstance *motor, float current_roll_deg);
+uint8_t GimbalCali_Update(GimbalCali_Handler_t *handler, DMMotorInstance *motor, float current_pitch_deg);
 
 #endif // GIMBAL_PITCH_CALI_H

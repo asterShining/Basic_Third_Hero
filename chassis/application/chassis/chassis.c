@@ -708,7 +708,7 @@ void ChassisTask()
     gimbal_wz = chassis_cmd_recv.gimbal_gyro_z; // What: 使用最新一帧云台角速度前馈；Why: 避免先读取旧值再更新命令导致跟随支路固定滞后一个控制周期。
     follow_transition_request_rise = (uint8_t)(chassis_cmd_recv.follow_transition_request != 0u && last_follow_transition_request == 0u); // What: 检测接管请求上升沿；Why: 上板会保持数拍请求位，底盘侧只应在真正的边沿触发一次接管窗口。
     rotate_to_follow_edge = (uint8_t)(last_chassis_mode == CHASSIS_ROTATE &&
-                                       chassis_cmd_recv.chassis_mode == CHASSIS_FOLLOW_GIMBAL_YAW); // What: 本地补一份小陀螺退跟随边沿检测；Why: 即使上板请求偶发漏拍，底盘也能靠本地模式边沿兜底进入接管。
+                                      chassis_cmd_recv.chassis_mode == CHASSIS_FOLLOW_GIMBAL_YAW); // What: 本地补一份小陀螺退跟随边沿检测；Why: 即使上板请求偶发漏拍，底盘也能靠本地模式边沿兜底进入接管。
     last_follow_transition_request = chassis_cmd_recv.follow_transition_request;
 
     if (chassis_cmd_recv.ui_refresh_request != 0u) {
@@ -794,11 +794,11 @@ void ChassisTask()
         break;
     case CHASSIS_FOLLOW_GIMBAL_YAW: {
         ResetAdaptiveSpinBase(); // What: 跟随模式下复位小陀螺状态；Why: 跟随控制依赖独立角度环，不应继续带着自旋功率闭环状态运行。
-        const float follow_yaw_kp = 14.0f; // What: 跟随模式位置环比例增益；Why: 直接按角度误差生成回正速度，比二次项更线性且更容易调到“快但不炸”
-        const float follow_yaw_kd = 1.2f; // What: 跟随模式底盘角速度阻尼增益；Why: 使用底盘真实角速度做D项，专门抑制回中穿越和反向摆动
-        const float follow_yaw_kff = 0.8f; // What: 跟随模式云台角速度前馈增益；Why: 云台先动时提前拉动底盘，减少纯靠角度误差追赶带来的滞后
-        const float follow_yaw_deadband = 1.0f; // What: 跟随模式角度死区；Why: 回中附近直接清零小误差，避免机械间隙和噪声触发来回抖动
-        const float follow_yaw_max_wz = 3500.0f; // What: 跟随模式角速度输出上限；Why: 防止大角度时给电机速度环过猛目标，降低饱和后再过冲的概率
+        const float follow_yaw_kp = 21.0f; // What: 跟随模式位置环比例增益；Why: 直接按角度误差生成回正速度，比二次项更线性且更容易调到“快但不炸”
+        const float follow_yaw_kd = 0.5f; // What: 跟随模式底盘角速度阻尼增益；Why: 使用底盘真实角速度做D项，专门抑制回中穿越和反向摆动
+        const float follow_yaw_kff = 1.3f; // What: 跟随模式云台角速度前馈增益；Why: 云台先动时提前拉动底盘，减少纯靠角度误差追赶带来的滞后
+        const float follow_yaw_deadband = 0.5f; // What: 跟随模式角度死区；Why: 回中附近直接清零小误差，避免机械间隙和噪声触发来回抖动
+        const float follow_yaw_max_wz = 7500.0f; // What: 跟随模式角速度输出上限；Why: 防止大角度时给电机速度环过猛目标，降低饱和后再过冲的概率
         float chassis_wz = Chassis_IMU_data->Gyro[Z] * RAD_2_DEGREE; // What: 读取底盘当前真实角速度；Why: D项必须基于被控对象自身速度才能形成真实阻尼
         float angle_err = 0.0f;
         float raw_angle_err = chassis_cmd_recv.offset_angle; // What: 缓存当前底盘相对云台的原始角度误差；Why: 接管启动时需要把滤波状态贴齐当前值，避免退出窗口首拍再跳一次。

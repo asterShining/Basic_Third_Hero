@@ -22,6 +22,21 @@
 // 新增 Offset 宏 (注意保留负号)
 #define PITCH_GRAVITY_OFFSET -5.0816f
 
+// What: 定义 Pitch 轴离心项前馈初始系数；Why: 先给小陀螺工况一个保守补偿起点，后续只需围绕这一处做上车标定。
+#define PITCH_CENTRIFUGAL_FEEDFORWARD_K 0.05f
+
+// What: 定义 Yaw 轴科氏项前馈初始系数；Why: 复合甩头时先补一层轻量耦合，减少仅靠误差环追赶带来的卡顿。
+#define YAW_CORIOLIS_FEEDFORWARD_K 0.06f
+
+// What: 定义前馈角速度低通时间常数；Why: 关节速率直接进入动力学耦合项对噪声很敏感，必须先做轻度滤波抑制抖动。
+#define GIMBAL_FEEDFORWARD_RATE_LPF_RC 0.020f
+// What: 定义云台前馈周期后备值；Why: DWT 首拍或异常值不能直接拿去更新滤波器，否则会把耦合项瞬间放大。
+#define GIMBAL_FEEDFORWARD_DT_FALLBACK 0.005f
+// What: 定义 Pitch 前馈总输出限幅；Why: 重力项之外新增耦合项后必须保留硬保护，防止未标定参数直接把扭矩顶满。
+#define PITCH_FEEDFORWARD_LIMIT 7.5f
+// What: 定义 Yaw 前馈输出限幅；Why: 当前 Yaw 只加动态耦合项，先用更保守的上限保证复合运动不过激。
+#define YAW_FEEDFORWARD_LIMIT 3.0f
+
 #define PITCH_MECH_LIMIT_MAX 0.08f // 上极限
 #define PITCH_MECH_LIMIT_MIN -0.967f // 下极限
 // What: 定义 yaw 速度环积分系数；Why: 小陀螺属于持续扰动场景，只靠 P 项容易留下稳态偏差，因此补一小段 Ki 来慢慢顶住漂移。
@@ -107,6 +122,71 @@ static void ResetYawMotorRuntimeState(void)
 
     ResetPIDRuntimeState(&yaw_motor->angle_PID);
     ResetPIDRuntimeState(&yaw_motor->speed_PID);
+}
+
+void GimbalCalibrate(void)
+{
+    if (yaw_motor == NULL) {
+        return;
+    }
+
+    // What: 统一通过云台模块向 yaw DM 电机发送硬件零点校准指令；Why: 上层只关心“触发校零”，不应直接拿底层电机实例改零点，避免后续接口再次分叉。
+    DMMotorCaliEncoder(yaw_motor);
+}
+
+/**
+ * @brief 获取云台前馈计算周期
+ *
+ * @return float 当前周期，单位 s
+ */
+static float GetGimbalFeedforwardDt(void)
+{
+    static uint32_t gimbal_ff_dwt_cnt = 0u;
+    float dt_s = DWT_GetDeltaT(&gimbal_ff_dwt_cnt);
+
+    // What: 对前馈使用的 dt 做异常钳制；Why: 首拍和调度抖动可能给出异常大周期，直接参与滤波会把速率耦合项污染掉。
+    if (dt_s <= 0.0f || dt_s > 0.05f) {
+        dt_s = GIMBAL_FEEDFORWARD_DT_FALLBACK;
+    }
+    return dt_s;
+}
+
+/**
+ * @brief 一阶低通更新
+ *
+ * @param last_output 上一拍输出
+ * @param input 当前输入
+ * @param rc 时间常数
+ * @param dt_s 当前周期
+ * @return float 本拍输出
+ */
+static float FirstOrderLowPass(float last_output, float input, float rc, float dt_s)
+{
+    if (rc <= 0.0f || dt_s <= 0.0f) {
+        return input;
+    }
+
+    // What: 使用一阶低通平滑关节速率；Why: 动力学前馈要尽量吃到真实运动趋势，但不能把高频噪声直接变成扭矩抖动。
+    return input * dt_s / (rc + dt_s) + last_output * rc / (rc + dt_s);
+}
+
+/**
+ * @brief 对称限幅
+ *
+ * @param value 原始值
+ * @param limit 对称上限
+ * @return float 限幅后的结果
+ */
+static float ClampSymmetric(float value, float limit)
+{
+    // What: 统一做正负对称限幅；Why: 前馈是辅助项，不允许在任一方向上越过预设安全边界。
+    if (value > limit) {
+        return limit;
+    }
+    if (value < -limit) {
+        return -limit;
+    }
+    return value;
 }
 
 void GimbalInit()
@@ -231,7 +311,13 @@ void GimbalTask()
     static gimbal_mode_e last_gimbal_mode = GIMBAL_ZERO_FORCE; // What: 记录上一拍云台模式；Why: 只有在模式切换边沿才需要清空 yaw 速度环积分，避免每拍都把 Ki 的作用抹掉。
     static uint8_t last_yaw_motor_online = 0u; // What: 记录 yaw 电机上一拍在线状态；Why: 只在掉线/复活边沿清一次 PID，避免正常运行时反复抹掉控制状态。
     static float yaw_motor_single_round_cache_deg = 0.0f; // What: 缓存最后一次可信的 yaw 单圈机械角；Why: 电机离线时继续发布这个值，底盘跟随不会被脏反馈带偏。
+    static float pitch_ff_storage = 0.0f; // What: 保存 Pitch 电流前馈输出；Why: 驱动侧通过指针异步读取，必须保证引用对象跨周期持续有效。
+    static float yaw_ff_storage = 0.0f; // What: 保存 Yaw 电流前馈输出；Why: 让 Yaw 动态耦合补偿可以和 Pitch 一样稳定挂到 DM 前馈接口。
+    static float pitch_rate_filtered = 0.0f; // What: 缓存滤波后的 Pitch 关节速率；Why: 科氏耦合直接吃原始速度会更抖，必须跨周期保留滤波状态。
+    static float yaw_rate_filtered = 0.0f; // What: 缓存滤波后的 Yaw 关节速率；Why: 离心项对速率平方更敏感，先滤波才能避免噪声被放大。
     uint8_t yaw_motor_online = 0u;
+    uint8_t pitch_motor_online = 0u;
+    float ff_dt_s = GetGimbalFeedforwardDt();
     // 获取云台控制数据
     // 后续增加未收到数据的处理
     if (gimbal_sub) {
@@ -241,6 +327,9 @@ void GimbalTask()
     }
     if (yaw_motor != NULL && DMMotorIsOnline(yaw_motor) != 0u) {
         yaw_motor_online = 1u;
+    }
+    if (pitch_motor != NULL && DMMotorIsOnline(pitch_motor) != 0u) {
+        pitch_motor_online = 1u;
     }
     if (yaw_motor_online != last_yaw_motor_online) {
         // What: yaw 电机在线状态变化时立即清掉控制残留；Why: 复活重新上电后的第一拍不能继续带着掉线前的历史误差工作。
@@ -261,9 +350,6 @@ void GimbalTask()
         }
         last_gimbal_mode = gimbal_cmd_recv.gimbal_mode;
     }
-    // [新增] 静态变量: 用于存储前馈值 (必须是static，因为指针会被传递给电机驱动)
-    static float pitch_ff_storage = 0.0f;
-    static float yaw_ff_storage = 0.0f; // [新增] Yaw轴前馈存储
 
     // ... (省略部分注释代码) ...
 
@@ -321,32 +407,73 @@ void GimbalTask()
     // 在合适的地方添加pitch重力补偿前馈力矩
     // 根据IMU姿态/pitch电机角度反馈计算出当前配重下的重力矩
     if (gimbal_cmd_recv.gimbal_mode != GIMBAL_ZERO_FORCE) {
-        float k1_val, k2_val;
-
-        k1_val = PITCH_GRAVITY_COEFFICIENT_K1;
-        k2_val = PITCH_GRAVITY_COEFFICIENT_K2;
-
-        // B. 获取当前 Pitch 角度 (弧度制)
-        // [轴互换后] Pitch 字段直接对应物理 Pitch 轴
         float pitch_rad = (gimba_IMU_data ? gimba_IMU_data->Pitch : 0.0f) * DEGREE_2_RAD;
+        float pitch_rate_rel = (gimba_IMU_data ? gimba_IMU_data->Gyro[1] : 0.0f);
+        float yaw_rate_rel = (gimba_IMU_data ? gimba_IMU_data->Gyro[2] : 0.0f);
+        float pitch_sin = arm_sin_f32(pitch_rad);
+        float pitch_cos = arm_cos_f32(pitch_rad);
+        float pitch_coupling = pitch_sin * pitch_cos;
+        float gravity_ff;
+        float centrifugal_ff;
+        float coriolis_ff;
 
-        // C. 计算补偿力矩
-        // 匹配拟合模型: T = -k1*cos + k2*sin + offset
-        float gravity_ff = -(k1_val * arm_cos_f32(pitch_rad) - k2_val * arm_sin_f32(pitch_rad)) + PITCH_GRAVITY_OFFSET;
-
-        // D. 应用前馈
-        pitch_ff_storage = gravity_ff; // 更新静态变量
-        if (pitch_motor) {
-            pitch_motor->current_feedforward_ptr = &pitch_ff_storage; // 更新指针 (防防御性编程，尽管Init时可能已赋值)
-            pitch_motor->motor_settings.feedforward_flag |= CURRENT_FEEDFORWARD; // 开启前馈标志位
+        // What: 优先用关节自身测速作为动力学前馈输入；Why: IMU 角速度更接近绝对运动，直接拿来算耦合项容易把底盘旋转也算进去。
+        if (pitch_motor_online != 0u && pitch_motor != NULL) {
+            pitch_rate_rel = pitch_motor->measure.velocity;
+        }
+        if (yaw_motor_online != 0u && yaw_motor != NULL) {
+            yaw_rate_rel = yaw_motor->measure.velocity;
         }
 
+        pitch_rate_filtered = FirstOrderLowPass(pitch_rate_filtered,
+                                                pitch_rate_rel,
+                                                GIMBAL_FEEDFORWARD_RATE_LPF_RC,
+                                                ff_dt_s);
+        yaw_rate_filtered = FirstOrderLowPass(yaw_rate_filtered,
+                                              yaw_rate_rel,
+                                              GIMBAL_FEEDFORWARD_RATE_LPF_RC,
+                                              ff_dt_s);
+
+        // What: 保留现有 Pitch 重力补偿拟合式；Why: 这是当前已经验证可用的主补偿项，新增耦合项只是在其上做增量补偿。
+        gravity_ff = -(PITCH_GRAVITY_COEFFICIENT_K1 * pitch_cos - PITCH_GRAVITY_COEFFICIENT_K2 * pitch_sin) + PITCH_GRAVITY_OFFSET;
+        // What: 增加 Pitch 离心项补偿；Why: 底盘或 Yaw 高速旋转时，枪管会上下“发飘”，提前补力矩能减轻 Pitch 跟随滞后。
+        centrifugal_ff = PITCH_CENTRIFUGAL_FEEDFORWARD_K * yaw_rate_filtered * yaw_rate_filtered * pitch_coupling;
+        // What: 增加 Yaw 科氏耦合项补偿；Why: Yaw 与 Pitch 复合快速运动时会出现转速突变和卡顿，需要给 Yaw 一层动态前馈卸掉误差环压力。
+        coriolis_ff = -YAW_CORIOLIS_FEEDFORWARD_K * yaw_rate_filtered * pitch_rate_filtered * pitch_coupling;
+
+        pitch_ff_storage = ClampSymmetric(gravity_ff + centrifugal_ff, PITCH_FEEDFORWARD_LIMIT);
+        yaw_ff_storage = ClampSymmetric(coriolis_ff, YAW_FEEDFORWARD_LIMIT);
+
+        if (pitch_motor != NULL) {
+            // What: 每拍重绑 Pitch 前馈指针；Why: 保持驱动端始终读取最新的静态存储，并在电机离线时立即撤掉前馈标志。
+            pitch_motor->current_feedforward_ptr = &pitch_ff_storage;
+            if (pitch_motor_online != 0u) {
+                pitch_motor->motor_settings.feedforward_flag |= CURRENT_FEEDFORWARD;
+            } else {
+                pitch_motor->motor_settings.feedforward_flag &= ~CURRENT_FEEDFORWARD;
+            }
+        }
+        if (yaw_motor != NULL) {
+            // What: 为 Yaw 挂载电流前馈；Why: 让复合运动时的耦合补偿直接进入最内层力矩通道，而不是继续堆给位置/速度环硬抗。
+            yaw_motor->current_feedforward_ptr = &yaw_ff_storage;
+            if (yaw_motor_online != 0u) {
+                yaw_motor->motor_settings.feedforward_flag |= CURRENT_FEEDFORWARD;
+            } else {
+                yaw_motor->motor_settings.feedforward_flag &= ~CURRENT_FEEDFORWARD;
+            }
+        }
     } else {
-        // 停止模式下清除前馈，防止切回时突变
+        // What: 零力模式下同步清空前馈输出和滤波状态；Why: 退出失能后若沿用旧动态项，恢复第一拍会带着过期力矩直接冲击机构。
+        pitch_ff_storage = 0.0f;
+        yaw_ff_storage = 0.0f;
+        pitch_rate_filtered = 0.0f;
+        yaw_rate_filtered = 0.0f;
         if (pitch_motor) {
             pitch_motor->motor_settings.feedforward_flag &= ~CURRENT_FEEDFORWARD;
         }
-        pitch_ff_storage = 0.0f;
+        if (yaw_motor) {
+            yaw_motor->motor_settings.feedforward_flag &= ~CURRENT_FEEDFORWARD;
+        }
     }
 
     // [新增] 每周期执行图传电机状态机

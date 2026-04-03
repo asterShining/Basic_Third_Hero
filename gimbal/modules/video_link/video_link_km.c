@@ -11,6 +11,10 @@
 #define VIDEO_LINK_KM_FRAME_SIZE 21u
 #define VIDEO_LINK_KM_FRAME_HEADER_0 0xA9u
 #define VIDEO_LINK_KM_FRAME_HEADER_1 0x53u
+// What: 定义 VT03 在线判定重载拍数；Why: DaemonTask 以 100Hz 运行，原来的 10 拍只有约 100ms 容错，串口偶发抖动就会把主控误判成离线。
+#define VIDEO_LINK_KM_DAEMON_RELOAD_COUNT 40u
+// What: 定义 VT03 上电初始在线宽限拍数；Why: 让初始化阶段和运行阶段使用同一套约 400ms 时间窗，避免刚上线时在线判定更苛刻。
+#define VIDEO_LINK_KM_DAEMON_INIT_COUNT 40u
 
 #define VIDEO_LINK_KM_CH0_BIT_OFFSET 16u
 #define VIDEO_LINK_KM_CH1_BIT_OFFSET 27u
@@ -395,6 +399,13 @@ static void VideoLinkKMOfflineCallback(void *id)
 {
     (void)id;
 
+    // What: 离线时先打印关键诊断快照；Why: 用户现场看到“突然失能又恢复”时，需要第一时间区分是根本没收到帧，还是收到后被头/CRC过滤掉了。
+    LOGWARNING("[video_link] VT03 keyboard-mouse link lost valid=%lu header=%lu crc=%lu last_len=%u",
+               (unsigned long)video_link_diag.valid_frame_count,
+               (unsigned long)video_link_diag.header_fail_count,
+               (unsigned long)video_link_diag.crc_fail_count,
+               video_link_diag.last_frame_len);
+
     // 这里掉线时直接清空图传键鼠状态，作用是让 `robot_cmd` 下一拍立刻看到全零输入；
     // 原因是图传在线时它优先于 DBUS 键鼠，若断链不清状态就会把旧按键和鼠标增量继续带下去。
     memset(video_link_ctrl, 0, sizeof(video_link_ctrl));
@@ -425,8 +436,9 @@ RC_ctrl_t *VideoLinkKMInit(UART_HandleTypeDef *video_link_usart_handle)
     usart_conf.module_callback = VideoLinkKMRxCallback;
     video_link_usart_instance = USARTRegister(&usart_conf);
 
-    daemon_conf.reload_count = 10u;
-    daemon_conf.init_count = 20u;
+    // What: 放宽 VT03 在线宽限到约 400ms；Why: 图传偶发错帧、DMA 重启或短暂无线抖动不应立刻把整车打到失能或主控回退。
+    daemon_conf.reload_count = VIDEO_LINK_KM_DAEMON_RELOAD_COUNT;
+    daemon_conf.init_count = VIDEO_LINK_KM_DAEMON_INIT_COUNT;
     daemon_conf.callback = VideoLinkKMOfflineCallback;
     daemon_conf.owner_id = NULL;
     video_link_daemon_instance = DaemonRegister(&daemon_conf);

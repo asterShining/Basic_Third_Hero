@@ -138,6 +138,10 @@ DMMotorInstance *DMMotorInit(Motor_Init_Config_s *config)
     PIDInit(&motor->angle_PID, &config->controller_param_init_config.angle_PID);
     motor->other_angle_feedback_ptr = config->controller_param_init_config.other_angle_feedback_ptr;
     motor->other_speed_feedback_ptr = config->controller_param_init_config.other_speed_feedback_ptr;
+    // What: 初始化速度前馈指针；Why: DM 驱动任务会直接读取实例中的前馈地址，若初始化阶段漏拷贝就会让上层配置失效。
+    motor->speed_feedforward_ptr = config->controller_param_init_config.speed_feedforward_ptr;
+    // What: 初始化电流前馈指针；Why: 云台重力与动力学补偿都走电流前馈通道，必须在建实例时把入口完整接通。
+    motor->current_feedforward_ptr = config->controller_param_init_config.current_feedforward_ptr;
 
     config->can_init_config.can_module_callback = DMMotorDecode;
     config->can_init_config.id = motor;
