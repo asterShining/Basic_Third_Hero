@@ -10,10 +10,12 @@
 // 打滑补偿系数 (需要实测微调, 通常在 1.0 - 1.2 之间)
 #define SLIP_COMPENSATION 1.00f
 
-// [新增] 摩擦轮软启动步长 (deg/loop)
-// 假设 200Hz 控制频率，15m/s (约28000dps)
-// 设为 150.0f 表示约 1秒 达到满速
-#define FRICTION_RAMP_STEP 100.0f
+// What: 定义摩擦轮升速斜率 (deg/s^2)；Why: 用户要求把预热再放慢一点，这里下调升速斜率以拉长到稳态速度的时间，同时减轻上电瞬间电流冲击。
+#define FRICTION_RAMP_UP_RATE_DPS_PER_S 60000.0f
+// What: 定义摩擦轮停转斜率 (deg/s^2)；Why: 关摩擦轮要比升速更快回零，避免停火后长时间拖转。
+#define FRICTION_RAMP_DOWN_RATE_DPS_PER_S 160000.0f
+// What: 定义摩擦轮控制斜坡允许使用的最大 dt (s)；Why: 任务抖动或断点恢复时必须限幅，避免一次循环跳过整段 ramp。
+#define FRICTION_RAMP_MAX_DT_S 0.02f
 
 // ==================== 摩擦轮独立速度微调 (Trim) ====================
 // 每个摩擦轮相对命令速度的偏置量 (单位: m/s)
@@ -49,34 +51,43 @@
 #define MAX_REVERSE_COUNT 5
 
 // ==================== 单发控制参数 ====================
-// 单发冲刺行程 (单位: 发), 直接给出大位置误差, 让位置环一开始就把速度环顶到高输出
-#define SF_RUSH_BULLET_COUNT 3.0f
+// What: 定义单发首发冲刺步距 (单位: 发)；Why: 上一版 1.2 发在弱供弹工况下空发偏多，因此小幅回补到 1.35 发，让首发更容易把弹丸稳定送入摩擦轮而又不直接回到双发风险很高的旧值。
+#define SF_RUSH_BULLET_COUNT 1.35f
 // 拨盘电机总角度对应的一发角度 (deg), 需要乘减速比, 因为 total_angle 是电机转子多圈角度
 #define LOADER_MOTOR_ANGLE_PER_BULLET (ONE_BULLET_DELTA_ANGLE * REDUCTION_RATIO_LOADER)
 // 单发冲刺总角度 (deg), 用于位置环大步进推弹
 #define SF_RUSH_ANGLE (SF_RUSH_BULLET_COUNT * LOADER_MOTOR_ANGLE_PER_BULLET)
 // 单发冲刺到位容差 (deg), 用于在掉速丢失时尽快收口, 避免持续追一个过远目标
 #define SF_RUSH_REACHED_TOLERANCE (0.20f * LOADER_MOTOR_ANGLE_PER_BULLET)
-// 锁角前推偏置 (deg), 叠加在位置环目标上, 利用积分零和纯比例反馈产生恒定前推力矩死死抵住限位
-#define SF_LOCK_PUSH_ANGLE (0.15f * LOADER_MOTOR_ANGLE_PER_BULLET)
 // 补发频率 (Hz), 初次冲刺未发现掉速时按该节拍继续位置环补步, 便于逐颗寻找弹丸
 #define SF_RETRY_RATE_HZ 9.0f
-// 单次补发步距 (单位: 发), 继续沿用统一机械节距, 避免单发/二连发/反转的几何语义分裂
-#define SF_RETRY_STEP_BULLET_COUNT 3.0f
-// 有限重试上限, 超过后判定本次未成功出弹并锁止, 防止空仓时无休止卷弹
+// What: 定义单发补发步距 (单位: 发)；Why: 空发现象明显时一次 0.25 发补步过小，因此上调到 0.35 发，在不放开多次补发的前提下提高补发有效性。
+#define SF_RETRY_STEP_BULLET_COUNT 0.35f
+// What: 定义单发补发上限；Why: 当前目标是防双发优先，因此只保留 1 次小补发，不再允许多次累加推进量。
 #define SF_RETRY_MAX_COUNT 3u
 // 补发间隔 (ms), 由补发频率直接换算, 便于状态机按绝对时间节拍触发下一步
 #define SF_RETRY_INTERVAL_MS (1000.0f / SF_RETRY_RATE_HZ)
-// 送弹超时时间 (ms), 超时未检测到掉速则认为缺弹或卡弹
-#define SF_FEED_TIMEOUT 9500
+// What: 定义整次单发事务的总超时 (ms)；Why: 首发和最多一次小补发都必须在短时间内收口，不能让状态机长时间霸占拨盘控制权。
+#define SF_TRANSACTION_TIMEOUT 400.0f
+// What: 定义最小有效掉速行程 (单位: 发)；Why: 上一版 0.25 发允许过早把弱咬弹识别成成功，这会带来空发，因此回调到 0.30 发以减少过早锁角。
+#define SF_MIN_VALID_DIP_PROGRESS_BULLET 0.30f
+// What: 定义平均掉速连续稳定拍数；Why: 单电机噪声和瞬时扰动较多，平均掉速需要跨两个控制周期确认后再锁角更稳。
+#define SF_DIP_AVG_STABLE_CYCLES 2u
+// What: 定义发射成功后的回速稳定拍数；Why: 略微收紧回速判定，让上一发完全恢复后才允许下一次单发进入，进一步压住连续点射时的多发风险。
+#define FRICTION_RECOVER_STABLE_CYCLES 4u
 
 // ==================== 发射确认检测参数 ====================
 // 掉速检测阈值 (deg/s), 内圈摩擦轮速度下降超过此值认为有弹丸通过
-#define FRICTION_SPEED_DIP_THRESHOLD 1000.0f
+// What: 适度降低掉速门槛；Why: 当前更需要让首颗弹丸的真实掉速更早被识别到，从而尽快锁角，减少漏检后继续送弹。
+#define FRICTION_SPEED_DIP_THRESHOLD 900.0f
+// What: 定义外圈辅助确认阈值 (deg/s)；Why: 当内圈只出现“较弱但连续”的平均掉速时，必须让外圈也给出一定幅度的掉速佐证，才能减少把半咬弹误判成成功所导致的空发。
+#define OUTER_DIP_CONFIRM_THRESHOLD 650.0f
 // 回升检测阈值 (deg/s), 与目标速度差小于此值认为回升完成
 #define FRICTION_SPEED_RECOVER_THRESHOLD 400.0f
 // [新增] 射速就绪阈值 (deg/s), 实际速度与目标速度误差小于此值才允许发射
 #define SHOOT_SPEED_READY_THRESHOLD 500.0f
+// What: 定义单发重武装保护时间 (ms)；Why: VT03 扳机抖动、鼠标回弹和链路伪边沿都可能把一次点击拆成两次触发，需要一小段保护窗口挡住伪双击。
+#define SF_TRIGGER_REARM_GUARD_MS 100.0f
 
 // 堵转检测状态结构体 (运行时数据, 仅供 shoot.c 内部使用)
 static struct {
@@ -103,6 +114,8 @@ static struct {
     float brake_start_time; // 锁止开始时间戳 (ms), 保留原字段名以减少调试结构变更范围
     float cooldown_start_time; // 冷却开始时间戳 (ms)
     uint8_t retry_count; // 已执行的补发次数, 用于实现有限重试而不是无限卷弹
+    uint8_t inner_dip_stable_count; // What: 记录平均掉速连续稳定拍数；Why: 内圈平均掉速要跨多个控制周期确认，不能把单拍波动直接当成有效出弹。
+    uint8_t recover_stable_count; // What: 记录摩擦轮回速稳定拍数；Why: 发射成功后必须连续多拍恢复到稳态，下一发才允许进入。
     uint16_t fire_count; // 累计发射计数
     uint16_t feed_timeout_count; // 送弹超时计数
 } single_fire = { 0 };
@@ -112,10 +125,11 @@ static struct {
 typedef struct {
     loader_mode_e last_mode; // 上一次的拨盘模式 (用于边沿检测)
     uint8_t trigger_consumed; // 触发是否已被消费 (1=已消费,等待复位)
-    uint8_t pending_fire; // 是否有待处理的发射请求 (1=有)
+    uint8_t pending_fire; // What: 是否缓存了待处理单发请求；Why: 单发请求至少要保留到状态机真正消费它的那一拍，不能在入口瞬时丢掉。
+    float last_accept_time_ms; // What: 记录最近一次真正接受单发请求的时间；Why: 只有知道上次有效触发时刻，才能对抖动边沿施加最小间隔保护。
 } FireTrigger_s;
 
-static FireTrigger_s fire_trigger = { .last_mode = LOAD_STOP, .trigger_consumed = 0, .pending_fire = 0 };
+static FireTrigger_s fire_trigger = { .last_mode = LOAD_STOP, .trigger_consumed = 0, .pending_fire = 0, .last_accept_time_ms = 0.0f };
 
 /**
  * @brief 发射初始化,会被RobotInit()调用

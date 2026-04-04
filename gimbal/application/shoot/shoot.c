@@ -7,9 +7,19 @@
 #include "message_center.h"
 #include "bsp_dwt.h"
 #include "general_def.h"
+#include <math.h>
 
 static float current_inner_deg = 0.0f;
 static float current_outer_deg = 0.0f;
+// What: 缓存摩擦轮最终目标转速绝对值；Why: 单发 ready/recover 判定必须对齐最终稳态目标，而不能对齐 ramp 过程中的中间目标。
+static float target_inner_left_deg_abs = 0.0f;
+static float target_inner_right_deg_abs = 0.0f;
+static float target_inner_down_deg_abs = 0.0f;
+static float target_outer_left_deg_abs = 0.0f;
+static float target_outer_right_deg_abs = 0.0f;
+static float target_outer_down_deg_abs = 0.0f;
+// What: 缓存摩擦轮 ramp 的 DWT 计数器；Why: 升速改成时间型斜坡后，每轮都要用真实 dt 计算步进量。
+static uint32_t friction_ramp_dwt_cnt = 0;
 
 // [新增] 6个摩擦轮单独的前馈变量
 static float ff_inner_left = 0.0f;
@@ -37,6 +47,21 @@ static BulletDipSnapshot_s *p_dip_snapshot;
 
 // dwt定时,计算冷却用
 static float hibernate_time = 0, dead_time = 0;
+
+// What: 记录单发控制使用的内圈掉速基线；Why: 生产控制要以内圈最先咬弹的掉速为准，不能继续只靠外圈晚确认来刹车。
+static struct {
+    float inner_left_baseline;
+    float inner_right_baseline;
+    float inner_down_baseline;
+    float outer_left_baseline;
+    float outer_right_baseline;
+    float outer_down_baseline;
+} dip_control = { 0 };
+
+// What: 为后续辅助函数提供前置声明；Why: 单发状态机重构后有多处工具函数前后复用，显式声明比依赖定义顺序更稳妥。
+static float GetInnerFrictionAvgSpeed(void);
+static float GetOuterFrictionAvgSpeed(void);
+static void RecordDipBaseline(void);
 
 void ShootInit()
 {
@@ -181,6 +206,8 @@ void ShootInit()
     p_stall_debug = ShootDebug_GetStallPtr();
     p_sf_debug = ShootDebug_GetSingleFirePtr();
     p_dip_snapshot = ShootDebug_GetDipSnapshotPtr();
+    // What: 初始化摩擦轮 ramp 的时间基准；Why: 第一次进入时间型斜坡时不能拿到异常大的 dt，否则会把目标一步跳满。
+    DWT_GetDeltaT(&friction_ramp_dwt_cnt);
 }
 /**
  * @brief 辅助函数：将线速度转换为角速度
@@ -264,6 +291,89 @@ static float LoaderBulletCountToMotorAngle(float bullet_count)
 }
 
 /**
+ * @brief 将射频换算为拨盘电机速度参考
+ * @param bullet_rate 发射频率，单位为 bullet/s
+ * @return 拨盘电机速度参考，单位为 deg/s
+ * @note 这里统一使用单发机械节距做换算，作用是让单发、连发和二连发共享同一套几何语义；
+ *       原因是旧代码里残留 `/8` 常量，会把实际“每发角度”与单发位置环目标拆成两套定义。
+ */
+static float LoaderBulletRateToMotorSpeed(float bullet_rate)
+{
+    return bullet_rate * LOADER_MOTOR_ANGLE_PER_BULLET;
+}
+
+/**
+ * @brief 约束摩擦轮控制 dt
+ * @param dt_s 原始时间间隔，单位为 s
+ * @return 约束后的 dt
+ * @note 这里对时间步长做下限和上限保护，作用是让时间型 ramp 在调度抖动下仍保持可控；
+ *       原因是 `RobotTask` 不是硬实时周期，直接使用异常 dt 会把斜坡推进量放大成突跳。
+ */
+static float ClampFrictionRampDt(float dt_s)
+{
+    if (dt_s <= 0.0f)
+        return 0.005f;
+    if (dt_s > FRICTION_RAMP_MAX_DT_S)
+        return FRICTION_RAMP_MAX_DT_S;
+
+    return dt_s;
+}
+
+/**
+ * @brief 按给定加减速度把当前参考推进到目标参考
+ * @param current_ref 当前参考值
+ * @param target_ref 目标参考值
+ * @param up_rate 上升斜率，单位为 deg/s^2
+ * @param down_rate 下降斜率，单位为 deg/s^2
+ * @param dt_s 时间步长，单位为 s
+ * @return 新的参考值
+ * @note 这里统一封装升降速限幅，作用是让开摩擦轮和关摩擦轮都走同一套时间语义；
+ *       原因是用户反馈斜坡过慢，后续只需要改速率常量就能整体调整响应。
+ */
+static float RampFrictionRef(float current_ref, float target_ref, float up_rate, float down_rate, float dt_s)
+{
+    float max_delta;
+    float diff = target_ref - current_ref;
+
+    if (diff == 0.0f)
+        return target_ref;
+
+    if (fabsf(target_ref) > fabsf(current_ref))
+        max_delta = up_rate * dt_s;
+    else
+        max_delta = down_rate * dt_s;
+
+    if (diff > max_delta)
+        return current_ref + max_delta;
+    if (diff < -max_delta)
+        return current_ref - max_delta;
+
+    return target_ref;
+}
+
+/**
+ * @brief 缓存摩擦轮最终目标转速绝对值
+ * @param inner_left_ref 内圈左最终目标
+ * @param inner_right_ref 内圈右最终目标
+ * @param inner_down_ref 内圈下最终目标
+ * @param outer_left_ref 外圈左最终目标
+ * @param outer_right_ref 外圈右最终目标
+ * @param outer_down_ref 外圈下最终目标
+ * @note 这里把最终目标和实时 ramp 输出分开管理，作用是让 ready/recover 判定盯住真正的稳态速度；
+ *       原因是若只盯住 ramp 中间值，摩擦轮在升速早期也会被误判成“已经 ready”。
+ */
+static void UpdateFrictionTargetAbs(float inner_left_ref, float inner_right_ref, float inner_down_ref,
+                                    float outer_left_ref, float outer_right_ref, float outer_down_ref)
+{
+    target_inner_left_deg_abs = friction_inner_left != NULL ? fabsf(inner_left_ref) : 0.0f;
+    target_inner_right_deg_abs = friction_inner_right != NULL ? fabsf(inner_right_ref) : 0.0f;
+    target_inner_down_deg_abs = friction_inner_down != NULL ? fabsf(inner_down_ref) : 0.0f;
+    target_outer_left_deg_abs = friction_outer_left != NULL ? fabsf(outer_left_ref) : 0.0f;
+    target_outer_right_deg_abs = friction_outer_right != NULL ? fabsf(outer_right_ref) : 0.0f;
+    target_outer_down_deg_abs = friction_outer_down != NULL ? fabsf(outer_down_ref) : 0.0f;
+}
+
+/**
  * @brief 给拨盘电机下发速度环目标
  * @param speed_ref 目标角速度，单位为 deg/s
  * @note 统一封装速度环切换和设定值下发，原因是单发/停机/连发都会复用，避免多处切环遗漏。
@@ -331,6 +441,243 @@ static void SetMotorEnableIfReady(DJIMotorInstance *motor, uint8_t enable)
 }
 
 /**
+ * @brief 判断单个摩擦轮当前速度是否回到目标附近
+ * @param motor 电机实例
+ * @param target_abs 目标速度绝对值，单位为 deg/s
+ * @param threshold 允许误差，单位为 deg/s
+ * @return 1 表示已回到目标附近，0 表示仍未稳定
+ * @note 这里统一对实际速度和目标都取绝对值，作用是兼容反装电机；
+ *       原因是左侧摩擦轮方向相反，但 ready/recover 语义只关心速度幅值。
+ */
+static uint8_t IsFrictionMotorStable(const DJIMotorInstance *motor, float target_abs, float threshold)
+{
+    if (motor == NULL)
+        return 1;
+
+    return fabsf(fabsf(GetMotorSpeedAps(motor)) - target_abs) <= threshold;
+}
+
+/**
+ * @brief 判断全部已安装摩擦轮是否达到最终目标附近
+ * @param threshold 允许误差，单位为 deg/s
+ * @return 1 表示全部稳定，0 表示仍有电机未到位
+ * @note 这里统一盯住最终稳态目标，作用是防止 ramp 尚未跑满时就把摩擦轮误判成 ready；
+ *       原因是单发触发安全性依赖“最终射速 ready”，而不是“当前 ramp 中间值能跟上”。
+ */
+static uint8_t IsAllFrictionStableAgainstTarget(float threshold)
+{
+    if (!IsFrictionMotorStable(friction_inner_left, target_inner_left_deg_abs, threshold))
+        return 0;
+    if (!IsFrictionMotorStable(friction_inner_right, target_inner_right_deg_abs, threshold))
+        return 0;
+    if (!IsFrictionMotorStable(friction_inner_down, target_inner_down_deg_abs, threshold))
+        return 0;
+    if (!IsFrictionMotorStable(friction_outer_left, target_outer_left_deg_abs, threshold))
+        return 0;
+    if (!IsFrictionMotorStable(friction_outer_right, target_outer_right_deg_abs, threshold))
+        return 0;
+    if (!IsFrictionMotorStable(friction_outer_down, target_outer_down_deg_abs, threshold))
+        return 0;
+
+    return 1;
+}
+
+/**
+ * @brief 记录单发控制使用的内圈掉速基线
+ * @note 这里单独维护控制基线，作用是让生产控制不依赖调试模块内部结构；
+ *       原因是调试快照允许慢慢验证，而真正刹车必须走最短路径。
+ */
+static void RecordControlDipBaseline(void)
+{
+    dip_control.inner_left_baseline = fabsf(GetMotorSpeedAps(friction_inner_left));
+    dip_control.inner_right_baseline = fabsf(GetMotorSpeedAps(friction_inner_right));
+    dip_control.inner_down_baseline = fabsf(GetMotorSpeedAps(friction_inner_down));
+    dip_control.outer_left_baseline = fabsf(GetMotorSpeedAps(friction_outer_left));
+    dip_control.outer_right_baseline = fabsf(GetMotorSpeedAps(friction_outer_right));
+    dip_control.outer_down_baseline = fabsf(GetMotorSpeedAps(friction_outer_down));
+}
+
+/**
+ * @brief 以峰值保持方式更新单发控制基线
+ * @note 这里把基线跟随到喂弹过程中的真实峰值，作用是吸收前馈和惯性带来的正常加速；
+ *       原因是掉速判定依赖“基线 - 当前”，若基线不更新就会把正常升速误算成掉速不足。
+ */
+static void UpdateControlDipPeakBaseline(void)
+{
+    float current_abs;
+
+    current_abs = fabsf(GetMotorSpeedAps(friction_inner_left));
+    if (current_abs > dip_control.inner_left_baseline)
+        dip_control.inner_left_baseline = current_abs;
+
+    current_abs = fabsf(GetMotorSpeedAps(friction_inner_right));
+    if (current_abs > dip_control.inner_right_baseline)
+        dip_control.inner_right_baseline = current_abs;
+
+    current_abs = fabsf(GetMotorSpeedAps(friction_inner_down));
+    if (current_abs > dip_control.inner_down_baseline)
+        dip_control.inner_down_baseline = current_abs;
+
+    current_abs = fabsf(GetMotorSpeedAps(friction_outer_left));
+    if (current_abs > dip_control.outer_left_baseline)
+        dip_control.outer_left_baseline = current_abs;
+
+    current_abs = fabsf(GetMotorSpeedAps(friction_outer_right));
+    if (current_abs > dip_control.outer_right_baseline)
+        dip_control.outer_right_baseline = current_abs;
+
+    current_abs = fabsf(GetMotorSpeedAps(friction_outer_down));
+    if (current_abs > dip_control.outer_down_baseline)
+        dip_control.outer_down_baseline = current_abs;
+}
+
+/**
+ * @brief 计算当前喂弹步的推进量
+ * @return 当前推进的机械行程，单位为 bullet
+ * @note 这里把电机 total_angle 统一换算回“发”的语义，作用是让掉速门槛直接按机械节距表达；
+ *       原因是用户关心的是“已经推进了多少发的距离”，不是转子角度。
+ */
+static float GetCurrentFeedProgressBullet(void)
+{
+    float progress_angle = loader->measure.total_angle - single_fire.rush_start_angle;
+
+    if (progress_angle < 0.0f)
+        progress_angle = 0.0f;
+
+    return progress_angle / LOADER_MOTOR_ANGLE_PER_BULLET;
+}
+
+/**
+ * @brief 以内圈基线计算当前掉速电机数量和平均掉速
+ * @param out_avg_dip 输出内圈平均掉速，单位为 deg/s
+ * @return 当前超过掉速阈值的内圈电机数量
+ * @note 这里单独返回“数量 + 平均值”两种特征，作用是同时兼顾强咬弹和弱但持续掉速两种真实发射形态；
+ *       原因是鹅颈弹链工况变化大，只看单一特征容易漏检或误检。
+ */
+static uint8_t GetInnerDipMetrics(float *out_avg_dip)
+{
+    uint8_t dip_count = 0;
+    float dip_left = dip_control.inner_left_baseline - fabsf(GetMotorSpeedAps(friction_inner_left));
+    float dip_right = dip_control.inner_right_baseline - fabsf(GetMotorSpeedAps(friction_inner_right));
+    float dip_down = dip_control.inner_down_baseline - fabsf(GetMotorSpeedAps(friction_inner_down));
+
+    if (out_avg_dip != NULL)
+        *out_avg_dip = (dip_left + dip_right + dip_down) * 0.3333333f;
+
+    if (dip_left > FRICTION_SPEED_DIP_THRESHOLD)
+        dip_count++;
+    if (dip_right > FRICTION_SPEED_DIP_THRESHOLD)
+        dip_count++;
+    if (dip_down > FRICTION_SPEED_DIP_THRESHOLD)
+        dip_count++;
+
+    return dip_count;
+}
+
+/**
+ * @brief 以外圈基线计算当前掉速电机数量和平均掉速
+ * @param out_avg_dip 输出外圈平均掉速，单位为 deg/s
+ * @return 当前超过阈值的外圈电机数量
+ * @note 这里仅把外圈作为辅助确认来源，作用是在内圈只出现“较弱但连续”的掉速时再补一层真实性佐证；
+ *       原因是外圈物理位置更靠后，不能拿来做第一时间刹车，但可以帮助过滤掉半咬弹造成的假成功。
+ */
+static uint8_t GetOuterDipMetrics(float *out_avg_dip)
+{
+    uint8_t dip_count = 0;
+    float dip_left;
+    float dip_right;
+    float dip_down;
+
+    if (!HasOuterFrictionWheel()) {
+        if (out_avg_dip != NULL)
+            *out_avg_dip = 0.0f;
+        return 0;
+    }
+
+    dip_left = dip_control.outer_left_baseline - fabsf(GetMotorSpeedAps(friction_outer_left));
+    dip_right = dip_control.outer_right_baseline - fabsf(GetMotorSpeedAps(friction_outer_right));
+    dip_down = dip_control.outer_down_baseline - fabsf(GetMotorSpeedAps(friction_outer_down));
+
+    if (out_avg_dip != NULL)
+        *out_avg_dip = (dip_left + dip_right + dip_down) * 0.3333333f;
+
+    if (dip_left > OUTER_DIP_CONFIRM_THRESHOLD)
+        dip_count++;
+    if (dip_right > OUTER_DIP_CONFIRM_THRESHOLD)
+        dip_count++;
+    if (dip_down > OUTER_DIP_CONFIRM_THRESHOLD)
+        dip_count++;
+
+    return dip_count;
+}
+
+/**
+ * @brief 判断当前是否应该以内圈掉速立即锁角
+ * @return 1 表示应该锁角，0 表示继续喂弹
+ * @note 这里把“至少两路明显掉速”与“平均掉速连续两拍”合并成生产控制条件，作用是更早刹住拨盘；
+ *       原因是外圈掉速确认虽然更晚更完整，但对防多发来说已经太迟。
+ */
+static uint8_t ShouldLockByInnerDip(void)
+{
+    float inner_avg_dip = 0.0f;
+    float outer_avg_dip = 0.0f;
+    uint8_t dip_count;
+    uint8_t outer_dip_count;
+
+    if (GetCurrentFeedProgressBullet() < SF_MIN_VALID_DIP_PROGRESS_BULLET) {
+        single_fire.inner_dip_stable_count = 0;
+        return 0;
+    }
+
+    dip_count = GetInnerDipMetrics(&inner_avg_dip);
+    if (dip_count >= DIP_MIN_MOTOR_COUNT) {
+        single_fire.inner_dip_stable_count = 0;
+        return 1;
+    }
+
+    outer_dip_count = GetOuterDipMetrics(&outer_avg_dip);
+
+    if (inner_avg_dip > FRICTION_SPEED_DIP_THRESHOLD) {
+        if (single_fire.inner_dip_stable_count < 0xFFu)
+            single_fire.inner_dip_stable_count++;
+    } else {
+        single_fire.inner_dip_stable_count = 0;
+    }
+
+    if (single_fire.inner_dip_stable_count < SF_DIP_AVG_STABLE_CYCLES)
+        return 0;
+
+    if (!HasOuterFrictionWheel()) {
+        // What: 外圈不存在时保留原有平均掉速确认链路；Why: 当前工程允许裁剪外圈配置，辅助确认不能让无外圈平台完全失去单发能力。
+        return 1;
+    }
+
+    // What: 对“弱但连续”的内圈平均掉速增加外圈辅助确认；Why: 这样可以保留早期锁角优势，同时减少半咬弹或扰动被误判成成功带来的空发。
+    return (outer_dip_count >= 1u) || (outer_avg_dip > OUTER_DIP_CONFIRM_THRESHOLD);
+}
+
+/**
+ * @brief 接受一个待处理单发请求并进入待速态
+ * @param current_time 当前系统时间，单位为 ms
+ * @note 这里把边沿请求显式缓存并在状态机内消费，作用是让鼠标和 VT03 的瞬时点击不会因为状态切换被吞掉；
+ *       原因是新的 ready/recover 策略会让请求延后执行，不能再在入口处立刻清空。
+ */
+static void AcceptPendingSingleFireRequest(float current_time)
+{
+    fire_trigger.pending_fire = 0;
+    single_fire.state = SF_WAIT_SPEED;
+    single_fire.retry_count = 0;
+    single_fire.shot_start_time = 0.0f;
+    single_fire.feed_start_time = 0.0f;
+    single_fire.retry_start_time = 0.0f;
+    single_fire.inner_dip_stable_count = 0;
+    single_fire.recover_stable_count = 0;
+    single_fire.lock_target_angle = loader->measure.total_angle;
+    single_fire.brake_start_time = current_time;
+    LoaderSetAngleRef(single_fire.lock_target_angle);
+}
+
+/**
  * @brief 中止单发状态机
  * @note 这里同时清空前馈和挂起触发，原因是切换到二连发/连发/反转时必须把单发遗留状态完全收口，避免旧状态抢控制权。
  */
@@ -341,6 +688,8 @@ static void AbortSingleFire(void)
     single_fire.shot_start_time = 0.0f;
     single_fire.feed_start_time = 0.0f;
     single_fire.retry_start_time = 0.0f;
+    single_fire.inner_dip_stable_count = 0;
+    single_fire.recover_stable_count = 0;
     fire_trigger.pending_fire = 0;
     SetFrictionFeedforward(0.0f, 0.0f);
 }
@@ -363,6 +712,53 @@ static uint8_t SingleFireIsRetryActive(void)
 }
 
 /**
+ * @brief 开始一次单发喂弹尝试
+ * @param current_time 当前系统时间 (ms)
+ * @param feed_bullet_count 本次喂弹步距，单位为 bullet
+ * @param reset_transaction_timer 1 表示重置整次事务计时，0 表示沿用已有计时
+ * @note 这里把首发和补发共用的准备动作收敛到一个入口，作用是保证基线、前馈和位置目标始终同步更新；
+ *       原因是当前单发包含首发和补发两条路径，散落手写很容易把某个步骤漏掉。
+ */
+static void BeginSingleFireFeedAttempt(float current_time, float feed_bullet_count, uint8_t reset_transaction_timer)
+{
+    single_fire.state = SF_FEEDING;
+    single_fire.feed_start_time = current_time;
+    if (reset_transaction_timer) {
+        single_fire.shot_start_time = current_time;
+    }
+    single_fire.rush_start_angle = loader->measure.total_angle;
+    single_fire.rush_target_angle = single_fire.rush_start_angle +
+                                    LoaderBulletCountToMotorAngle(feed_bullet_count);
+    single_fire.lock_target_angle = single_fire.rush_start_angle;
+    single_fire.baseline_speed = GetInnerFrictionAvgSpeed();
+    single_fire.outer_baseline_speed = GetOuterFrictionAvgSpeed();
+    single_fire.inner_dip_stable_count = 0;
+
+    RecordDipBaseline();
+    RecordControlDipBaseline();
+    SetFrictionFeedforward(0.0f, 0.0f);
+    LoaderSetAngleRef(single_fire.rush_target_angle);
+}
+
+/**
+ * @brief 更新回速稳定计数并返回是否已经恢复
+ * @return 1 表示摩擦轮已连续稳定恢复，0 表示仍需等待
+ * @note 这里要求摩擦轮连续多拍回到最终目标附近，作用是把“刚反弹回来”的瞬态与“真正恢复稳态”区分开；
+ *       原因是高频点射时下一发过早进入会直接放大多发风险。
+ */
+static uint8_t ShootIsSpeedRecovered(void)
+{
+    if (IsAllFrictionStableAgainstTarget(FRICTION_SPEED_RECOVER_THRESHOLD)) {
+        if (single_fire.recover_stable_count < 0xFFu)
+            single_fire.recover_stable_count++;
+    } else {
+        single_fire.recover_stable_count = 0;
+    }
+
+    return single_fire.recover_stable_count >= FRICTION_RECOVER_STABLE_CYCLES;
+}
+
+/**
  * @brief 进入单发有限重试等待态
  * @param current_time 当前系统时间 (ms)
  * @note 这里先锁住当前位置再等待下一次补步，作用是让重试节拍由时间控制而不是由电机惯性决定；
@@ -373,6 +769,7 @@ static void EnterSingleFireRetryWait(float current_time)
     single_fire.state = SF_RETRYING;
     single_fire.lock_target_angle = loader->measure.total_angle;
     single_fire.retry_start_time = current_time;
+    single_fire.inner_dip_stable_count = 0;
     SetFrictionFeedforward(0.0f, 0.0f);
     LoaderSetAngleRef(single_fire.lock_target_angle);
 }
@@ -386,14 +783,21 @@ static void EnterSingleFireRetryWait(float current_time)
  */
 static void FinishSingleFire(float current_time, uint8_t shot_success)
 {
-    single_fire.state = SF_LOCKING;
     single_fire.brake_start_time = current_time;
     single_fire.lock_target_angle = loader->measure.total_angle;
+    single_fire.inner_dip_stable_count = 0;
+    single_fire.recover_stable_count = 0;
+    // What: 单发事务结束时主动清空挂起请求；Why: 当前策略明确禁止“上一发执行过程中顺延排队下一发”，否则一次点击仍可能被拆成连续两发。
+    fire_trigger.pending_fire = 0;
     SetFrictionFeedforward(0.0f, 0.0f);
 
     if (shot_success) {
+        // What: 发射成功后先进入回速等待；Why: 新一发必须建立在摩擦轮已经恢复稳态的前提上，不能刚咬完一颗又立刻继续推。
+        single_fire.state = SF_WAIT_RECOVER;
         single_fire.fire_count++;
     } else {
+        // What: 发射失败后直接回到锁角保持；Why: 空仓或未确认出弹时不应继续自动卷弹，只等待下一次明确触发。
+        single_fire.state = SF_LOCKING;
         single_fire.feed_timeout_count++;
     }
 
@@ -407,47 +811,51 @@ static void FinishSingleFire(float current_time, uint8_t shot_success)
  */
 void ShootSetSpeedDual(float inner_mps, float outer_mps)
 {
-    // 1. 计算各自的目标角速度 (deg/s)
+    float dt_s = ClampFrictionRampDt(DWT_GetDeltaT(&friction_ramp_dwt_cnt));
     float target_inner_deg = SpeedMps2Degs(inner_mps);
     float target_outer_deg = SpeedMps2Degs(outer_mps);
+    float target_inner_left_ref;
+    float target_inner_right_ref;
+    float target_inner_down_ref;
+    float target_outer_left_ref;
+    float target_outer_right_ref;
+    float target_outer_down_ref;
+    float ref_inner_base;
+    float ref_outer_base;
 
-    // [新增] 软启动斜坡算法 (Ramp Logic)
-    // Inner
-    float diff_inner = target_inner_deg - current_inner_deg;
-    if (diff_inner > FRICTION_RAMP_STEP)
-        current_inner_deg += FRICTION_RAMP_STEP;
-    else if (diff_inner < -FRICTION_RAMP_STEP)
-        current_inner_deg -= FRICTION_RAMP_STEP;
-    else
-        current_inner_deg = target_inner_deg;
+    // What: 按真实 dt 推进摩擦轮升降速；Why: 这样 ready 时间由“秒”决定，不再由任务循环次数偶然决定。
+    current_inner_deg = RampFrictionRef(current_inner_deg, target_inner_deg,
+                                        FRICTION_RAMP_UP_RATE_DPS_PER_S,
+                                        FRICTION_RAMP_DOWN_RATE_DPS_PER_S,
+                                        dt_s);
+    current_outer_deg = RampFrictionRef(current_outer_deg, target_outer_deg,
+                                        FRICTION_RAMP_UP_RATE_DPS_PER_S,
+                                        FRICTION_RAMP_DOWN_RATE_DPS_PER_S,
+                                        dt_s);
 
-    // Outer
-    float diff_outer = target_outer_deg - current_outer_deg;
-    if (diff_outer > FRICTION_RAMP_STEP)
-        current_outer_deg += FRICTION_RAMP_STEP;
-    else if (diff_outer < -FRICTION_RAMP_STEP)
-        current_outer_deg -= FRICTION_RAMP_STEP;
-    else
-        current_outer_deg = target_outer_deg;
+    target_inner_left_ref = target_inner_deg != 0.0f ? target_inner_deg + SpeedMps2Degs(FRICTION_TRIM_INNER_LEFT) : 0.0f;
+    target_inner_right_ref = target_inner_deg != 0.0f ? target_inner_deg + SpeedMps2Degs(FRICTION_TRIM_INNER_RIGHT) : 0.0f;
+    target_inner_down_ref = target_inner_deg != 0.0f ? target_inner_deg + SpeedMps2Degs(FRICTION_TRIM_INNER_DOWN) : 0.0f;
+    target_outer_left_ref = target_outer_deg != 0.0f ? target_outer_deg + SpeedMps2Degs(FRICTION_TRIM_OUTER_LEFT) : 0.0f;
+    target_outer_right_ref = target_outer_deg != 0.0f ? target_outer_deg + SpeedMps2Degs(FRICTION_TRIM_OUTER_RIGHT) : 0.0f;
+    target_outer_down_ref = target_outer_deg != 0.0f ? target_outer_deg + SpeedMps2Degs(FRICTION_TRIM_OUTER_DOWN) : 0.0f;
+    UpdateFrictionTargetAbs(target_inner_left_ref, target_inner_right_ref, target_inner_down_ref,
+                            target_outer_left_ref, target_outer_right_ref, target_outer_down_ref);
 
     // 2. 设置第一级（内圈3个电机）- 负责主要加速
     // 仅在基础速度非零（摩擦轮已开启）时才叠加各轮独立 Trim 偏置；
     // 原因: 若基础速度为 0（摩擦轮关闭）时仍叠加非零 Trim，电机会持续转动，与关闭意图相悖。
-    {
-        float ref_inner_base = current_inner_deg; // 经软启动斜坡后的内圈基础目标角速度
-        SetFrictionRefIfReady(friction_inner_left, ref_inner_base != 0.0f ? ref_inner_base + SpeedMps2Degs(FRICTION_TRIM_INNER_LEFT) : 0.0f);
-        SetFrictionRefIfReady(friction_inner_right, ref_inner_base != 0.0f ? ref_inner_base + SpeedMps2Degs(FRICTION_TRIM_INNER_RIGHT) : 0.0f);
-        SetFrictionRefIfReady(friction_inner_down, ref_inner_base != 0.0f ? ref_inner_base + SpeedMps2Degs(FRICTION_TRIM_INNER_DOWN) : 0.0f);
-    }
+    ref_inner_base = current_inner_deg; // 经软启动斜坡后的内圈基础目标角速度
+    SetFrictionRefIfReady(friction_inner_left, ref_inner_base != 0.0f ? ref_inner_base + SpeedMps2Degs(FRICTION_TRIM_INNER_LEFT) : 0.0f);
+    SetFrictionRefIfReady(friction_inner_right, ref_inner_base != 0.0f ? ref_inner_base + SpeedMps2Degs(FRICTION_TRIM_INNER_RIGHT) : 0.0f);
+    SetFrictionRefIfReady(friction_inner_down, ref_inner_base != 0.0f ? ref_inner_base + SpeedMps2Degs(FRICTION_TRIM_INNER_DOWN) : 0.0f);
 
     // 3. 设置第二级（外圈3个电机）- 负责稳速/微加速
     // 同理，基础速度为 0 时直接下发 0，不叠加 Trim
-    {
-        float ref_outer_base = current_outer_deg; // 经软启动斜坡后的外圈基础目标角速度
-        SetFrictionRefIfReady(friction_outer_left, ref_outer_base != 0.0f ? ref_outer_base + SpeedMps2Degs(FRICTION_TRIM_OUTER_LEFT) : 0.0f);
-        SetFrictionRefIfReady(friction_outer_right, ref_outer_base != 0.0f ? ref_outer_base + SpeedMps2Degs(FRICTION_TRIM_OUTER_RIGHT) : 0.0f);
-        SetFrictionRefIfReady(friction_outer_down, ref_outer_base != 0.0f ? ref_outer_base + SpeedMps2Degs(FRICTION_TRIM_OUTER_DOWN) : 0.0f);
-    }
+    ref_outer_base = current_outer_deg; // 经软启动斜坡后的外圈基础目标角速度
+    SetFrictionRefIfReady(friction_outer_left, ref_outer_base != 0.0f ? ref_outer_base + SpeedMps2Degs(FRICTION_TRIM_OUTER_LEFT) : 0.0f);
+    SetFrictionRefIfReady(friction_outer_right, ref_outer_base != 0.0f ? ref_outer_base + SpeedMps2Degs(FRICTION_TRIM_OUTER_RIGHT) : 0.0f);
+    SetFrictionRefIfReady(friction_outer_down, ref_outer_base != 0.0f ? ref_outer_base + SpeedMps2Degs(FRICTION_TRIM_OUTER_DOWN) : 0.0f);
 }
 /**
  * @brief 更新调试数据 (将电机反馈的角速度转换为线速度)
@@ -541,14 +949,14 @@ static float GetOuterFrictionAvgSpeed(void)
  */
 static uint8_t IsFrictionDipping(void)
 {
-    // 仅使用外圈摩擦轮进行掉速检测
-    // 原因: 外圈是弹丸最后经过的一级, 检测到掉速即确认弹丸已完全发射出去, 计数更准确
+    float current_inner = GetInnerFrictionAvgSpeed();
     float current_outer = GetOuterFrictionAvgSpeed();
+    uint8_t inner_dip = (single_fire.baseline_speed - current_inner) > FRICTION_SPEED_DIP_THRESHOLD;
 
-    // 外圈掉速判断: 基准速度与当前速度之差超过阈值, 认为弹丸正在通过
+    // What: 调试观测同时保留内外圈掉速；Why: 生产控制已经改成以内圈优先，但调试仍需要看到外圈是否同步通过。
     uint8_t outer_dip = (single_fire.outer_baseline_speed - current_outer) > FRICTION_SPEED_DIP_THRESHOLD;
 
-    return outer_dip;
+    return inner_dip || outer_dip;
 }
 
 /**
@@ -707,34 +1115,16 @@ static loader_mode_e HandleLoaderStall(loader_mode_e current_mode)
  */
 static uint8_t ShootIsSpeedReady(void)
 {
-    float target_inner_abs = fabsf(current_inner_deg);
-    float target_outer_abs = fabsf(current_outer_deg);
-
-    // 如果目标速度为0, 直接认为就绪 (避免无法停止)
-    if (target_inner_abs == 0.0f && target_outer_abs == 0.0f)
+    // What: 目标速度为 0 时直接视为就绪；Why: 关闭摩擦轮或异常回退分支不应该被 ready 判定反向卡住。
+    if (target_inner_left_deg_abs == 0.0f &&
+        target_inner_right_deg_abs == 0.0f &&
+        target_inner_down_deg_abs == 0.0f &&
+        target_outer_left_deg_abs == 0.0f &&
+        target_outer_right_deg_abs == 0.0f &&
+        target_outer_down_deg_abs == 0.0f)
         return 1;
 
-    // 用绝对值比较转速是否达标，作用是兼容反装电机；
-    // 原因是左摩擦轮在反转安装时反馈速度为负，直接和正目标做差会导致就绪判定永远失败。
-    if (fabsf(fabsf(GetMotorSpeedAps(friction_inner_left)) - target_inner_abs) > SHOOT_SPEED_READY_THRESHOLD)
-        return 0;
-    if (fabsf(fabsf(GetMotorSpeedAps(friction_inner_right)) - target_inner_abs) > SHOOT_SPEED_READY_THRESHOLD)
-        return 0;
-    if (fabsf(fabsf(GetMotorSpeedAps(friction_inner_down)) - target_inner_abs) > SHOOT_SPEED_READY_THRESHOLD)
-        return 0;
-
-    // 外圈存在时再参与判定，作用是让单发等待逻辑适配不同级数的摩擦轮；
-    // 原因是无外圈平台不应被一个不存在的速度反馈永远卡住。
-    if (HasOuterFrictionWheel()) {
-        if (fabsf(fabsf(GetMotorSpeedAps(friction_outer_left)) - target_outer_abs) > SHOOT_SPEED_READY_THRESHOLD)
-            return 0;
-        if (fabsf(fabsf(GetMotorSpeedAps(friction_outer_right)) - target_outer_abs) > SHOOT_SPEED_READY_THRESHOLD)
-            return 0;
-        if (fabsf(fabsf(GetMotorSpeedAps(friction_outer_down)) - target_outer_abs) > SHOOT_SPEED_READY_THRESHOLD)
-            return 0;
-    }
-
-    return 1;
+    return IsAllFrictionStableAgainstTarget(SHOOT_SPEED_READY_THRESHOLD);
 }
 
 /**
@@ -748,48 +1138,25 @@ static void HandleSingleFire(uint8_t trigger_active)
     SingleFireDebug_s *p_sf = ShootDebug_GetSingleFirePtr();
     float inner_speed = GetInnerFrictionAvgSpeed();
     float outer_speed = GetOuterFrictionAvgSpeed();
-
-    // 触发边沿在真正进入单发状态机时再消费，作用是防止堵转恢复期间误吞一次遥控触发。
-    if (trigger_active) {
-        fire_trigger.pending_fire = 0;
-    }
+    uint8_t has_pending_request = fire_trigger.pending_fire != 0u;
 
     switch (single_fire.state) {
     case SF_IDLE:
-        if (trigger_active) {
-            // 先进入待速阶段并锁住当前位置，作用是等摩擦轮恢复到稳态再发；
-            // 原因是位置环冲刺起步非常猛，若摩擦轮还没回速，会把进弹误差直接放大成多发风险。
-            single_fire.state = SF_WAIT_SPEED;
-            single_fire.retry_count = 0;
-            single_fire.shot_start_time = current_time;
-            single_fire.feed_start_time = current_time;
-            single_fire.retry_start_time = current_time;
-            single_fire.lock_target_angle = loader->measure.total_angle;
-            LoaderSetAngleRef(single_fire.lock_target_angle);
+        if (has_pending_request) {
+            // What: 空闲态有待处理请求时进入待速；Why: 鼠标和 VT03 都是边沿输入，请求必须先缓存住，再等摩擦轮真正 ready 后执行。
+            AcceptPendingSingleFireRequest(current_time);
         } else {
             LoaderSetSpeedRef(0.0f);
         }
         break;
 
     case SF_WAIT_SPEED:
-        if (ShootIsSpeedReady() || (current_time - single_fire.feed_start_time > 500.0f)) {
-            // 进入冲刺阶段时记录起点、终点和摩擦轮基准，作用是后续用掉速瞬间的实际角度直接锁死当前位置；
-            // 原因是 total_angle 是多圈连续量，只要目标统一在这个坐标系里就能避免跨圈或减速比语义错乱。
-            single_fire.state = SF_FEEDING;
-            single_fire.feed_start_time = current_time;
-            single_fire.rush_start_angle = loader->measure.total_angle;
-            single_fire.rush_target_angle = single_fire.rush_start_angle + SF_RUSH_ANGLE;
-            single_fire.lock_target_angle = single_fire.rush_start_angle;
-            single_fire.baseline_speed = inner_speed;
-            single_fire.outer_baseline_speed = outer_speed;
-
-            RecordDipBaseline();
-            SetFrictionFeedforward(0.0f, 0.0f);
-            LoaderSetAngleRef(single_fire.rush_target_angle);
+        if (ShootIsSpeedReady()) {
+            // What: 只有最终目标速度 ready 后才允许首发冲刺；Why: 直接去掉旧版“500ms 没到速也硬发”的行为，避免半热态送弹带来的多发和首发无力。
+            BeginSingleFireFeedAttempt(current_time, SF_RUSH_BULLET_COUNT, 1u);
         } else {
-            // 待速期间保持当前位置锁定，作用是防止供弹盘在等待时被反扭矩拖走；
-            // [新增] 加上抵着限位的偏置角度，保证入弹口被微弱推力顶住
-            LoaderSetAngleRef(single_fire.lock_target_angle + SF_LOCK_PUSH_ANGLE);
+            // What: 待速期间只锁当前位置不再前推；Why: 用户反馈“点一下先动一下”就是旧前推逻辑带来的预拨感。
+            LoaderSetAngleRef(single_fire.lock_target_angle);
         }
         break;
 
@@ -810,6 +1177,7 @@ static void HandleSingleFire(uint8_t trigger_active)
         if (outer_speed > single_fire.outer_baseline_speed) {
             single_fire.outer_baseline_speed = outer_speed;
         }
+        UpdateControlDipPeakBaseline();
 
         ShootDebug_UpdatePeakBaseline(
             GetMotorSpeedAps(friction_inner_left),
@@ -819,19 +1187,17 @@ static void HandleSingleFire(uint8_t trigger_active)
             GetMotorSpeedAps(friction_outer_right),
             GetMotorSpeedAps(friction_outer_down));
 
-        if (IsFrictionDipping()) {
-            // 掉速瞬间直接读取当前位置并改写成新的位置目标，作用是利用位置环立即“抱死”拨盘；
-            // 原因是此时弹丸已被摩擦轮咬住，继续追远端大目标只会把惯性能量再送到下一发。
+        if (ShouldLockByInnerDip()) {
+            // What: 一旦内圈确认咬弹就立即锁角；Why: 内圈是弹丸最早通过的位置，用它刹车比等外圈确认更能压住多发。
             TakeDipSnapshot();
             ValidateAndSaveDipSnapshot();
             FinishSingleFire(current_time, 1);
-        } else if ((current_time - single_fire.shot_start_time) > SF_FEED_TIMEOUT) {
-            // 整次事务超时后直接锁死并记失败，作用是保证有限重试有总时长上限；
-            // 原因是空仓或掉速传感异常时，即使每次补发都有限，也不能让单发状态机一直占着控制权。
+        } else if ((single_fire.shot_start_time > 0.0f) &&
+                   ((current_time - single_fire.shot_start_time) > SF_TRANSACTION_TIMEOUT)) {
+            // What: 整次单发事务超过总时限后直接判失败；Why: 首发加补发都必须在短时间内收口，不能拖成持续卷弹。
             FinishSingleFire(current_time, 0);
         } else if (fabsf(single_fire.rush_target_angle - loader->measure.total_angle) < SF_RUSH_REACHED_TOLERANCE) {
-            // 当前一步已经走到位但仍未掉速，则转入按频率补步的有限重试等待；
-            // 原因是用户希望“没发现弹丸射出就按频率继续位置环转动”，而不是立刻判失败锁死。
+            // What: 当前一步走到位但仍未确认出弹时进入等待补发；Why: 用户希望优先“这次打出去”，但也只接受有限次中等补步。
             if (single_fire.retry_count < SF_RETRY_MAX_COUNT) {
                 EnterSingleFireRetryWait(current_time);
             } else {
@@ -843,47 +1209,37 @@ static void HandleSingleFire(uint8_t trigger_active)
         break;
 
     case SF_RETRYING:
-        if (IsFrictionDipping()) {
-            // 重试等待期间若才观察到掉速，也立即按成功收口，作用是兼容掉速信号相对机械动作略滞后的情况；
-            // 原因是摩擦轮掉速与拨盘到位并不严格同相，不能因为进入等待态就丢弃这次有效出弹确认。
+        if (ShouldLockByInnerDip()) {
+            // What: 补发等待期间若晚到掉速也按成功收口；Why: 掉速与机械到位并不同相，不能因为进入等待态就丢弃这次有效发射。
             TakeDipSnapshot();
             ValidateAndSaveDipSnapshot();
             FinishSingleFire(current_time, 1);
-        } else if ((current_time - single_fire.shot_start_time) > SF_FEED_TIMEOUT) {
+        } else if ((single_fire.shot_start_time > 0.0f) &&
+                   ((current_time - single_fire.shot_start_time) > SF_TRANSACTION_TIMEOUT)) {
             FinishSingleFire(current_time, 0);
         } else if ((current_time - single_fire.retry_start_time) >= SF_RETRY_INTERVAL_MS) {
-            // 到达补发节拍后再前进一个机械节距，作用是把“频率”落实成固定时间间隔的离散位置步进；
-            // 原因是这里要的是逐颗找弹，而不是再次给一个过大的连续目标。
             single_fire.retry_count++;
-            single_fire.state = SF_FEEDING;
-            single_fire.feed_start_time = current_time;
-            single_fire.rush_start_angle = loader->measure.total_angle;
-            single_fire.rush_target_angle = single_fire.rush_start_angle +
-                                            LoaderBulletCountToMotorAngle(SF_RETRY_STEP_BULLET_COUNT);
-            single_fire.baseline_speed = inner_speed;
-            single_fire.outer_baseline_speed = outer_speed;
-
-            RecordDipBaseline();
-            SetFrictionFeedforward(0.0f, 0.0f);
-            LoaderSetAngleRef(single_fire.rush_target_angle);
+            // What: 补发按固定节拍给一个中等步距；Why: 对鹅颈弹链要保留足够推进行程，但又不能重新回到一次冲很多发的旧策略。
+            BeginSingleFireFeedAttempt(current_time, SF_RETRY_STEP_BULLET_COUNT, 0u);
         } else {
             LoaderSetAngleRef(single_fire.lock_target_angle);
         }
         break;
 
-    case SF_LOCKING:
-        if (trigger_active) {
-            // 在锁角态收到下一次触发时只重启待速，不先退回速度环，作用是保证两发之间的机械相位连续；
-            // 原因是当前位置已经是上一发真实出弹点，直接从这里叠加下一次冲刺最不容易积累角度误差。
-            single_fire.state = SF_WAIT_SPEED;
-            single_fire.retry_count = 0;
-            single_fire.shot_start_time = current_time;
-            single_fire.feed_start_time = current_time;
-            single_fire.retry_start_time = current_time;
-            single_fire.lock_target_angle = loader->measure.total_angle;
+    case SF_WAIT_RECOVER:
+        if (ShootIsSpeedRecovered()) {
+            // What: 回速完成后统一退回锁角保持；Why: 当前需求是防双发优先，因此即便恢复期间出现新点击，也不能在这一拍自动续上一发。
+            single_fire.state = SF_LOCKING;
         }
-        // [新增] 加上抵着限位的偏置角度，保证入弹口被微弱推力顶住
-        LoaderSetAngleRef(single_fire.lock_target_angle + SF_LOCK_PUSH_ANGLE);
+        LoaderSetAngleRef(single_fire.lock_target_angle);
+        break;
+
+    case SF_LOCKING:
+        if (has_pending_request) {
+            // What: 锁角态存在缓存请求时重新进入待速；Why: 这样单发请求的消费点只在状态机内，行为更可预测。
+            AcceptPendingSingleFireRequest(current_time);
+        }
+        LoaderSetAngleRef(single_fire.lock_target_angle);
         break;
     }
 
@@ -910,6 +1266,7 @@ static void HandleSingleFire(uint8_t trigger_active)
 void ShootTask()
 {
     static uint16_t last_report_fire_count = 0;
+    float current_time_ms = DWT_GetTimeline_ms();
 
     // 从cmd获取控制数据
     SubGetMessage(shoot_sub, &shoot_cmd_recv);
@@ -919,7 +1276,19 @@ void ShootTask()
     if (shoot_cmd_recv.load_mode != LOAD_1_BULLET) {
         fire_trigger.trigger_consumed = 0;
     } else if (fire_trigger.last_mode != LOAD_1_BULLET && !fire_trigger.trigger_consumed) {
-        fire_trigger.pending_fire = 1;
+        uint8_t single_fire_can_accept_request =
+            (uint8_t)(single_fire.state == SF_IDLE || single_fire.state == SF_LOCKING);
+        uint8_t trigger_guard_elapsed =
+            (uint8_t)((current_time_ms - fire_trigger.last_accept_time_ms) >= SF_TRIGGER_REARM_GUARD_MS);
+
+        // What: 只允许在单发状态机已经完全收口时接收新的单发请求；Why: 若上一发还在待速、送弹、补发或回速阶段就继续收边沿，会把一次点击排成两发。
+        if (single_fire_can_accept_request != 0u && trigger_guard_elapsed != 0u) {
+            fire_trigger.pending_fire = 1;
+            // What: 只有真正接受这次请求时才刷新最近接受时间；Why: 防抖窗口应该围绕“有效触发”建立，不能被一个被拒绝的伪边沿不断往后推迟。
+            fire_trigger.last_accept_time_ms = current_time_ms;
+        }
+
+        // What: 无论本次边沿是否被接受都立即标记为已消费；Why: 同一次扳机抖动或鼠标回弹只能贡献一次判定，后续必须先释放回 STOP 才允许重新武装。
         fire_trigger.trigger_consumed = 1;
     }
 
@@ -929,6 +1298,8 @@ void ShootTask()
     if (shoot_cmd_recv.shoot_mode == SHOOT_OFF) {
         current_inner_deg = 0.0f;
         current_outer_deg = 0.0f;
+        // What: 急停时同步清空最终目标缓存；Why: ready/recover 判定不能继续拿上一次开火目标当作当前目标。
+        UpdateFrictionTargetAbs(0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f);
         requested_load_mode = LOAD_STOP;
         fire_trigger.pending_fire = 0;
         fire_trigger.trigger_consumed = 0;
@@ -956,7 +1327,7 @@ void ShootTask()
     loader_mode_e stall_input_mode = requested_load_mode;
     if ((requested_load_mode == LOAD_STOP) &&
         !SingleFireIsRetryActive() &&
-        (fire_trigger.pending_fire || single_fire.state == SF_WAIT_SPEED || single_fire.state == SF_FEEDING)) {
+        (single_fire.state == SF_WAIT_SPEED || single_fire.state == SF_FEEDING)) {
         stall_input_mode = LOAD_1_BULLET;
     }
 
@@ -1005,7 +1376,8 @@ void ShootTask()
         // 在连发模式下复位单发标志位，确保切回单发时可立即触发一次
         AbortSingleFire();
         fire_trigger.trigger_consumed = 0;
-        LoaderSetSpeedRef(shoot_cmd_recv.shoot_rate * 360 * REDUCTION_RATIO_LOADER / 8);
+        // What: 连发速度统一按单发机械节距换算；Why: 不能再保留与单发位置目标冲突的 `/8` 常量，否则不同模式会对“一发角度”产生两套定义。
+        LoaderSetSpeedRef(LoaderBulletRateToMotorSpeed(shoot_cmd_recv.shoot_rate));
         break;
     // 拨盘反转,对速度闭环,后续增加卡弹检测(通过裁判系统剩余热量反馈和电机电流)
     // 也有可能需要从switch-case中独立出来
