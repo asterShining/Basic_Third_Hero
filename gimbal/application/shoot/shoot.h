@@ -41,7 +41,6 @@
 #define STALL_SPEED_THRESHOLD 400.0f
 // 堵转检测消抖时间 (ms), 持续满足条件才确认堵转
 #define STALL_DETECT_TIME 1500
-// 反转角度 (deg), 约为 1/2 颗弹丸角度, 足够解卡但尽量不把正常节拍打乱
 #define REVERSE_ANGLE (0.1f * ONE_BULLET_DELTA_ANGLE)
 // 反转持续时间 (ms)
 #define REVERSE_TIME 500
@@ -52,7 +51,7 @@
 
 // ==================== 单发控制参数 ====================
 // What: 定义单发首发冲刺步距 (单位: 发)；Why: 上一版 1.2 发在弱供弹工况下空发偏多，因此小幅回补到 1.35 发，让首发更容易把弹丸稳定送入摩擦轮而又不直接回到双发风险很高的旧值。
-#define SF_RUSH_BULLET_COUNT 1.35f
+#define SF_RUSH_BULLET_COUNT 1.65f
 // 拨盘电机总角度对应的一发角度 (deg), 需要乘减速比, 因为 total_angle 是电机转子多圈角度
 #define LOADER_MOTOR_ANGLE_PER_BULLET (ONE_BULLET_DELTA_ANGLE * REDUCTION_RATIO_LOADER)
 // 单发冲刺总角度 (deg), 用于位置环大步进推弹

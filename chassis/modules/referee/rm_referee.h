@@ -74,7 +74,8 @@ typedef struct
 	float chassis_gimbal_offset_deg; // What: 底盘相对云台的偏角；Why: body/qiang UI 现在需要显示相对姿态而不是各自的世界坐标旋转。
 	float chassis_power_w; // What: UI显示用的底盘实时功率；Why: 优先展示超电实测功率，离线时再退回本地估计值。
 	uint8_t friction_on; // What: 摩擦轮当前启停状态；Why: fric状态指示必须反映上板真实发射使能结果。
-	uint8_t cap_on; // What: 超电输出状态；Why: cap状态指示需要区分“模块在线但输出被关”和“真正可用”。
+	uint8_t robot_spin_on; // What: 小陀螺当前是否真正处于执行态；Why: on_2 需要反映本拍是否仍在按自旋模式输出，不能继续被历史模式残留误导。
+	uint8_t cap_on; // What: 超电当前是否按本拍指令保持工作态；Why: cap 指示必须在关闭、断电或错误保护介入时立即回落，不能再依赖慢一拍的回包状态位。
 } Referee_Interactive_info_t;
 
 // 裁判接收链路诊断信息，记录“中断触发->协议校验->离线判定”的阶段计数，便于快速定位首个失败环节
