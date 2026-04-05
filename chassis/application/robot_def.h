@@ -217,7 +217,8 @@ typedef struct
     float vx; // 前进方向速度
     float vy; // 横移方向速度
     float wz; // 旋转速度
-    float offset_angle; // 底盘和归中位置的夹角
+    float offset_angle; // What: 真实云台相对底盘的物理夹角；Why: 底盘板做平移坐标系变换和 UI 显示时必须看到真实相对姿态，不能混入虚拟前方修正。
+    float follow_offset_angle; // What: 底盘跟随闭环使用的虚拟前方误差；Why: V 键只转云台时，底盘仍需把反转后的云台朝向当作新的前方，但这份误差必须与真实夹角分离。
     float gimbal_gyro_z; // 来自云台的陀螺仪z轴角速度前馈
     float gimbal_cmd_wz; // 来自云台的底盘旋转控制量
     uint8_t calibrate_imu; // 请求底盘IMU校准
@@ -228,6 +229,7 @@ typedef struct
     uint8_t friction_on; // What: 双板下发摩擦轮启停状态；Why: 裁判 UI 的 fric 指示需要跟随上板真实使能结果实时变化。
     uint8_t ui_refresh_request; // What: 接收来自上板的一次性 UI 刷新请求；Why: 底盘板只负责执行重绘，不应自己猜测操作者何时需要重建。
     uint8_t follow_transition_request; // What: 显式标记“小陀螺退跟随”的接管边沿；Why: 双板链路是覆盖式最新帧语义，只靠模式值本身无法稳定表达边沿事件。
+    uint8_t follow_brake_request; // What: 显式请求底盘在跟随模式下临时只做阻尼刹停；Why: V 键掉头期间底盘需要平滑停住，不能继续吃历史跟随误差和云台角速度前馈。
 #ifdef USE_ISLAND_ACTION // [条件编译] 仅在启用上岛机构时包含辅助机构控制字段
     front_track_mode_e front_track_mode; // What: 独立描述前履带开关状态；Why: 避免复用底盘主模式后让跟随与上岛辅助机构互相覆盖
     lift_mode_e lift_mode; // What: 独立描述抬升状态机；Why: 让抬升保持与调高语义在双板两侧都保持一致

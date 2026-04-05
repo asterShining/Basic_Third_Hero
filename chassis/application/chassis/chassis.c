@@ -98,6 +98,7 @@ static float real_vy = 0.0f; // 真实横移速度 m/s
 static float real_wz = 0.0f; // 真实旋转速度 deg/s
 static chassis_mode_e last_chassis_mode = CHASSIS_ZERO_FORCE; // What: 记录上一拍底盘模式；Why: 底盘板本地也要能识别小陀螺退跟随边沿，避免上板请求偶发漏拍时接管逻辑失效。
 static uint8_t last_follow_transition_request = 0u; // What: 记录接管请求上一拍电平；Why: 上板会保持几拍请求位，底盘侧只应在上升沿触发一次接管窗口。
+static uint8_t last_follow_brake_request = 0u; // What: 记录跟随刹停请求上一拍电平；Why: V 掉头结束时需要识别刹停请求释放边沿，才能把跟随滤波状态重新贴回当前误差而不是沿用刹停期的零值。
 static uint8_t follow_transition_ticks = 0u; // What: 记录当前跟随接管剩余拍数；Why: 用固定拍数窗口先刹停再回正，比直接混控更稳且实现确定性更强。
 static float follow_angle_err_filtered = 0.0f; // What: 缓存滤波后的跟随偏角；Why: 刚退出接管时若直接吃原始偏角，容易被机械回弹和量测毛刺再次拉成反复摆动。
 static float follow_wz_cmd_limited = 0.0f; // What: 缓存限斜率后的跟随输出；Why: 接管段切回正常跟随时沿用连续状态，避免指令一步跳变刺激轮速环。
@@ -331,6 +332,7 @@ static void ResetFollowControlState(void)
     follow_angle_err_filtered = 0.0f;
     follow_wz_cmd_limited = 0.0f;
     last_follow_transition_request = 0u;
+    last_follow_brake_request = 0u;
     DWT_GetDeltaT(&follow_control_dwt_cnt); // What: 顺手重置跟随控制时间基准；Why: 避免长时间不在跟随模式时下一次进入拿到异常大的dt。
 }
 
@@ -722,6 +724,8 @@ void ChassisTask()
 {
     float gimbal_wz = 0.0f;
     uint8_t follow_transition_request_rise = 0u;
+    uint8_t follow_brake_request_rise = 0u;
+    uint8_t follow_brake_request_fall = 0u;
     uint8_t rotate_to_follow_edge = 0u;
     // 后续增加没收到消息的处理(双板的情况)
     // 获取新的控制信息
@@ -733,9 +737,12 @@ void ChassisTask()
 #endif // CHASSIS_BOARD
     gimbal_wz = chassis_cmd_recv.gimbal_gyro_z; // What: 使用最新一帧云台角速度前馈；Why: 避免先读取旧值再更新命令导致跟随支路固定滞后一个控制周期。
     follow_transition_request_rise = (uint8_t)(chassis_cmd_recv.follow_transition_request != 0u && last_follow_transition_request == 0u); // What: 检测接管请求上升沿；Why: 上板会保持数拍请求位，底盘侧只应在真正的边沿触发一次接管窗口。
+    follow_brake_request_rise = (uint8_t)(chassis_cmd_recv.follow_brake_request != 0u && last_follow_brake_request == 0u); // What: 检测跟随刹停请求上升沿；Why: 进入 V 掉头期时需要立刻清空历史跟随状态，避免底盘再被旧滤波和前馈带着走一段。
+    follow_brake_request_fall = (uint8_t)(chassis_cmd_recv.follow_brake_request == 0u && last_follow_brake_request != 0u); // What: 检测跟随刹停请求释放沿；Why: V 掉头结束后要把普通跟随滤波状态重新贴齐当前误差，避免从刹停期的零误差直接切回时再抽动。
     rotate_to_follow_edge = (uint8_t)(last_chassis_mode == CHASSIS_ROTATE &&
                                       chassis_cmd_recv.chassis_mode == CHASSIS_FOLLOW_GIMBAL_YAW); // What: 本地补一份小陀螺退跟随边沿检测；Why: 即使上板请求偶发漏拍，底盘也能靠本地模式边沿兜底进入接管。
     last_follow_transition_request = chassis_cmd_recv.follow_transition_request;
+    last_follow_brake_request = chassis_cmd_recv.follow_brake_request;
 
     if (chassis_cmd_recv.ui_refresh_request != 0u) {
         // What: 收到上板的一次性 UI 刷新请求后转交给裁判 UI 任务；Why: 真正的绘图发包必须在 UI 线程内串行执行，底盘控制线程不应直接插手。
@@ -827,34 +834,55 @@ void ChassisTask()
         const float follow_yaw_max_wz = 7500.0f; // What: 跟随模式角速度输出上限；Why: 防止大角度时给电机速度环过猛目标，降低饱和后再过冲的概率
         float chassis_wz = Chassis_IMU_data->Gyro[Z] * RAD_2_DEGREE; // What: 读取底盘当前真实角速度；Why: D项必须基于被控对象自身速度才能形成真实阻尼
         float angle_err = 0.0f;
-        float raw_angle_err = chassis_cmd_recv.offset_angle; // What: 缓存当前底盘相对云台的原始角度误差；Why: 接管启动时需要把滤波状态贴齐当前值，避免退出窗口首拍再跳一次。
+        float raw_angle_err = chassis_cmd_recv.follow_offset_angle; // What: 缓存当前底盘跟随闭环使用的虚拟前方误差；Why: V 键只转云台后新的前方语义只能作用于跟随回正，不能再直接复用真实物理夹角。
         float relative_gimbal_wz = gimbal_wz - chassis_wz; // What: 计算云台相对底盘的角速度；Why: gimbal_gyro_z含底盘旋转分量，直接前馈会形成正反馈振荡
         float raw_follow_wz = 0.0f;
         float follow_dt_s = GetFollowControlDt();
 
-        if (follow_transition_request_rise != 0u || rotate_to_follow_edge != 0u) {
-            StartFollowTransition(raw_angle_err); // What: 在小陀螺退跟随边沿启动接管窗口；Why: 先刹停再回正，避免残余自旋和偏角环在同一拍里互相打架。
-        } else if (last_chassis_mode != CHASSIS_FOLLOW_GIMBAL_YAW) {
-            // What: 从其它模式首次进入普通跟随时把滤波状态贴齐当前偏角；Why: 避免滤波器从0起步把第一拍回正量平白压小，导致跟随接管变慢。
-            follow_angle_err_filtered = raw_angle_err;
+        if (follow_brake_request_rise != 0u) {
+            // What: 跟随刹停请求刚进入时立即清空历史滤波、历史输出并重置时间基准；Why: 用户反馈的前段跟转主要来自旧跟随状态残留，进入 V 掉头期必须第一时间把这些残留切掉。
+            follow_angle_err_filtered = 0.0f;
+            follow_wz_cmd_limited = 0.0f;
+            DWT_GetDeltaT(&follow_control_dwt_cnt);
         }
-        follow_angle_err_filtered += (raw_angle_err - follow_angle_err_filtered) * FOLLOW_ANGLE_FILTER_ALPHA; // What: 对偏角做一阶滤波；Why: 先滤掉机械回弹和量测毛刺，退出接管后P项不容易马上反向抽动。
-        angle_err = follow_angle_err_filtered;
-        if (fabsf(angle_err) < follow_yaw_deadband) {
-            angle_err = 0.0f; // What: 清零死区内误差；Why: 小角度时让前馈和阻尼接管，避免位置项在零点附近反复翻转
-        }
-
-        if (follow_transition_ticks != 0u) {
-            raw_follow_wz = -FOLLOW_TRANSITION_BRAKE_KD * chassis_wz; // What: 接管窗口内只按车体角速度做阻尼刹停；Why: 先卸掉小陀螺余旋，比同时引入偏角环和前馈更不容易振荡。
-            LIMIT_MIN_MAX(raw_follow_wz, -FOLLOW_TRANSITION_MAX_WZ, FOLLOW_TRANSITION_MAX_WZ); // What: 限制接管阶段制动输出；Why: 刹停只需中等强度，过猛反而容易把轮速环再度推饱和。
-            if (fabsf(chassis_wz) < FOLLOW_TRANSITION_EXIT_WZ_DPS) {
-                follow_transition_ticks = 0u; // What: 当余旋已经足够小时提前结束接管；Why: 这样可以更早恢复正常回正，减少“刹得过久”的拖滞手感。
-            } else {
-                follow_transition_ticks--;
-            }
+        if (chassis_cmd_recv.follow_brake_request != 0u) {
+            // What: 跟随刹停期间持续把滤波误差压成 0；Why: 这一段底盘只允许按自身余旋做阻尼收敛，绝不能再把云台相对角误差重新积回来。
+            follow_angle_err_filtered = 0.0f;
+            // What: 跟随刹停期间只按车体自身角速度做阻尼制动；Why: 这样既能平滑停住底盘，又能完全隔离云台角速度前馈和位置误差继续把底盘带走。
+            raw_follow_wz = -FOLLOW_TRANSITION_BRAKE_KD * chassis_wz;
+            LIMIT_MIN_MAX(raw_follow_wz, -FOLLOW_TRANSITION_MAX_WZ, FOLLOW_TRANSITION_MAX_WZ); // What: 复用现有接管阶段的制动限幅；Why: 保持熟悉且已验证过的刹停力度，不额外引入新参数风险。
         } else {
-            raw_follow_wz = -follow_yaw_kp * angle_err - follow_yaw_kd * chassis_wz - follow_yaw_kff * relative_gimbal_wz; // What: 接管结束后恢复正常跟随控制律；Why: 仍保留P回正、D阻尼和相对角速度前馈来兼顾速度与稳定性。
-            LIMIT_MIN_MAX(raw_follow_wz, -follow_yaw_max_wz, follow_yaw_max_wz); // What: 限制正常跟随模式角速度输出；Why: 避免外环瞬时给出过大目标把电机内环推入饱和。
+            if (follow_brake_request_fall != 0u) {
+                // What: 跟随刹停刚释放时把滤波误差贴回当前虚拟前方误差并重置时间基准；Why: 掉头完成后恢复普通跟随时必须从当前真实状态平滑接回，而不是沿用刹停期间的零误差状态。
+                follow_angle_err_filtered = raw_angle_err;
+                DWT_GetDeltaT(&follow_control_dwt_cnt);
+            }
+            if (follow_transition_request_rise != 0u || rotate_to_follow_edge != 0u) {
+                StartFollowTransition(raw_angle_err); // What: 在小陀螺退跟随边沿启动接管窗口；Why: 先刹停再回正，避免残余自旋和偏角环在同一拍里互相打架。
+            } else {
+                if (last_chassis_mode != CHASSIS_FOLLOW_GIMBAL_YAW) {
+                    // What: 从其它模式首次进入普通跟随时把滤波状态贴齐当前偏角；Why: 避免滤波器从0起步把第一拍回正量平白压小，导致跟随接管变慢。
+                    follow_angle_err_filtered = raw_angle_err;
+                }
+                follow_angle_err_filtered += (raw_angle_err - follow_angle_err_filtered) * FOLLOW_ANGLE_FILTER_ALPHA; // What: 对偏角做一阶滤波；Why: 先滤掉机械回弹和量测毛刺，退出接管后P项不容易马上反向抽动。
+                angle_err = follow_angle_err_filtered;
+                if (fabsf(angle_err) < follow_yaw_deadband) {
+                    angle_err = 0.0f; // What: 清零死区内误差；Why: 小角度时让前馈和阻尼接管，避免位置项在零点附近反复翻转
+                }
+
+                if (follow_transition_ticks != 0u) {
+                    raw_follow_wz = -FOLLOW_TRANSITION_BRAKE_KD * chassis_wz; // What: 接管窗口内只按车体角速度做阻尼刹停；Why: 先卸掉小陀螺余旋，比同时引入偏角环和前馈更不容易振荡。
+                    LIMIT_MIN_MAX(raw_follow_wz, -FOLLOW_TRANSITION_MAX_WZ, FOLLOW_TRANSITION_MAX_WZ); // What: 限制接管阶段制动输出；Why: 刹停只需中等强度，过猛反而容易把轮速环再度推饱和。
+                    if (fabsf(chassis_wz) < FOLLOW_TRANSITION_EXIT_WZ_DPS) {
+                        follow_transition_ticks = 0u; // What: 当余旋已经足够小时提前结束接管；Why: 这样可以更早恢复正常回正，减少“刹得过久”的拖滞手感。
+                    } else {
+                        follow_transition_ticks--;
+                    }
+                } else {
+                    raw_follow_wz = -follow_yaw_kp * angle_err - follow_yaw_kd * chassis_wz - follow_yaw_kff * relative_gimbal_wz; // What: 接管结束后恢复正常跟随控制律；Why: 仍保留P回正、D阻尼和相对角速度前馈来兼顾速度与稳定性。
+                    LIMIT_MIN_MAX(raw_follow_wz, -follow_yaw_max_wz, follow_yaw_max_wz); // What: 限制正常跟随模式角速度输出；Why: 避免外环瞬时给出过大目标把电机内环推入饱和。
+                }
+            }
         }
         chassis_cmd_recv.wz = ApplyFollowCommandSlew(raw_follow_wz, follow_dt_s); // What: 对最终跟随输出做限斜率；Why: 从接管刹停切回正常回正时保持连续，避免指令跳变再次激起摆振。
         break;
