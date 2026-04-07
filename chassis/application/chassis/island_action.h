@@ -3,7 +3,7 @@
 
 #include "robot_def.h"
 
-#ifdef USE_ISLAND_ACTION // [条件编译] 仅在启用上岛机构时暴露接口声明；Why: 禁用时头文件为空壳，避免链接未定义符号
+#ifdef USE_ISLAND_ACTION // [条件编译] 仅在启用上岛机构时暴露接口声明，目的是禁用时头文件为空壳，避免链接未定义符号
 
 /**
  * @brief 初始化上岛机构的电机（前履带DM电机，后抬升3508电机）

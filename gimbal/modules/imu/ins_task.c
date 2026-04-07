@@ -115,7 +115,8 @@ attitude_t *INS_Init(void)
 }
 void INS_Calibrate(void)
 {
-    INS_t INS;
+    // 这里直接复位模块内的静态 INS 状态，目的是让后续 `INS_Init()` 真正走完整重初始化流程；
+    // 之前这里误写成了同名局部变量，只会清掉一个马上被丢弃的临时副本，既没有校准效果，也会留下编译器 warning。
     INS.init = 0;
     // 2. 重新调用初始化
     INS_Init();

@@ -33,9 +33,9 @@
 
 /* 机器人重要参数定义,注意根据不同机器人进行修改,浮点数需要以.0或f结尾,无符号以u结尾 */
 // 云台参数
-#define YAW_CHASSIS_ALIGN_DEG 0.0f // What: 将 yaw 对正基准统一成 DM 硬件零点 0 度；Why: cmd 初始化与 offset 计算都已围绕 0 度闭环，继续保留旧机械角只会让双板调试语义分叉。
+#define YAW_CHASSIS_ALIGN_DEG 0.0f // 将 yaw 对正基准统一成 DM 硬件零点 0 度，目的是cmd 初始化与 offset 计算都已围绕 0 度闭环，继续保留旧机械角只会让双板调试语义分叉。
 #define PITCH_HORIZON_ECD 0 // 云台处于水平位置时编码器值,若对云台有机械改动需要修改
-#define PITCH_MAX_ANGLE 34 // What: 将底盘侧 UI 与限位映射共用的 pitch 上限统一到 34 度；Why: 选手端滑块必须与实机最高限位置一一对应，避免 34 度后仍残留虚假行程。
+#define PITCH_MAX_ANGLE 34 // 将底盘侧 UI 与限位映射共用的 pitch 上限统一到 34 度，目的是选手端滑块必须与实机最高限位置一一对应，避免 34 度后仍残留虚假行程。
 #define PITCH_MIN_ANGLE -11 // 云台陀螺仪竖直方向最小角度
 // 发射参数
 #define ONE_BULLET_DELTA_ANGLE 40 // 发射一发弹丸拨盘转动的距离,由机械设计图纸给出
@@ -170,8 +170,8 @@ typedef enum {
     LIFT_OFF = 0, // 抬升关闭
     LIFT_HOLD, // 抬升保持当前位置
     LIFT_ADJUST, // 抬升根据拨轮调整目标高度
-    LIFT_AUTO_LEVEL, // What: 基于底盘pitch陀螺仪闭环自动调平；Why: 上坡后松开拨轮即可自动抬升后端保持底盘水平
-    LIFT_RETRACT, // What: 快速收腿模式；Why: 左拨杆回中时全速反向收腿，撞限位后自动停止
+    LIFT_AUTO_LEVEL, // 基于底盘pitch陀螺仪闭环自动调平，目的是上坡后松开拨轮即可自动抬升后端保持底盘水平
+    LIFT_RETRACT, // 快速收腿模式，目的是左拨杆回中时全速反向收腿，撞限位后自动停止
 } lift_mode_e;
 #endif // USE_ISLAND_ACTION
 
@@ -189,7 +189,7 @@ typedef enum {
     LOAD_BURSTFIRE, // 连发
 } loader_mode_e;
 
-// What: 本地定义射速挡位枚举；Why: 删除master_machine后仍需保留发射与裁判限速字段的统一类型
+// 本地定义射速挡位枚举，目的是删除master_machine后仍需保留发射与裁判限速字段的统一类型
 typedef enum {
     BULLET_SPEED_NONE = 0, // 未知或未配置
     BIG_AMU_10 = 10, // 大弹丸10m/s
@@ -217,24 +217,24 @@ typedef struct
     float vx; // 前进方向速度
     float vy; // 横移方向速度
     float wz; // 旋转速度
-    float offset_angle; // What: 真实云台相对底盘的物理夹角；Why: 底盘板做平移坐标系变换和 UI 显示时必须看到真实相对姿态，不能混入虚拟前方修正。
-    float follow_offset_angle; // What: 底盘跟随闭环使用的虚拟前方误差；Why: V 键只转云台时，底盘仍需把反转后的云台朝向当作新的前方，但这份误差必须与真实夹角分离。
+    float offset_angle; // 真实云台相对底盘的物理夹角，目的是底盘板做平移坐标系变换和 UI 显示时必须看到真实相对姿态，不能混入虚拟前方修正。
+    float follow_offset_angle; // 底盘跟随闭环使用的虚拟前方误差，目的是V 键只转云台时，底盘仍需把反转后的云台朝向当作新的前方，但这份误差必须与真实夹角分离。
     float gimbal_gyro_z; // 来自云台的陀螺仪z轴角速度前馈
     float gimbal_cmd_wz; // 来自云台的底盘旋转控制量
     uint8_t calibrate_imu; // 请求底盘IMU校准
     chassis_mode_e chassis_mode;
     int chassis_speed_buff;
     super_cap_mode_e cap_mode;
-    float gimbal_pitch_deg; // What: 双板下发云台实际pitch角；Why: 底盘板绘制俯仰滑块时必须使用上板真实姿态而不是控制目标。
-    uint8_t friction_on; // What: 双板下发摩擦轮启停状态；Why: 裁判 UI 的 fric 指示需要跟随上板真实使能结果实时变化。
-    uint8_t ui_refresh_request; // What: 接收来自上板的一次性 UI 刷新请求；Why: 底盘板只负责执行重绘，不应自己猜测操作者何时需要重建。
-    uint8_t follow_transition_request; // What: 显式标记“小陀螺退跟随”的接管边沿；Why: 双板链路是覆盖式最新帧语义，只靠模式值本身无法稳定表达边沿事件。
-    uint8_t follow_brake_request; // What: 显式请求底盘在跟随模式下临时只做阻尼刹停；Why: V 键掉头期间底盘需要平滑停住，不能继续吃历史跟随误差和云台角速度前馈。
+    float gimbal_pitch_deg; // 双板下发云台实际pitch角，目的是底盘板绘制俯仰滑块时必须使用上板真实姿态而不是控制目标。
+    uint8_t friction_on; // 双板下发摩擦轮启停状态，目的是裁判 UI 的 fric 指示需要跟随上板真实使能结果实时变化。
+    uint8_t ui_refresh_request; // 接收来自上板的一次性 UI 刷新请求，目的是底盘板只负责执行重绘，不应自己猜测操作者何时需要重建。
+    uint8_t follow_transition_request; // 显式标记“小陀螺退跟随”的接管边沿，目的是双板链路是覆盖式最新帧语义，只靠模式值本身无法稳定表达边沿事件。
+    uint8_t follow_brake_request; // 显式请求底盘在跟随模式下临时只做阻尼刹停，目的是V 键掉头期间底盘需要平滑停住，不能继续吃历史跟随误差和云台角速度前馈。
 #ifdef USE_ISLAND_ACTION // [条件编译] 仅在启用上岛机构时包含辅助机构控制字段
-    front_track_mode_e front_track_mode; // What: 独立描述前履带开关状态；Why: 避免复用底盘主模式后让跟随与上岛辅助机构互相覆盖
-    lift_mode_e lift_mode; // What: 独立描述抬升状态机；Why: 让抬升保持与调高语义在双板两侧都保持一致
-    float front_track_speed_ref; // What: 下发前履带速度参考；Why: 把履带调速接口预留在双板协议里，底盘侧不再硬编码启停外的行为
-    float lift_dial_input; // What: 下发抬升拨轮归一化输入；Why: 底盘侧基于真实电机反馈积分目标高度，避免云台板盲算位置
+    front_track_mode_e front_track_mode; // 独立描述前履带开关状态，目的是避免复用底盘主模式后让跟随与上岛辅助机构互相覆盖
+    lift_mode_e lift_mode; // 独立描述抬升状态机，目的是让抬升保持与调高语义在双板两侧都保持一致
+    float front_track_speed_ref; // 下发前履带速度参考，目的是把履带调速接口预留在双板协议里，底盘侧不再硬编码启停外的行为
+    float lift_dial_input; // 下发抬升拨轮归一化输入，目的是底盘侧基于真实电机反馈积分目标高度，避免云台板盲算位置
 #endif // USE_ISLAND_ACTION
     // UI部分
     //  ...
@@ -247,8 +247,8 @@ typedef struct
     float yaw;
     float pitch;
     gimbal_mode_e gimbal_mode;
-    uint8_t yaw_pid_reset_request; // What: 请求 gimbal 侧复位 yaw 速度环运行时状态；Why: 双板共用同一协议结构，保持字段一致才能避免小陀螺切换时协议错位或语义丢失。
-    uint8_t pitch_reset_request; // What: 保持与云台板命令结构完全一致；Why: 虽然该请求只在云台板内清理 pitch 运行时状态，但双板协议定义仍必须严格同构，避免后续维护时出现尺寸和偏移漂移。
+    uint8_t yaw_pid_reset_request; // 请求 gimbal 侧复位 yaw 速度环运行时状态，目的是双板共用同一协议结构，保持字段一致才能避免小陀螺切换时协议错位或语义丢失。
+    uint8_t pitch_reset_request; // 保持与云台板命令结构完全一致，目的是虽然该请求只在云台板内清理 pitch 运行时状态，但双板协议定义仍必须严格同构，避免后续维护时出现尺寸和偏移漂移。
 } Gimbal_Ctrl_Cmd_s;
 
 // cmd发布的发射控制数据,由shoot订阅
@@ -287,8 +287,8 @@ typedef struct
 {
     attitude_t gimbal_imu_data;
     float yaw_motor_single_round_angle;
-    uint8_t yaw_motor_online; // What: 保持与云台板回传结构一致；Why: 双板协议定义必须严格同构，避免后续联调时字段错位。
-    uint8_t pitch_motor_online; // What: 保持与云台板回传结构完全一致；Why: 当前字段主要供云台板内部识别 pitch 复活边沿，但底盘板这份定义也必须同步，避免双仓结构体长期漂移。
+    uint8_t yaw_motor_online; // 保持与云台板回传结构一致，目的是双板协议定义必须严格同构，避免后续联调时字段错位。
+    uint8_t pitch_motor_online; // 保持与云台板回传结构完全一致，目的是当前字段主要供云台板内部识别 pitch 复活边沿，但底盘板这份定义也必须同步，避免双仓结构体长期漂移。
 } Gimbal_Upload_Data_s;
 
 typedef struct

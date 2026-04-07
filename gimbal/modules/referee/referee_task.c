@@ -218,6 +218,11 @@ static void MyUIRefresh(referee_info_t *referee_recv_info, Referee_Interactive_i
             UICharDraw(&UI_State_dyn[1], "sd1", UI_Graph_Change, 8, UI_Color_Yellow, 15, 2, 270, 700, "gyro     ");
             break;
         }
+        case GIMBAL_CALI_MODE:
+        {
+            UICharDraw(&UI_State_dyn[1], "sd1", UI_Graph_Change, 8, UI_Color_Yellow, 15, 2, 270, 700, "cali     ");
+            break;
+        }
         }
         UICharRefresh(&referee_recv_info->referee_id, UI_State_dyn[1]);
         _Interactive_data->Referee_Interactive_Flag.gimbal_flag = 0;

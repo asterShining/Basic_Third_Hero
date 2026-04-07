@@ -27,7 +27,7 @@ void StartINSTASK(void const *argument);
 void StartMOTORTASK(void const *argument);
 void StartDAEMONTASK(void const *argument);
 void StartROBOTTASK(void const *argument);
-// What: 声明裁判 UI 线程入口；Why: 任务创建恢复后需要显式暴露入口给 FreeRTOS 宏展开使用。
+// 声明裁判 UI 线程入口，目的是任务创建恢复后需要显式暴露入口给 FreeRTOS 宏展开使用。
 void StartUITASK(void const *argument);
 
 /**
@@ -48,10 +48,10 @@ void OSTaskInit()
     osThreadDef(robottask, StartROBOTTASK, osPriorityNormal, 0, 1024);
     robotTaskHandle = osThreadCreate(osThread(robottask), NULL);
 
-    // What: 恢复裁判 UI 线程创建；Why: 现有 UI 逻辑已经迁移到真实数据驱动路径，不再是旧测试任务，必须让线程实际运行才会在选手端生效。
+    // 恢复裁判 UI 线程创建，目的是现有 UI 逻辑已经迁移到真实数据驱动路径，不再是旧测试任务，必须让线程实际运行才会在选手端生效。
     osThreadDef(uitask, StartUITASK, osPriorityNormal, 0, 512);
     uiTaskHandle = osThreadCreate(osThread(uitask), NULL);
-    DMMotorControlInit(); // What: 启动底盘侧全部DM控制任务；Why: 前履带使用独立DM线程闭环，不初始化任务只会注册实例不会真正输出
+    DMMotorControlInit(); // 启动底盘侧全部DM控制任务，目的是前履带使用独立DM线程闭环，不初始化任务只会注册实例不会真正输出
     // HTMotorControlInit(); // 没有注册HT电机则不会执行
 }
 
@@ -71,7 +71,7 @@ __attribute__((noreturn)) void StartINSTASK(void const *argument)
         if (ins_dt > 1)
             LOGERROR("[freeRTOS] INS Task DELAY! dt = %d us", (int)(ins_dt * 1000));
 
-        // What: 视觉模块已移除，INS任务不再发送视觉数据；Why: 避免无效串口链路占用1kHz任务预算
+        // 视觉模块已移除，INS任务不再发送视觉数据，目的是避免无效串口链路占用1kHz任务预算
         osDelay(1);
     }
 }
@@ -141,7 +141,7 @@ __attribute__((noreturn)) void StartUITASK(void const *argument)
     LOGINFO("[freeRTOS] UI Init Done");
     for (;;) {
         UITask();
-        // What: UI 线程空转周期放宽到 10ms；Why: 具体发包频率由内部调度器控制到 20Hz/10Hz，任务本身不需要 1ms 忙轮询。
+        // UI 线程空转周期放宽到 10ms，目的是具体发包频率由内部调度器控制到 20Hz/10Hz，任务本身不需要 1ms 忙轮询。
         osDelay(10);
     }
 }
