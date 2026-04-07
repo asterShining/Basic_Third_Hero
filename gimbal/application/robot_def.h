@@ -245,6 +245,7 @@ typedef struct
     float pitch;
     gimbal_mode_e gimbal_mode;
     uint8_t yaw_pid_reset_request; // What: 请求 gimbal 侧复位 yaw 速度环运行时状态；Why: 小陀螺进出和切源时只同步目标还不够，必须顺手清掉残留积分才能防止头被拽歪。
+    uint8_t pitch_reset_request; // What: 请求 gimbal 侧只清理 pitch 运行时状态；Why: pitch 电机重连或零力恢复后需要去掉旧 PID 残留，但目标角应由 cmd 侧贴到当前姿态而不是再被强拉回 0 度。
 } Gimbal_Ctrl_Cmd_s;
 
 // cmd发布的发射控制数据,由shoot订阅
@@ -284,6 +285,7 @@ typedef struct
     attitude_t gimbal_imu_data;
     float yaw_motor_single_round_angle;
     uint8_t yaw_motor_online; // What: 回传 yaw 电机在线状态；Why: cmd 侧要在掉线和复活边沿冻结 offset 并重同步目标，不能继续盲信机械角。
+    uint8_t pitch_motor_online; // What: 回传 pitch 电机在线状态；Why: cmd 侧需要在掉线或零力恢复后把目标重新贴到当前姿态并清掉残留，而不是继续沿用旧锁存目标。
 } Gimbal_Upload_Data_s;
 
 typedef struct

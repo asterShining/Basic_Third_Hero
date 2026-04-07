@@ -248,6 +248,7 @@ typedef struct
     float pitch;
     gimbal_mode_e gimbal_mode;
     uint8_t yaw_pid_reset_request; // What: 请求 gimbal 侧复位 yaw 速度环运行时状态；Why: 双板共用同一协议结构，保持字段一致才能避免小陀螺切换时协议错位或语义丢失。
+    uint8_t pitch_reset_request; // What: 保持与云台板命令结构完全一致；Why: 虽然该请求只在云台板内清理 pitch 运行时状态，但双板协议定义仍必须严格同构，避免后续维护时出现尺寸和偏移漂移。
 } Gimbal_Ctrl_Cmd_s;
 
 // cmd发布的发射控制数据,由shoot订阅
@@ -287,6 +288,7 @@ typedef struct
     attitude_t gimbal_imu_data;
     float yaw_motor_single_round_angle;
     uint8_t yaw_motor_online; // What: 保持与云台板回传结构一致；Why: 双板协议定义必须严格同构，避免后续联调时字段错位。
+    uint8_t pitch_motor_online; // What: 保持与云台板回传结构完全一致；Why: 当前字段主要供云台板内部识别 pitch 复活边沿，但底盘板这份定义也必须同步，避免双仓结构体长期漂移。
 } Gimbal_Upload_Data_s;
 
 typedef struct

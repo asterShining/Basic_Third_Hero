@@ -74,7 +74,11 @@ void MX_CAN2_Init(void)
     hcan2.Init.TimeSeg1 = CAN_BS1_10TQ;
     hcan2.Init.TimeSeg2 = CAN_BS2_3TQ;
     hcan2.Init.TimeTriggeredMode = DISABLE;
-    hcan2.Init.AutoBusOff = DISABLE;
+    /* USER CODE BEGIN CAN2_Init_Recovery */
+    /* What: 使能 CAN2 的自动 Bus-Off 恢复。 */
+    /* Why: 当前图传 M2006 和多颗 DJI 电机都挂在 CAN2，上车日志已经出现连续 `CAN bus BUS!`；若继续关闭自动恢复，CAN2 一旦进错误态就更容易长期发不出去，最终把自动寻零拖成超时。 */
+    hcan2.Init.AutoBusOff = ENABLE;
+    /* USER CODE END CAN2_Init_Recovery */
     hcan2.Init.AutoWakeUp = DISABLE;
     hcan2.Init.AutoRetransmission = ENABLE;
     hcan2.Init.ReceiveFifoLocked = DISABLE;

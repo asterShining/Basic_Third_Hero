@@ -130,4 +130,11 @@ RC_ctrl_t *RemoteControlInit(UART_HandleTypeDef *rc_usart_handle);
  */
 uint8_t RemoteControlIsOnline();
 
+/**
+ * @brief 获取自初始化以来成功解析的遥控器帧计数
+ *
+ * @return uint32_t 累计成功解析帧数
+ */
+uint32_t RemoteControlGetFrameCount(void);
+
 #endif

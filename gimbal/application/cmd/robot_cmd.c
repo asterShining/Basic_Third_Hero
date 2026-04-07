@@ -79,6 +79,8 @@
 #define VT03_PAUSE_CALIB_HOLD_MS 2000u
 // What: 定义 yaw PID 复位请求保持拍数；Why: `message_center` 队列深度只有 1，边沿请求只发一拍有可能被下一拍覆盖，因此需要短暂保持几拍确保 gimbal 侧必然收到。
 #define YAW_PID_RESET_HOLD_TICKS 4u
+// What: 定义 pitch 恢复同步请求保持拍数；Why: pitch 的“贴当前姿态并清 PID”属于边沿语义，只发一拍容易被后续普通控制覆盖，必须短暂保持确保 gimbal 侧收到。
+#define PITCH_RESET_REQUEST_HOLD_TICKS 4u
 // What: 定义底盘跟随接管请求保持拍数；Why: 双板任务相位可能错开，只发单拍容易被覆盖，保持几拍才能确保底盘板收到“小陀螺退跟随”边沿。
 #define FOLLOW_TRANSITION_REQUEST_HOLD_TICKS 4u
 // What: 定义一键掉头完成时允许的云台 yaw 误差；Why: 目标角附近保留少量容差可以避开 IMU 噪声和离散控制带来的抖动，不必苛求完全零误差。
@@ -87,6 +89,8 @@
 #define TURNBACK_COMPLETE_STABLE_TICKS 20u
 // What: 定义一键掉头的最长执行时间；Why: 若机构阻塞或姿态估计异常，超时后必须退出执行态，避免一直霸占 yaw 目标。
 #define TURNBACK_TIMEOUT_MS 3000u
+// What: 定义 V 键触发前需要连续收到的“按下”新输入帧数；Why: 单帧脏数据或旧帧在 200Hz 控制任务里会被重复看到，必须要求连续新帧确认才能挡住误触发。
+#define TURNBACK_TRIGGER_STABLE_FRAMES 3u
 
 typedef enum {
     CONTROL_SOURCE_NONE = 0,
@@ -180,6 +184,10 @@ static uint8_t keyboard_free_toggle_last = 0u;
 // 键盘一键掉头键上一拍电平，作用是检测 V 键上升沿；
 // 原因是 V 现在是一次性动作触发键，必须只在真正按下沿启动一次新的掉头任务，不能把按住期间的持续电平误判成重复触发。
 static uint8_t keyboard_turnback_toggle_last = 0u;
+// What: 记录 V 键最近一次已经消费过的输入帧序号；Why: `robot_cmd` 比输入回调跑得快，必须先分清当前看到的是不是一帧新的键盘样本。
+static uint32_t keyboard_turnback_last_frame_serial = 0u;
+// What: 记录 V 键已经连续确认了多少帧“按下”；Why: 单帧毛刺或链路卡住的一帧旧数据都不应直接触发掉头，必须累计多帧确认。
+static uint8_t keyboard_turnback_press_frame_count = 0u;
 // 键盘 UI 刷新键上一拍电平，作用是检测 G 键上升沿；
 // 原因是 UI 整页重建只能发一次请求，不能在按住期间每拍都重复触发底盘板删页重画。
 static uint8_t keyboard_ui_refresh_last = 0u;
@@ -233,20 +241,30 @@ static uint8_t vt03_boot_zero_force_pending = 1u;
 static uint8_t vt03_mode_sw_last = VT03_MODE_SW_INVALID;
 // What: 记录 yaw PID 复位请求剩余保持拍数；Why: 小陀螺切换是边沿事件，做成多拍保持可以避免调度先后不同导致 gimbal 漏掉这一拍复位请求。
 static uint8_t yaw_pid_reset_hold_ticks = 0u;
+// What: 记录 pitch 恢复同步请求剩余保持拍数；Why: pitch 电机重连和零力恢复都要先贴当前姿态再清残留，保持几拍才能确保最终发包稳定覆盖所有上层输入。
+static uint8_t pitch_reset_request_hold_ticks = 0u;
+// What: 缓存这次 pitch 恢复时应贴齐的目标角；Why: 恢复窗口内必须反复下发同一个“当前姿态”目标，才能保证不会被同拍的摇杆或鼠标输入改写。
+static float pitch_recover_target_deg = 0.0f;
 // What: 记录底盘跟随接管请求剩余保持拍数；Why: 退出小陀螺进跟随时，底盘板必须稳定收到边沿才能进入先刹停再回正的接管窗口。
 static uint8_t follow_transition_request_hold_ticks = 0u;
 // What: 记录 yaw 电机上一拍在线状态；Why: 复活边沿需要把目标贴回当前姿态，常态下则不应反复打断控制。
 static uint8_t last_yaw_motor_online = 0u;
+// What: 记录 pitch 电机上一拍在线状态；Why: 只有识别出 pitch 的复活边沿，cmd 侧才能在恢复第一拍把目标贴回当前姿态并清掉残留状态。
+static uint8_t last_pitch_motor_online = 0u;
 // What: 缓存最后一次可信的真实云台-底盘夹角；Why: yaw 电机离线时继续沿用这个值，比用脏机械角实时重算更安全。
 static float last_valid_offset_angle = 0.0f;
 // What: 缓存最后一次可信的底盘跟随误差；Why: yaw 电机离线时虚拟前方闭环也必须冻结到最近可信值，不能重新解出一份假误差驱动底盘。
 static float last_valid_follow_offset_angle = 0.0f;
 // What: 记录上一拍最终下发到底盘的模式；Why: 底盘模式会被遥控器、VT03 和键鼠锁存多次覆盖，只有在最终结果层面检测边沿才不会漏掉小陀螺退跟随。
 static chassis_mode_e last_effective_chassis_mode = CHASSIS_ZERO_FORCE;
+// What: 记录上一拍最终下发给云台的模式；Why: 只有在最终输出层检测 ZERO_FORCE -> 有力模式，才能稳定覆盖“失能恢复后 pitch 还记着旧目标”的问题。
+static gimbal_mode_e last_effective_gimbal_mode = GIMBAL_ZERO_FORCE;
 static void ResetChassisAuxState(void);
 static void SyncGimbalTargetToCurrentAttitude(void);
 static void RequestYawSpeedPIDReset(void);
+static void RequestPitchRecoverToCurrentAttitude(void);
 static void RequestFollowTransition(void);
+static uint32_t GetControlSourceKeyFrameSerial(ControlSource_e source);
 static void SyncGimbalTargetAndRequestYawReset(void);
 static void ResetVT03PausePressState(void);
 static void TriggerVT03YawCalibration(void);
@@ -299,6 +317,31 @@ static void ClearKeyboardTurnbackState()
 }
 
 /**
+ * @brief 获取当前主控源最近一次已解析输入帧的序号
+ *
+ * @param source 当前主控源
+ * @return uint32_t 累计输入帧序号
+ */
+static uint32_t GetControlSourceKeyFrameSerial(ControlSource_e source)
+{
+    const VideoLinkKM_Diag_s *video_link_diag = NULL;
+
+    if (source == CONTROL_SOURCE_VT03) {
+        // What: VT03 分支直接读取图传模块的有效帧计数；Why: 只有真正通过校验并完成解包的新图传帧，才应该被当作新的键盘按键样本。
+        video_link_diag = VideoLinkKMGetDiag();
+        if (video_link_diag != NULL) {
+            return video_link_diag->valid_frame_count;
+        }
+        return 0u;
+    }
+    if (source == CONTROL_SOURCE_DT7) {
+        // What: DT7 分支读取 DBUS 成功解析帧计数；Why: 让 V 键去抖同样基于“新帧到达”而不是控制任务重复读同一帧。
+        return RemoteControlGetFrameCount();
+    }
+    return 0u;
+}
+
+/**
  * @brief 清空键鼠控制锁存状态
  *
  */
@@ -309,6 +352,8 @@ static void ResetMouseControlLatchState()
     keyboard_spin_toggle_last = 0u;
     keyboard_free_toggle_last = 0u;
     keyboard_turnback_toggle_last = 0u;
+    keyboard_turnback_last_frame_serial = 0u;
+    keyboard_turnback_press_frame_count = 0u;
     keyboard_ui_refresh_last = 0u;
     keyboard_spin_mode_latched = 0u;
     keyboard_free_mode_latched = 0u;
@@ -404,6 +449,18 @@ static void RequestYawSpeedPIDReset(void)
 }
 
 /**
+ * @brief 请求 pitch 恢复时贴齐当前姿态并清理运行时状态
+ *
+ */
+static void RequestPitchRecoverToCurrentAttitude(void)
+{
+    // What: 在触发恢复的这一拍先把目标角记成当前 IMU pitch；Why: 用户要的是“恢复时保持当前枪口姿态”，因此不能沿用旧锁存目标，也不能改成固定 0 度。
+    pitch_recover_target_deg = gimbal_fetch_data.gimbal_imu_data.Pitch;
+    // What: 再锁存几拍恢复同步请求；Why: 最终发包阶段还会经过遥控器、键鼠和模式覆盖，只有短暂保持才能确保这次“贴当前姿态 + 清 PID”真正落到底层。
+    pitch_reset_request_hold_ticks = PITCH_RESET_REQUEST_HOLD_TICKS;
+}
+
+/**
  * @brief 请求底盘侧进入“小陀螺退跟随”接管窗口
  *
  */
@@ -492,9 +549,10 @@ static ControlSource_e GetActiveControlSource(void)
  *
  * @param mouse_key_source 当前输入源的键鼠数据视图
  */
-static void SyncMouseKeyEdgeState(const RC_ctrl_t *mouse_key_source)
+static void SyncMouseKeyEdgeState(ControlSource_e source, const RC_ctrl_t *mouse_key_source)
 {
     uint16_t key_bits = 0u;
+    uint8_t turnback_pressed = 0u;
 
     if (mouse_key_source != NULL) {
         key_bits = mouse_key_source->key[KEY_PRESS].keys;
@@ -507,8 +565,13 @@ static void SyncMouseKeyEdgeState(const RC_ctrl_t *mouse_key_source)
     keyboard_friction_toggle_last = (uint8_t)((key_bits >> Key_F) & 0x1u);
     // What: 同步对齐 B 键边沿历史；Why: 主控切换时若用户正按着 B，不应在切源首拍被误判成新的自由模式切换。
     keyboard_free_toggle_last = (uint8_t)((key_bits >> Key_B) & 0x1u);
-    // What: 同步对齐 V 键边沿历史；Why: 主控切换时若用户正按着 V，不应在切源首拍被误判成新的掉头触发。
-    keyboard_turnback_toggle_last = (uint8_t)((key_bits >> Key_V) & 0x1u);
+    turnback_pressed = (uint8_t)((key_bits >> Key_V) & 0x1u);
+    // What: 切源时把 V 键确认态直接贴到当前电平；Why: 用户若本来就按着 V，切源后的第一拍不应该因为重新计数而被当成一次新的掉头触发。
+    keyboard_turnback_toggle_last = turnback_pressed;
+    // What: 同步记录当前主控源最近一帧序号；Why: 切源后要从新的输入流基线继续去抖，不能拿旧源的帧号和新源混算。
+    keyboard_turnback_last_frame_serial = GetControlSourceKeyFrameSerial(source);
+    // What: 若切源瞬间 V 已经按下，就直接把确认帧数补齐；Why: 这样后续保持按住只会被视为“持续按住”，不会在若干帧后又凭空补触发一次。
+    keyboard_turnback_press_frame_count = (turnback_pressed != 0u) ? TURNBACK_TRIGGER_STABLE_FRAMES : 0u;
     // What: 同步对齐 G 键边沿历史；Why: 主控切换时用户若正按着 G，不应该在切源首拍误触发一次 UI 全量刷新。
     keyboard_ui_refresh_last = (uint8_t)((key_bits >> Key_G) & 0x1u);
     // What: 同步对齐 X 键边沿历史；Why: 主控切换时若用户正按着 X，不应在切源首拍被误判成新的小陀螺切换。
@@ -582,7 +645,7 @@ static void HandleControlSourceSwitch(ControlSource_e new_source)
         vt03_trigger_last = 0u;
     }
 
-    SyncMouseKeyEdgeState(mouse_key_source);
+    SyncMouseKeyEdgeState(new_source, mouse_key_source);
     last_video_link_online = IsVideoLinkControlReady();
 
     if (need_sync_on_source_switch != 0u) {
@@ -708,6 +771,7 @@ static void PrepareControlCommandBase()
 
     gimbal_cmd_send.gimbal_mode = GIMBAL_ZERO_FORCE;
     gimbal_cmd_send.yaw_pid_reset_request = 0u;
+    gimbal_cmd_send.pitch_reset_request = 0u; // What: 每拍默认清空 pitch 状态复位请求；Why: 该请求是边沿语义，只应由恢复同步窗口在最终发包前按需重新拉高。
 
     shoot_cmd_send.shoot_mode = SHOOT_OFF;
     shoot_cmd_send.load_mode = LOAD_STOP;
@@ -726,9 +790,14 @@ void RobotCMDInit()
     // What: 开机时把 VT03 首次接管默认零力标志置位；Why: 用户要求 VT03 上电后先失能，必须等第一次接管时自动锁进零力。
     vt03_boot_zero_force_pending = 1u;
     last_yaw_motor_online = 0u;
+    last_pitch_motor_online = 0u;
     last_valid_offset_angle = 0.0f;
     last_valid_follow_offset_angle = 0.0f;
     last_effective_chassis_mode = CHASSIS_ZERO_FORCE;
+    last_effective_gimbal_mode = GIMBAL_ZERO_FORCE;
+    yaw_pid_reset_hold_ticks = 0u;
+    pitch_reset_request_hold_ticks = 0u; // What: 开机先清空 pitch 恢复同步保持计数；Why: 首次运行前不应误把初始化阶段当成一次恢复事件。
+    pitch_recover_target_deg = 0.0f; // What: 开机时把 pitch 恢复目标初始化为 0；Why: 仅作为防御性初值，真正恢复时会被实时姿态覆盖。
     follow_transition_request_hold_ticks = 0u;
     rc_data = RemoteControlInit(&huart3); // 修改为对应串口,注意如果是自研板dbus协议串口需选用添加了反相器的那个
     // What: 将 VT03 图传链路恢复到 USART6；Why: 当前实车接线走的是云台板 USART6，挂到 USART1 会导致 VT03 遥控和键鼠都收不到有效帧。
@@ -1372,13 +1441,16 @@ static void MouseKeySet()
     uint16_t key_bits = mouse_key_source->key[KEY_PRESS].keys;
     uint8_t friction_toggle_pressed = (uint8_t)((key_bits >> Key_F) & 0x1u);
     uint8_t free_toggle_pressed = (uint8_t)((key_bits >> Key_B) & 0x1u);
-    uint8_t turnback_toggle_pressed = (uint8_t)((key_bits >> Key_V) & 0x1u);
+    uint8_t turnback_toggle_pressed = 0u;
+    uint8_t turnback_toggle_raw_pressed = (uint8_t)((key_bits >> Key_V) & 0x1u);
+    uint8_t turnback_sample_updated = 0u;
     uint8_t ui_refresh_pressed = (uint8_t)((key_bits >> Key_G) & 0x1u);
     uint8_t spin_toggle_pressed = (uint8_t)((key_bits >> Key_X) & 0x1u);
     int8_t keyboard_vx = (int8_t)((key_bits >> Key_W) & 0x1u) - (int8_t)((key_bits >> Key_S) & 0x1u);
     int8_t keyboard_vy = (int8_t)((key_bits >> Key_D) & 0x1u) - (int8_t)((key_bits >> Key_A) & 0x1u);
     uint8_t mouse_left_pressed = mouse_key_source->mouse.press_l;
     uint32_t now_ms = DWT_GetTimeline_ms();
+    uint32_t turnback_frame_serial = GetControlSourceKeyFrameSerial(current_control_source);
     float dt_s = 0.005f;
     float keyboard_target_vx = (float)keyboard_vx * KEYBOARD_CHASSIS_CMD_SCALE;
     float keyboard_target_vy = (float)keyboard_vy * KEYBOARD_CHASSIS_CMD_SCALE;
@@ -1476,6 +1548,24 @@ static void MouseKeySet()
         SyncGimbalTargetAndRequestYawReset();
     }
     keyboard_spin_toggle_last = spin_toggle_pressed;
+
+    // What: 只有收到新的输入帧时才推进 V 键确认状态；Why: 控制任务会重复读取同一帧，若按周期累加会把一帧毛刺误当成多帧稳定按下。
+    turnback_sample_updated = (uint8_t)(turnback_frame_serial != keyboard_turnback_last_frame_serial);
+    if (turnback_sample_updated != 0u) {
+        // What: 记录这次已经消费过的输入帧序号；Why: 下一拍若仍然是同一帧，就不应该再次推进 V 键去抖计数。
+        keyboard_turnback_last_frame_serial = turnback_frame_serial;
+        if (turnback_toggle_raw_pressed != 0u) {
+            // What: 仅在新帧仍然报告 V 按下时累加确认计数；Why: 真按键会跨多帧保持，而单帧脏数据和旧帧重放都过不了这道门槛。
+            if (keyboard_turnback_press_frame_count < TURNBACK_TRIGGER_STABLE_FRAMES) {
+                keyboard_turnback_press_frame_count++;
+            }
+        } else {
+            // What: 只要新帧已经显示 V 松开，就立刻把确认计数清零；Why: 掉头键必须重新经历完整按下过程后才允许再次触发。
+            keyboard_turnback_press_frame_count = 0u;
+        }
+    }
+    // What: 只有连续多帧确认按下后，才把当前 V 视为真正有效；Why: 用户现场已经出现“没按却触发”，这里必须把瞬时脏帧挡在业务逻辑之外。
+    turnback_toggle_pressed = (uint8_t)(keyboard_turnback_press_frame_count >= TURNBACK_TRIGGER_STABLE_FRAMES);
 
     if (turnback_toggle_pressed && !keyboard_turnback_toggle_last) {
         if (gimbal_fetch_data.yaw_motor_online != 0u &&
@@ -1610,7 +1700,14 @@ void RobotCMDTask()
         // What: yaw 电机复活第一拍就把目标贴回当前姿态；Why: 死亡期间若仍保留旧 yaw 目标，恢复后云台会试图回拉到旧参考导致头发歪。
         SyncGimbalTargetAndRequestYawReset();
     }
+    if (gimbal_fetch_data.pitch_motor_online != 0u && last_pitch_motor_online == 0u) {
+        // What: pitch 电机复活第一拍就发起“贴当前姿态并清状态”请求；Why: 死亡期间旧的 pitch 目标会一直锁存在 cmd 侧，恢复后必须贴回当前姿态而不是被拉到 0 度。
+        RequestPitchRecoverToCurrentAttitude();
+        // What: 打印一次 pitch 电机复活恢复事件；Why: 现场若再次看到枪口突变，需要第一时间区分是 pitch 在线位抖动还是上层模式恢复触发。
+        LOGINFO("[pitch_recover] source=motor_online");
+    }
     last_yaw_motor_online = gimbal_fetch_data.yaw_motor_online;
+    last_pitch_motor_online = gimbal_fetch_data.pitch_motor_online;
 
     // 每拍先清理一次瞬态控制量，作用是让后续遥控器和键鼠都从同一安全基线开始叠加；
     // 原因是当前 `robot_cmd` 已经不是互斥控制源，直接沿用上拍结果会产生残留指令。
@@ -1642,7 +1739,15 @@ void RobotCMDTask()
         // What: 仅在最终有效模式从小陀螺切到底盘跟随时请求接管窗口；Why: 只有最终输出层的边沿才覆盖了遥控器、VT03 与键鼠锁存的全部竞争结果。
         RequestFollowTransition();
     }
+    if (last_effective_gimbal_mode == GIMBAL_ZERO_FORCE &&
+        gimbal_cmd_send.gimbal_mode != GIMBAL_ZERO_FORCE) {
+        // What: 仅在最终有效云台模式从零力恢复到有力时发起 pitch 恢复同步；Why: 失能期间保留的旧 pitch 目标必须在恢复第一拍贴回当前姿态，才能避免枪口被强拉到旧目标或 0 度。
+        RequestPitchRecoverToCurrentAttitude();
+        // What: 打印一次零力恢复事件；Why: VT03 短抖动或 Pause 释放若导致恢复，这条日志能直接把问题定位到模式恢复链而不是电机在线位。
+        LOGINFO("[pitch_recover] source=gimbal_mode_recover");
+    }
     last_effective_chassis_mode = chassis_cmd_send.chassis_mode;
+    last_effective_gimbal_mode = gimbal_cmd_send.gimbal_mode;
 
     // EmergencyHandler(); // 处理模块离线和遥控器急停等紧急情况
 
@@ -1667,6 +1772,16 @@ void RobotCMDTask()
         // What: 在请求后的若干拍持续下发底盘跟随接管位；Why: 双板命令缓冲只保留最新帧，持续几拍才能避免边沿请求被覆盖丢失。
         chassis_cmd_send.follow_transition_request = 1u;
         follow_transition_request_hold_ticks--;
+    }
+    if (pitch_reset_request_hold_ticks != 0u &&
+        gimbal_cmd_send.gimbal_mode != GIMBAL_ZERO_FORCE) {
+        // What: 在最终发包前连续几拍把 pitch 目标强制贴回恢复触发时的当前姿态；Why: 只有放在所有输入源都处理完之后，才能确保旧锁存目标和本拍人工输入都压不过这次恢复同步。
+        gimbal_cmd_send.pitch = pitch_recover_target_deg;
+        // What: 恢复同步同样继续走统一的软件限位；Why: 即使当前姿态接近机构边界，恢复动作也必须遵守与平时一致的安全约束。
+        LimitGimbalPitchTarget();
+        // What: 同步拉高给 gimbal 侧的 pitch 状态复位位；Why: gimbal 侧除了要吃到当前姿态目标，还要顺手清空 pitch PID 运行时残留，避免恢复瞬间带着旧积分发力。
+        gimbal_cmd_send.pitch_reset_request = 1u;
+        pitch_reset_request_hold_ticks--;
     }
     chassis_cmd_send.gimbal_gyro_z = gimbal_fetch_data.gimbal_imu_data.Gyro[2] * RAD_2_DEGREE; // 假设原始是弧度，转成度
     chassis_cmd_send.gimbal_pitch_deg = gimbal_fetch_data.gimbal_imu_data.Pitch; // What: 把云台实际pitch姿态随底盘命令一起下发；Why: 底盘裁判 UI 的俯仰滑块必须跟随机构真实位置实时移动。

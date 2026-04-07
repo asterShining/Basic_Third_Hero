@@ -141,6 +141,21 @@ static void ResetYawMotorRuntimeState(void)
 }
 
 /**
+ * @brief 清空 pitch 电机角度环和速度环的运行时状态
+ *
+ */
+static void ResetPitchMotorRuntimeState(void)
+{
+    // What: 在 pitch 电机掉线/复活边沿和强制回零请求时统一清空角度环与速度环历史；Why: pitch 死亡前残留的误差和积分若继续带到恢复后，会把枪口重新拽回旧角度。
+    if (pitch_motor == NULL) {
+        return;
+    }
+
+    ResetPIDRuntimeState(&pitch_motor->angle_PID);
+    ResetPIDRuntimeState(&pitch_motor->speed_PID);
+}
+
+/**
  * @brief 将浮点数映射为符号位
  *
  * @param value 输入值
@@ -357,7 +372,7 @@ void GimbalInit()
 
     // [新增] 初始化图传固定电机(M2006, CAN2 ID7)
     // Why: 在云台初始化中统一注册, 确保CAN外设就绪后再初始化电机
-    // VideoLinkMotorInit();
+    VideoLinkMotorInit();
 
     // GimbalCali_Init(&pitch_cali_handler);
 }
@@ -367,6 +382,7 @@ void GimbalTask()
 {
     static gimbal_mode_e last_gimbal_mode = GIMBAL_ZERO_FORCE; // What: 记录上一拍云台模式；Why: 只有在模式切换边沿才需要清空 yaw 速度环积分，避免每拍都把 Ki 的作用抹掉。
     static uint8_t last_yaw_motor_online = 0u; // What: 记录 yaw 电机上一拍在线状态；Why: 只在掉线/复活边沿清一次 PID，避免正常运行时反复抹掉控制状态。
+    static uint8_t last_pitch_motor_online = 0u; // What: 记录 pitch 电机上一拍在线状态；Why: 只有识别出 pitch 的掉线/复活边沿，才能在重连时清掉旧控制残留。
     static float yaw_motor_single_round_cache_deg = 0.0f; // What: 缓存最后一次可信的 yaw 单圈机械角；Why: 电机离线时继续发布这个值，底盘跟随不会被脏反馈带偏。
     static float pitch_ff_storage = 0.0f; // What: 保存 Pitch 电流前馈输出；Why: 驱动侧通过指针异步读取，必须保证引用对象跨周期持续有效。
     static float yaw_ff_storage = 0.0f; // What: 保存 Yaw 电流前馈输出；Why: 让 Yaw 动态耦合补偿可以和 Pitch 一样稳定挂到 DM 前馈接口。
@@ -380,6 +396,7 @@ void GimbalTask()
     uint8_t yaw_motor_online_changed = 0u;
     uint8_t gimbal_mode_changed = 0u;
     float ff_dt_s = GetGimbalFeedforwardDt();
+    float pitch_ref = 0.0f;
     // 获取云台控制数据
     // 后续增加未收到数据的处理
     if (gimbal_sub) {
@@ -399,12 +416,25 @@ void GimbalTask()
         ResetYawMotorRuntimeState();
         last_yaw_motor_online = yaw_motor_online;
     }
+    if (pitch_motor_online != last_pitch_motor_online) {
+        // What: pitch 电机在线状态变化时立即清掉控制残留；Why: 电机重连后的第一拍绝不能继续吃死亡前遗留的误差、积分和测速滤波状态。
+        ResetPitchMotorRuntimeState();
+        // What: pitch 复活边沿同步清零关节速率滤波状态；Why: 旧的速度滤波缓存跨掉线周期已经不可信，继续拿来算前馈会在恢复瞬间制造额外冲击。
+        pitch_rate_filtered = 0.0f;
+        last_pitch_motor_online = pitch_motor_online;
+    }
     if (gimbal_cmd_recv.yaw_pid_reset_request != 0u) {
         if (yaw_motor != NULL) {
             // What: 收到 cmd 侧的小陀螺切换复位请求时清空 yaw 速度环状态；Why: 进入/退出小陀螺只改了 chassis_mode，不会触发 gimbal_mode 边沿，必须靠显式请求来消掉残留积分。
             ResetPIDRuntimeState(&yaw_motor->speed_PID);
             ResetPIDRuntimeState(&yaw_motor->angle_PID);
         }
+    }
+    pitch_ref = gimbal_cmd_recv.pitch;
+    if (gimbal_cmd_recv.pitch_reset_request != 0u) {
+        // What: 收到 cmd 侧的 pitch 状态复位请求时先清空运行时状态；Why: 恢复动作的关键是去掉死亡前或零力前留下的 PID 历史，避免重新使能瞬间先朝旧目标抽一下。
+        ResetPitchMotorRuntimeState();
+        // What: 这里不再覆盖 pitch 参考角；Why: cmd 侧已经把目标贴到当前姿态，gimbal 侧此时只负责清残留，不能再把枪口强拉回 0 度。
     }
     if (gimbal_cmd_recv.gimbal_mode != last_gimbal_mode) {
         gimbal_mode_changed = 1u;
@@ -444,7 +474,7 @@ void GimbalTask()
         if (yaw_motor)
             DMMotorSetRef(yaw_motor, gimbal_cmd_recv.yaw); // yaw和pitch会在robot_cmd中处理好多圈和单圈
         if (pitch_motor)
-            DMMotorSetRef(pitch_motor, gimbal_cmd_recv.pitch);
+            DMMotorSetRef(pitch_motor, pitch_ref); // What: 统一使用本拍整理后的 pitch 参考角；Why: pitch 回零请求需要在 gimbal 侧最后一跳真正覆盖到底层电机参考。
         VideoLinkMotorEnable(); // [新增] 陀螺仪模式下使能图传电机; Why: 云台正常工作时才允许图传电机运动
         break;
     // 云台自由模式,使用编码器反馈,底盘和云台分离,仅云台旋转,一般用于调整云台姿态(英雄吊射等)/能量机关
@@ -461,7 +491,7 @@ void GimbalTask()
         if (yaw_motor)
             DMMotorSetRef(yaw_motor, gimbal_cmd_recv.yaw); // yaw和pitch会在robot_cmd中处理好多圈和单圈
         if (pitch_motor)
-            DMMotorSetRef(pitch_motor, gimbal_cmd_recv.pitch);
+            DMMotorSetRef(pitch_motor, pitch_ref); // What: 自由模式也复用同一份整理后的 pitch 参考角；Why: 用户要求的是“复活回 0 度”，不应因当前处于自由模式就漏掉覆盖。
         VideoLinkMotorEnable(); // [新增] 自由模式下使能图传电机; Why: 与陀螺仪模式一致, 云台工作时图传电机应运动
         break;
     default:
@@ -594,7 +624,8 @@ void GimbalTask()
 
     // [新增] 每周期执行图传电机状态机
     // Why: 状态机需要周期性检测堵转并切换状态, 放在重力补偿之后保证电机控制逻辑的完整执行
-    // VideoLinkMotorTask();
+    float current_pitch_deg = (gimba_IMU_data != NULL) ? gimba_IMU_data->Pitch : 0.0f;
+    VideoLinkMotorTask(current_pitch_deg);
 
     // 设置反馈数据,主要是imu和yaw的ecd
     if (yaw_motor_online != 0u && yaw_motor != NULL) {
@@ -603,6 +634,7 @@ void GimbalTask()
     }
     gimbal_feedback_data.yaw_motor_single_round_angle = yaw_motor_single_round_cache_deg;
     gimbal_feedback_data.yaw_motor_online = yaw_motor_online;
+    gimbal_feedback_data.pitch_motor_online = pitch_motor_online;
     /* 防御性拷贝 IMU 数据 */
     if (gimba_IMU_data)
         gimbal_feedback_data.gimbal_imu_data = *gimba_IMU_data;
