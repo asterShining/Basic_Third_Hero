@@ -69,6 +69,7 @@ file(GLOB_RECURSE SOURCES
     "modules/bluetooth/*.c"
     "modules/BMI088/*.c"
     "modules/can_comm/*.c"
+    "modules/custom_image_bridge/*.c"
     "modules/daemon/*.c"
     "modules/encoder/*.c"
     "modules/imu/*.c"
@@ -131,6 +132,7 @@ target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
     modules/bluetooth
     modules/BMI088
     modules/can_comm
+    modules/custom_image_bridge
     modules/daemon
     modules/encoder
     modules/imu

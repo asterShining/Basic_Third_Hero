@@ -294,6 +294,7 @@ void VisionSend(void)
 
 #include "bsp_usb.h"
 static uint8_t *vis_recv_buff; // USB 接收缓冲区指针
+static uint8_t vision_vcp_initialized; // 仅当显式调用 VisionInit 后才允许占用 USB VCP，避免未启用视觉时仍持续刷 USB 带宽
 
 /**
  * @brief VCP 接收回调: 解析上位机发来的 VisionToGimbal 数据帧
@@ -351,6 +352,9 @@ Vision_Recv_s *VisionInit(UART_HandleTypeDef *_handle)
     (void)_handle; // VCP模式不使用串口句柄
     USB_Init_Config_s conf = { .rx_cbk = DecodeVision };
     vis_recv_buff = USBInit(conf);
+    // 这里在 USB 回调真正注册完成后再标记初始化成功，作用是让发送链只在视觉 VCP 被显式启用时才工作；
+    // 原因是当前工程里 VisionInit 仍默认不接入 cmd 控制，但 VisionSend 会在 1kHz 任务里被调用，不加这层门禁就会白白占满 USB 带宽。
+    vision_vcp_initialized = 1u;
 
     // 注册 daemon (通信看门狗)
     Daemon_Init_Config_s daemon_conf = {
@@ -373,6 +377,12 @@ Vision_Recv_s *VisionInit(UART_HandleTypeDef *_handle)
 void VisionSend(void)
 {
     static SP_GimbalToVision_t tx_frame;
+
+    // 这里在 VCP 尚未启用时直接返回，作用是把 USB CDC 让给自定义图像桥接模块使用；
+    // 原因是云台板当前并没有调用 VisionInit，若继续每 1ms 盲发状态包，会直接破坏“上位机原始图像 -> USB CDC”这条链路。
+    if (vision_vcp_initialized == 0u) {
+        return;
+    }
 
     // 填充数据
     tx_frame.mode = send_data.mode;
