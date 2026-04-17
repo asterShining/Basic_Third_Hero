@@ -220,7 +220,7 @@ static void RemoteControlSetDT7(void)
 
         if (friction_switch_state == 1u) {
             shoot_cmd_send.friction_mode = FRICTION_ON;
-            shoot_cmd_send.bullet_speed = BIG_AMU_12;
+            shoot_cmd_send.bullet_speed = BIG_AMU_16;
 
             switch (fire_mode_state) {
             case 0:
@@ -320,7 +320,7 @@ static void ApplyVT03ShootLogic(const VideoLinkKM_RemoteState_s *video_link_remo
     if (friction_switch_state != 0u) {
         shoot_cmd_send.shoot_mode = SHOOT_ON;
         shoot_cmd_send.friction_mode = FRICTION_ON;
-        shoot_cmd_send.bullet_speed = BIG_AMU_12;
+        shoot_cmd_send.bullet_speed = BIG_AMU_16;
 
         // 扳机只响应单发上升沿，目的是用户要求 VT03 遥控器保持“扳机点一下打一发”的安全语义。
         if (trigger_pressed && !vt03_trigger_last) {

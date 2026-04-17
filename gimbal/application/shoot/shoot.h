@@ -8,7 +8,7 @@
 // 摩擦轮半径 (单位: 米), 例如 30mm = 0.03m
 #define FRICTION_WHEEL_RADIUS 0.03f
 // 打滑补偿系数 (需要实测微调, 通常在 1.0 - 1.2 之间)
-#define SLIP_COMPENSATION 1.00f
+#define SLIP_COMPENSATION 1.03f
 
 // 定义摩擦轮升速斜率 (deg/s^2)，目的是用户要求把预热再放慢一点，这里下调升速斜率以拉长到稳态速度的时间，同时减轻上电瞬间电流冲击。
 #define FRICTION_RAMP_UP_RATE_DPS_PER_S 60000.0f
@@ -22,13 +22,13 @@
 // 正值 = 在该轮目标基础上加速; 负值 = 减速
 // 用于补偿装配偏差或机械打滑差异，使各轮弹丸出口线速度一致
 // 内圈: 负责主要加速 (第一级)
-#define FRICTION_TRIM_INNER_LEFT 0.5f // 内圈左轮速度偏置 (m/s)
+#define FRICTION_TRIM_INNER_LEFT 0.0f // 内圈左轮速度偏置 (m/s)
 #define FRICTION_TRIM_INNER_RIGHT 0.0f // 内圈右轮速度偏置 (m/s)
-#define FRICTION_TRIM_INNER_DOWN 0.2f // 内圈下轮速度偏置 (m/s)
+#define FRICTION_TRIM_INNER_DOWN 0.0f // 内圈下轮速度偏置 (m/s)
 // 外圈: 负责稳速/微加速 (第二级)
-#define FRICTION_TRIM_OUTER_LEFT 0.5f // 外圈左轮速度偏置 (m/s)
+#define FRICTION_TRIM_OUTER_LEFT 0.0f // 外圈左轮速度偏置 (m/s)
 #define FRICTION_TRIM_OUTER_RIGHT 0.0f // 外圈右轮速度偏置 (m/s)
-#define FRICTION_TRIM_OUTER_DOWN 0.2f // 外圈下轮速度偏置 (m/s)
+#define FRICTION_TRIM_OUTER_DOWN 0.0f // 外圈下轮速度偏置 (m/s)
 
 // [新增] 摩擦轮前馈控制参数
 #define FRICTION_FEEDFORWARD_CURRENT 500 // 前馈电流值

@@ -291,7 +291,8 @@ void MouseKeySet(void)
         mouse_left_press_start_ms = now_ms;
         shoot_cmd_send.shoot_mode = SHOOT_ON;
         shoot_cmd_send.friction_mode = FRICTION_ON;
-        shoot_cmd_send.bullet_speed = BIG_AMU_12;
+        // 键鼠首个点射请求统一切到 16m/s 档位，目的是你已经明确要求键盘链路与 VT03 遥控链路保持同一射速，避免两套输入手感不一致。
+        shoot_cmd_send.bullet_speed = BIG_AMU_16;
         shoot_cmd_send.load_mode = LOAD_1_BULLET;
     } else if (mouse_left_pressed && ((now_ms - mouse_left_press_start_ms) >= LOAD_TRIGGER_DELAY)) {
         mouse_left_burst_active = 1;
@@ -305,7 +306,8 @@ void MouseKeySet(void)
         shoot_cmd_send.shoot_mode = SHOOT_ON;
         shoot_cmd_send.friction_mode = FRICTION_ON;
         if (shoot_cmd_send.bullet_speed == BULLET_SPEED_NONE) {
-            shoot_cmd_send.bullet_speed = BIG_AMU_12;
+            // 键鼠只做了摩擦轮预热但本拍还没显式触发装填时，也要把默认弹速补成 16m/s，目的是后续单发或连发直接沿用统一档位，不再回落到旧的 12m/s。
+            shoot_cmd_send.bullet_speed = BIG_AMU_16;
         }
     }
 

@@ -339,10 +339,10 @@ void ShootTask(void)
             ShootSetSpeedDual(11.0f, 11.7f);
             break;
         case BIG_AMU_16:
-            ShootSetSpeedDual(14.5f, 16.5f);
+            ShootSetSpeedDual(16.2f, 16.2f);
             break;
         default:
-            ShootSetSpeedDual(15.5f, 15.8f);
+            ShootSetSpeedDual(15.5f, 16.1f);
             break;
         }
     } else {
