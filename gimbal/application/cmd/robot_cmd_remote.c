@@ -122,7 +122,7 @@ static void RemoteControlSetDT7(void)
                 yaw_align_offset_deg = 0.0f;
                 // DT7 触发 yaw 校零时同步复位虚拟前方参考，目的是物理零位坐标系一旦重建，旧前方向参考会立刻失效，继续沿用只会把底盘跟随带偏。
                 follow_front_offset_deg = 0.0f;
-                SyncGimbalTargetAndRequestYawReset();
+                SyncGimbalTargetToCurrentAttitude();
                 if (hint_buzzer != NULL) {
                     // DT7 校零触发时开启蜂鸣器提示，目的是操作者需要立即知道本次内八已经成功进入校零链路。
                     AlarmSetStatus(hint_buzzer, ALARM_ON);
@@ -134,7 +134,7 @@ static void RemoteControlSetDT7(void)
         if (!switch_is_up(last_switch_right)) {
             // DT7 右拨杆模式发生变化时立即取消一键掉头状态，目的是用户已经通过物理挡位给出新的模式意图，旧掉头任务不应继续抢控制权。
             ClearKeyboardTurnbackState();
-            SyncGimbalTargetAndRequestYawReset();
+            SyncGimbalTargetToCurrentAttitude();
         }
 
         robot_state = ROBOT_READY;
@@ -146,7 +146,7 @@ static void RemoteControlSetDT7(void)
         if (!switch_is_mid(last_switch_right)) {
             // DT7 右拨杆模式发生变化时立即取消一键掉头状态，目的是从其它模式切进跟随属于新的操控会话，旧掉头任务必须立刻失效。
             ClearKeyboardTurnbackState();
-            SyncGimbalTargetAndRequestYawReset();
+            SyncGimbalTargetToCurrentAttitude();
         }
 
         robot_state = ROBOT_READY;
@@ -392,7 +392,7 @@ static void RemoteControlSetVT03(void)
             vt03_fn_right_last = video_link_remote_state->fn_right_button_down;
             vt03_trigger_last = video_link_remote_state->trigger_button_down;
             vt03_mode_sw_last = video_link_remote_state->mode_sw;
-            SyncGimbalTargetAndRequestYawReset();
+            SyncGimbalTargetToCurrentAttitude();
         }
         // Pause 松开沿统一结束当前按压会话，目的是下一次按键必须重新从 0 开始计时，蜂鸣器也应在此时关闭。
         ResetVT03PausePressState();
@@ -411,7 +411,7 @@ static void RemoteControlSetVT03(void)
     if (vt03_mode_sw_last != video_link_remote_state->mode_sw) {
         // VT03 挡位变化时立即取消一键掉头状态，目的是操作者已经显式切了主控模式，旧掉头任务不应继续绑死跟随和 yaw 目标。
         ClearKeyboardTurnbackState();
-        SyncGimbalTargetAndRequestYawReset();
+        SyncGimbalTargetToCurrentAttitude();
     }
 
     robot_state = ROBOT_READY;

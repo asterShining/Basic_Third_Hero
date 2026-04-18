@@ -16,7 +16,6 @@
 
 - **Pitch 轴**
   - 重力前馈
-  - 离心项前馈
 - **Yaw 轴**
   - 惯量前馈
   - 黏性摩擦前馈
@@ -44,7 +43,6 @@
 | `PITCH_GRAVITY_COEFFICIENT_K1` | Pitch 主重力项 | 大角度支撑更强 | 大角度更容易下坠 | 俯仰大角度时托不住或顶太狠 |
 | `PITCH_GRAVITY_COEFFICIENT_K2` | Pitch 非对称修正项 | 一侧姿态补偿更强 | 一侧姿态补偿更弱 | 抬头准但低头不准，或反过来 |
 | `PITCH_GRAVITY_OFFSET` | Pitch 整体偏置 | 所有姿态整体更抬 | 所有姿态整体更沉 | 所有角度都一起偏上或偏下 |
-| `PITCH_CENTRIFUGAL_FEEDFORWARD_K` | Pitch 离心项 | 小陀螺/高速 Yaw 时 Pitch 抗飘更强 | 小陀螺时 Pitch 更容易被甩偏 | 开小陀螺后枪口抬头或低头 |
 | `PITCH_FEEDFORWARD_LIMIT` | Pitch 前馈总限幅 | 补偿更敢给 | 更安全但可能感觉“没加进去” | 前馈效果弱或顶满过猛 |
 
 ### 2.3 Yaw 力控参数
@@ -90,21 +88,7 @@
 - `PITCH_GRAVITY_COEFFICIENT_K2`
 - `PITCH_GRAVITY_OFFSET`
 
-### 步骤 2：调 Pitch 离心项
-
-操作：
-
-- 固定一个非零 Pitch 角，建议 `10° ~ 25°`
-- 开 / 关小陀螺
-- 观察枪口是否明显抬头或低头
-
-调法：
-
-- 开小陀螺后偏移更小：方向对，继续小步加
-- 开小陀螺后偏移更大：方向错，直接反号
-- 起转 / 停转瞬间变抖：值过大，回退一点
-
-### 步骤 3：调 Yaw 基础力控
+### 步骤 2：调 Yaw 基础力控
 
 此阶段先只看纯 Yaw 大动作，不同时做剧烈 Pitch。
 
@@ -121,7 +105,7 @@
 - 起转第一下不利索、换向卡：加 `YAW_STATIC_FEEDFORWARD_K`
 - 停稳附近来回拧：减 `YAW_STATIC_FEEDFORWARD_K` 或增大 `YAW_STATIC_FEEDFORWARD_DEADBAND_RAD_S`
 
-### 步骤 4：调 Yaw 复合运动力控
+### 步骤 3：调 Yaw 复合运动力控
 
 操作：
 
@@ -138,7 +122,7 @@
 - 复合动作掉速、顿一下：先调 `YAW_CORIOLIS_FEEDFORWARD_K`
 - 平视时效果好，抬头后 Yaw 手感明显变：再调 `YAW_INERTIA_PITCH_COS2_GAIN`
 
-### 步骤 5：最后减 PID
+### 步骤 4：最后减 PID
 
 只有当前馈已经明显有效后，才动 PID。
 
@@ -162,12 +146,6 @@
 - 降 `REMOTE_PITCH_SENSITIVITY`
 - 降 `MOUSE_PITCH_SENSITIVITY_DEG`
 - 如仍明显，轻降 `pitch angle_PID.Kp`
-
-### 症状：Pitch 在小陀螺时还是会上下飘
-
-优先调整：
-
-- `PITCH_CENTRIFUGAL_FEEDFORWARD_K`
 
 ### 症状：Yaw 快速启动还是有点肉
 

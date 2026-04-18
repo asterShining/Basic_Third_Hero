@@ -179,8 +179,8 @@ void MouseKeySet(void)
         if (keyboard_free_mode_latched != 0u) {
             keyboard_spin_mode_latched = 0u;
         }
-        // 自由模式切换边沿统一贴齐当前姿态并清 yaw 残留；避免模式切换后继续追旧目标导致云台突跳。
-        SyncGimbalTargetAndRequestYawReset();
+        // 自由模式切换边沿统一贴齐当前姿态，目的是避免模式切换后继续追旧目标导致云台突跳。
+        SyncGimbalTargetToCurrentAttitude();
     }
     keyboard_free_toggle_last = free_toggle_pressed;
 
@@ -199,8 +199,8 @@ void MouseKeySet(void)
         if (keyboard_spin_mode_latched != 0u) {
             keyboard_free_mode_latched = 0u;
         }
-        // 小陀螺开关切换时同步云台目标到当前姿态；避免在自由/跟随/小陀螺之间切换时继续追旧目标产生瞬时跳变。
-        SyncGimbalTargetAndRequestYawReset();
+        // 小陀螺开关切换时同步云台目标到当前姿态，目的是避免在自由/跟随/小陀螺之间切换时继续追旧目标产生瞬时跳变。
+        SyncGimbalTargetToCurrentAttitude();
     }
     keyboard_spin_toggle_last = spin_toggle_pressed;
 
@@ -232,8 +232,8 @@ void MouseKeySet(void)
 
             // V 键触发的是一次性掉头动作，因此先清掉旧掉头会话残留；连续多次按 V 时每次都应该从当前姿态重新计算新的 180 度目标，而不是继承旧会话的计时和稳定计数。
             ClearKeyboardTurnbackState();
-            // 启动掉头前先把目标贴齐当前姿态并清 yaw 速度环残留；这样新的 180 度动作会从当前真实反馈平滑起步，而不是叠着旧目标或旧积分直接猛转。
-            SyncGimbalTargetAndRequestYawReset();
+            // 启动掉头前先把目标贴齐当前姿态，目的是让新的 180 度动作从当前真实反馈平滑起步，而不是叠着旧目标直接猛转。
+            SyncGimbalTargetToCurrentAttitude();
 
             // 直接以当前云台世界系朝向作为掉头参考；用户现在要的是“当前看到哪就以该方向反向 180 度作为新前方”，而不是先回到底盘中线再反向。
             reverse_gimbal_yaw_norm = theta_format(current_yaw_total + 180.0f);

@@ -58,8 +58,7 @@
 #define VT03_MODE_SW_S 2u
 #define VT03_MODE_SW_INVALID 0xFFu
 #define VT03_PAUSE_CALIB_HOLD_MS 2000u
-#define YAW_PID_RESET_HOLD_TICKS 4u
-#define PITCH_RESET_REQUEST_HOLD_TICKS 4u
+#define PITCH_TARGET_SYNC_HOLD_TICKS 4u
 #define FOLLOW_TRANSITION_REQUEST_HOLD_TICKS 4u
 #define TURNBACK_COMPLETE_YAW_ERROR_DEG 6.0f
 #define TURNBACK_COMPLETE_STABLE_TICKS 20u
@@ -147,8 +146,7 @@ extern uint8_t vt03_pause_press_started_in_zero_force;
 extern uint8_t vt03_pause_longpress_handled;
 extern uint8_t vt03_boot_zero_force_pending;
 extern uint8_t vt03_mode_sw_last;
-extern uint8_t yaw_pid_reset_hold_ticks;
-extern uint8_t pitch_reset_request_hold_ticks;
+extern uint8_t pitch_target_sync_hold_ticks;
 extern float pitch_recover_target_deg;
 extern uint8_t follow_transition_request_hold_ticks;
 extern float last_valid_offset_angle;
@@ -162,10 +160,8 @@ uint32_t GetControlSourceKeyFrameSerial(ControlSource_e source);
 void ResetMouseControlLatchState(void);
 void ResetKeyboardMotionState(void);
 void SyncGimbalTargetToCurrentAttitude(void);
-void RequestYawSpeedPIDReset(void);
 void RequestPitchRecoverToCurrentAttitude(void);
 void RequestFollowTransition(void);
-void SyncGimbalTargetAndRequestYawReset(void);
 void ResetVT03PausePressState(void);
 void TriggerVT03YawCalibration(void);
 uint8_t IsVideoLinkControlReady(void);

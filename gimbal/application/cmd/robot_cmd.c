@@ -145,10 +145,8 @@ uint8_t vt03_pause_longpress_handled = 0u;
 uint8_t vt03_boot_zero_force_pending = 0u;
 // 保存 VT03 上一拍挡位编码，目的是换挡时需要贴齐当前姿态，避免切挡瞬间跳变。
 uint8_t vt03_mode_sw_last = VT03_MODE_SW_INVALID;
-// 保存 yaw PID 复位请求剩余保持拍数，目的是边沿请求只发一拍容易被后续普通命令覆盖。
-uint8_t yaw_pid_reset_hold_ticks = 0u;
-// 保存 pitch 恢复同步请求剩余保持拍数，目的是恢复窗口必须保持几拍，才能确保“贴当前姿态 + 清状态”真正送到底层。
-uint8_t pitch_reset_request_hold_ticks = 0u;
+// 保存 pitch 目标同步请求剩余保持拍数，目的是恢复窗口必须保持几拍，才能确保“贴当前姿态”真正送到底层。
+uint8_t pitch_target_sync_hold_ticks = 0u;
 // 保存这次 pitch 恢复时要贴齐的目标角，目的是恢复窗口内必须反复下发同一个姿态目标。
 float pitch_recover_target_deg = 0.0f;
 // 保存底盘跟随接管请求剩余保持拍数，目的是双板调度可能错开，边沿请求需要保持几拍才稳妥。
@@ -212,8 +210,6 @@ static void PrepareControlCommandBase(void)
 #endif
 
     gimbal_cmd_send.gimbal_mode = GIMBAL_ZERO_FORCE;
-    gimbal_cmd_send.yaw_pid_reset_request = 0u;
-    gimbal_cmd_send.pitch_reset_request = 0u;
 
     shoot_cmd_send.shoot_mode = SHOOT_OFF;
     shoot_cmd_send.load_mode = LOAD_STOP;
@@ -236,8 +232,7 @@ void RobotCMDInit(void)
     last_valid_follow_offset_angle = 0.0f;
     last_effective_chassis_mode = CHASSIS_ZERO_FORCE;
     last_effective_gimbal_mode = GIMBAL_ZERO_FORCE;
-    yaw_pid_reset_hold_ticks = 0u;
-    pitch_reset_request_hold_ticks = 0u;
+    pitch_target_sync_hold_ticks = 0u;
     pitch_recover_target_deg = 0.0f;
     follow_transition_request_hold_ticks = 0u;
     rc_data = RemoteControlInit(&huart3);
@@ -373,10 +368,10 @@ void RobotCMDTask(void)
     SubGetMessage(gimbal_feed_sub, &gimbal_fetch_data);
     if (gimbal_fetch_data.yaw_motor_online != 0u && last_yaw_motor_online == 0u) {
         // yaw 电机复活第一拍就把目标贴回当前姿态，目的是死亡期间若仍保留旧 yaw 目标，恢复后云台会试图回拉到旧参考导致头发歪。
-        SyncGimbalTargetAndRequestYawReset();
+        SyncGimbalTargetToCurrentAttitude();
     }
     if (gimbal_fetch_data.pitch_motor_online != 0u && last_pitch_motor_online == 0u) {
-        // pitch 电机复活第一拍就发起“贴当前姿态并清状态”请求，目的是死亡期间旧的 pitch 目标会一直锁存在 cmd 侧，恢复后必须贴回当前姿态而不是被拉到 0 度。
+        // pitch 电机复活第一拍就发起“贴当前姿态”请求，目的是死亡期间旧的 pitch 目标会一直锁存在 cmd 侧，恢复后必须贴回当前姿态而不是被拉到 0 度。
         RequestPitchRecoverToCurrentAttitude();
         LOGINFO("[pitch_recover] source=motor_online");
     }
@@ -386,11 +381,6 @@ void RobotCMDTask(void)
     // 每拍先清理一次瞬态控制量，作用是让后续遥控器和键鼠都从同一安全基线开始叠加；
     // 原因是当前 `robot_cmd` 已经不是互斥控制源，直接沿用上拍结果会产生残留指令。
     PrepareControlCommandBase();
-    if (yaw_pid_reset_hold_ticks != 0u) {
-        // 在请求后的若干拍持续下发 yaw PID 复位位，目的是Pub/Sub 队列深度为 1，持续几拍才能避免 producer 先跑两次把边沿消息顶掉。
-        gimbal_cmd_send.yaw_pid_reset_request = 1u;
-        yaw_pid_reset_hold_ticks--;
-    }
     // 底盘跟随始终围绕既定零位计算偏角，目的是上电或重连时若把“当前角度”重新写成零位，会直接把真实偏角清掉。
     CalcOffsetAngle();
     active_control_source = GetActiveControlSource();
@@ -430,14 +420,13 @@ void RobotCMDTask(void)
         chassis_cmd_send.follow_transition_request = 1u;
         follow_transition_request_hold_ticks--;
     }
-    if (pitch_reset_request_hold_ticks != 0u &&
+    if (pitch_target_sync_hold_ticks != 0u &&
         gimbal_cmd_send.gimbal_mode != GIMBAL_ZERO_FORCE) {
         // 在最终发包前连续几拍把 pitch 目标强制贴回恢复触发时的当前姿态，目的是只有放在所有输入源都处理完之后，才能确保旧锁存目标和本拍人工输入都压不过这次恢复同步。
         gimbal_cmd_send.pitch = pitch_recover_target_deg;
         LimitGimbalPitchTarget();
-        // 同步拉高给 gimbal 侧的 pitch 状态复位位，目的是gimbal 侧除了要吃到当前姿态目标，还要顺手清空 pitch PID 运行时残留。
-        gimbal_cmd_send.pitch_reset_request = 1u;
-        pitch_reset_request_hold_ticks--;
+        // 这里只继续保持“贴当前姿态”覆盖，不再额外夹带 PID 状态清零，目的是把恢复链简化成单一的目标同步语义。
+        pitch_target_sync_hold_ticks--;
     }
     // 把云台实时姿态信息显式附带到底盘命令，目的是底盘 UI 和跟随链需要在同一帧里拿到与控制同拍的数据。
     chassis_cmd_send.gimbal_gyro_z = gimbal_fetch_data.gimbal_imu_data.Gyro[2] * RAD_2_DEGREE;

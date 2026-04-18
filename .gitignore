@@ -38,3 +38,4 @@ Makefile
 # --- 操作系统/IDE 相关 ---
 .DS_Store
 .vscode/
+.omx/

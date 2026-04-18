@@ -99,26 +99,15 @@ void SyncGimbalTargetToCurrentAttitude(void)
 }
 
 /**
- * @brief 请求 gimbal 侧复位 yaw 速度环运行时状态
- *
- */
-void RequestYawSpeedPIDReset(void)
-{
-    // 本拍立即拉高 yaw PID 复位请求并启动多拍保持，目的是小陀螺切换边沿如果只发单拍，可能被下一拍普通命令覆盖，导致 gimbal 侧漏复位。
-    gimbal_cmd_send.yaw_pid_reset_request = 1u;
-    yaw_pid_reset_hold_ticks = YAW_PID_RESET_HOLD_TICKS;
-}
-
-/**
- * @brief 请求 pitch 恢复时贴齐当前姿态并清理运行时状态
+ * @brief 请求 pitch 恢复时贴齐当前姿态
  *
  */
 void RequestPitchRecoverToCurrentAttitude(void)
 {
     // 在触发恢复的这一拍先把目标角记成当前 IMU pitch，目的是用户要的是“恢复时保持当前枪口姿态”，因此不能沿用旧锁存目标，也不能改成固定 0 度。
     pitch_recover_target_deg = gimbal_fetch_data.gimbal_imu_data.Pitch;
-    // 再锁存几拍恢复同步请求，目的是最终发包阶段还会经过遥控器、键鼠和模式覆盖，只有短暂保持才能确保这次“贴当前姿态 + 清 PID”真正落到底层。
-    pitch_reset_request_hold_ticks = PITCH_RESET_REQUEST_HOLD_TICKS;
+    // 再锁存几拍恢复同步请求，目的是最终发包阶段还会经过遥控器、键鼠和模式覆盖，只有短暂保持才能确保这次“贴当前姿态”真正落到底层。
+    pitch_target_sync_hold_ticks = PITCH_TARGET_SYNC_HOLD_TICKS;
 }
 
 /**
@@ -130,17 +119,6 @@ void RequestFollowTransition(void)
     // 本拍立即拉高底盘接管请求并启动多拍保持，目的是退出小陀螺到跟随是边沿事件，保持几拍才能避免双板调度相位错开时底盘漏收。
     chassis_cmd_send.follow_transition_request = 1u;
     follow_transition_request_hold_ticks = FOLLOW_TRANSITION_REQUEST_HOLD_TICKS;
-}
-
-/**
- * @brief 同步云台目标并请求复位 yaw 速度环
- *
- */
-void SyncGimbalTargetAndRequestYawReset(void)
-{
-    // 在模式切换边沿同时贴齐当前姿态并清 yaw 速度环残留状态，目的是只同步目标不能消掉残余积分，底盘停止后仍可能把云台头慢慢拽歪。
-    SyncGimbalTargetToCurrentAttitude();
-    RequestYawSpeedPIDReset();
 }
 
 /**
@@ -165,12 +143,12 @@ void ResetVT03PausePressState(void)
  */
 void TriggerVT03YawCalibration(void)
 {
-    // 统一封装 VT03 长按 Pause 的 yaw 校零动作，目的是校零后还要同步软件零位和云台目标，集中处理能避免恢复后漏掉复位链路。
+    // 统一封装 VT03 长按 Pause 的 yaw 校零动作，目的是校零后还要同步软件零位和云台目标，集中处理能避免恢复后漏掉目标同步链路。
     GimbalCalibrate();
     yaw_align_offset_deg = 0.0f;
     // yaw 硬件零点被重标后同步把虚拟前方参考复位到 0，目的是旧的前方向参考依赖上一次零位坐标系，继续保留会让跟随误差整体偏移。
     follow_front_offset_deg = 0.0f;
-    SyncGimbalTargetAndRequestYawReset();
+    SyncGimbalTargetToCurrentAttitude();
     if (hint_buzzer != NULL) {
         // 校零真正触发后开启蜂鸣器提示，目的是现场操作需要一个明确反馈来确认 DM 零点指令已经发出。
         AlarmSetStatus(hint_buzzer, ALARM_ON);
@@ -297,7 +275,7 @@ void HandleControlSourceSwitch(ControlSource_e new_source)
             vt03_boot_zero_force_pending = 0u;
             // 首次接管默认零力时同步清空 Pause 按压会话，目的是若沿用接管瞬间的电平或旧计时，可能把第一次短按误判成释放或长按。
             ResetVT03PausePressState();
-            // 首次接管默认零力时不做目标同步与 PID 复位，目的是当前拍本来就要保持失能，额外下发恢复链只会制造无意义的边沿扰动。
+            // 首次接管默认零力时不做目标同步，目的是当前拍本来就要保持失能，额外下发恢复链只会制造无意义的边沿扰动。
             need_sync_on_source_switch = 0u;
         }
     } else {
@@ -311,7 +289,7 @@ void HandleControlSourceSwitch(ControlSource_e new_source)
     last_video_link_online = IsVideoLinkControlReady();
 
     if (need_sync_on_source_switch != 0u) {
-        SyncGimbalTargetAndRequestYawReset();
+        SyncGimbalTargetToCurrentAttitude();
     }
 
     current_control_source = new_source;

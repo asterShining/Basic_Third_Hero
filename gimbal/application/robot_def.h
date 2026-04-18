@@ -238,14 +238,12 @@ typedef struct
 
 } Chassis_Ctrl_Cmd_s;
 
-// cmd发布的云台控制数据,由gimbal订阅
+// cmd 发布的云台控制数据，由 gimbal 订阅。
 typedef struct
-{ // 云台角度控制
-    float yaw;
-    float pitch;
-    gimbal_mode_e gimbal_mode;
-    uint8_t yaw_pid_reset_request; // 请求 gimbal 侧复位 yaw 速度环运行时状态，目的是小陀螺进出和切源时只同步目标还不够，必须顺手清掉残留积分才能防止头被拽歪。
-    uint8_t pitch_reset_request; // 请求 gimbal 侧只清理 pitch 运行时状态，目的是pitch 电机重连或零力恢复后需要去掉旧 PID 残留，但目标角应由 cmd 侧贴到当前姿态而不是再被强拉回 0 度。
+{ // 这里刻意只保留云台目标角与模式，目的是把双板协议收口成“目标是什么”而不是“底层 PID 该怎么清”，避免上层消息继续渗透到底层运行时细节。
+    float yaw; // 下发给 gimbal 的 yaw 累计角目标，目的是上层只表达云台最终要转到哪里，不再通过协议夹带任何 PID 内部状态操作。
+    float pitch; // 下发给 gimbal 的 pitch 目标角，目的是失能恢复和模式切换都统一通过目标同步完成，不再依赖额外的 reset 标志位。
+    gimbal_mode_e gimbal_mode; // 下发给 gimbal 的工作模式，目的是底层仍按零力、陀螺仪和自由模式做主状态分发，但模式之外不再附带控制器内部清理语义。
 } Gimbal_Ctrl_Cmd_s;
 
 // cmd发布的发射控制数据,由shoot订阅

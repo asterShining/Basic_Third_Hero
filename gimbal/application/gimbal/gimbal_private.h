@@ -19,15 +19,13 @@
 #include <stdint.h>
 #include <string.h>
 
-// 保留 Pitch 重力补偿拟合的一阶余弦系数，目的是这是当前实机已经验证可用的主补偿项，拆文件后仍必须共用同一组标定参数。
-#define PITCH_GRAVITY_COEFFICIENT_K1 -1.406f
-// 保留 Pitch 重力补偿拟合的一阶正弦系数，目的是当前枪管重心偏置已经体现在这一项中，拆分后不能让不同文件各自维护不同版本。
-#define PITCH_GRAVITY_COEFFICIENT_K2 -0.6058f
-// 保留 Pitch 重力补偿的常值偏置，目的是实机静态平衡点并不在零位，常值项必须和拟合系数一起使用。
-#define PITCH_GRAVITY_OFFSET -5.0816f
+// 这里直接填入 2026-04-18 这轮 pitch 标定数据经 /home/aster/robo-misc/python_pitch.py 最小二乘得到的一阶余弦系数，目的是固件里的重力前馈公式要与离线拟合模型严格同符号、同尺度，不能再沿用旧枪管载荷下的历史值。
+#define PITCH_GRAVITY_COEFFICIENT_K1 16.8578f
+// 这里同步填入同一批标定数据解出的正弦修正项，目的是枪管重心不完全落在纯余弦项上，若这项仍保留旧值，抬头和低头两侧会重新出现一边托得住、一边托不住的非对称误差。
+#define PITCH_GRAVITY_COEFFICIENT_K2 11.3775f
+// 这里保留脚本解出的常值偏置，目的是当前机构静态平衡点明显不在零力附近，若忽略这项，整段姿态都会残留同方向的恒定欠补或过补。
+#define PITCH_GRAVITY_OFFSET 16.9757f
 
-// 定义 Pitch 轴离心项前馈初始系数，目的是先给小陀螺工况一个保守补偿起点，后续只需围绕这一处做上车标定。
-#define PITCH_CENTRIFUGAL_FEEDFORWARD_K 0.09f
 // 定义 Yaw 轴科氏项前馈初始系数，目的是复合甩头时先补一层轻量耦合，减少仅靠误差环追赶带来的卡顿。
 #define YAW_CORIOLIS_FEEDFORWARD_K 0.10f
 // 定义 Yaw 轴惯量前馈基础系数，目的是目标 Yaw 加速度变化时，先补一层基础转动惯量，减轻位置环和速度环的追赶负担。
@@ -51,8 +49,8 @@
 #define GIMBAL_FEEDFORWARD_DT_FALLBACK 0.005f
 // 定义 Yaw 参考导数状态的跳变复位阈值，目的是切源、贴齐当前姿态或外部大步跳目标时，直接求导会产生假加速度尖峰。
 #define YAW_REF_DERIV_RESET_THRESHOLD_DEG 10.0f
-// 定义 Pitch 前馈总输出限幅，目的是重力项之外新增耦合项后必须保留硬保护，防止未标定参数直接把扭矩顶满。
-#define PITCH_FEEDFORWARD_LIMIT 7.5f
+// 这里把 Pitch 前馈总限幅同步抬到略高于本轮静态标定最大实测力矩的位置，目的是新拟合的重力项在大仰角已经接近 12Nm，若仍卡在旧的 7.5Nm，会在高角度长期被截断，导致“参数换了但实车托不住”的假象。
+#define PITCH_FEEDFORWARD_LIMIT 15.0f
 // 定义 Yaw 前馈输出限幅，目的是当前 Yaw 只加动态耦合项，先用更保守的上限保证复合运动不过激。
 #define YAW_FEEDFORWARD_LIMIT 3.0f
 
@@ -61,7 +59,7 @@
 // 定义 Pitch 机械下限，目的是冲坡或姿态突变时仍需由底层限位保护枪管不撞下极限。
 #define PITCH_MECH_LIMIT_MIN -0.967f
 // 定义 yaw 速度环积分系数，目的是小陀螺属于持续扰动场景，只靠 P 项容易留下稳态偏差，因此补一小段 Ki 来慢慢顶住漂移。
-#define YAW_SPEED_PID_KI 0.03f
+#define YAW_SPEED_PID_KI 0.12f
 // 定义 yaw 速度环静止死区(rad/s)，目的是陀螺仪静止时也会有零偏和噪声，必须把极小误差吞掉，防止积分攒久后突然抽动。
 #define YAW_SPEED_PID_DEADBAND_RAD 0.015f
 // 定义 yaw 速度环积分限幅，目的是即使进入积分，也只允许积累少量修正，避免静摩擦被一次性打穿导致云台突跳。
@@ -80,9 +78,6 @@ extern Gimbal_Ctrl_Cmd_s gimbal_cmd_recv;
 
 // 下面这些内部 helper 只服务 gimbal 模块内部拆分，目的是保持私有头统一声明，既能跨文件复用，又不污染公共头接口。
 float NormalizeAngleTo360(float angle_deg);
-void ResetPIDRuntimeState(PIDInstance *pid);
-void ResetYawMotorRuntimeState(void);
-void ResetPitchMotorRuntimeState(void);
 void UpdateGimbalCurrentFeedforward(uint8_t gimbal_mode_changed,
                                     uint8_t yaw_motor_online,
                                     uint8_t yaw_motor_online_changed,

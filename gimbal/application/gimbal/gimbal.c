@@ -39,13 +39,13 @@ void GimbalInit(void)
             .angle_PID = {
                 .Kp = 0.67,
                 .Ki = 0,
-                .Kd = 0,
+                .Kd = 0.01,
                 .Improve = PID_Trapezoid_Intergral | PID_Integral_Limit | PID_Derivative_On_Measurement | PID_ErrorHandle,
                 .IntegralLimit = 7,
                 .MaxOut = 21,
             },
             .speed_PID = {
-                .Kp = 2.1,
+                .Kp = 1.32,
                 .Ki = YAW_SPEED_PID_KI,
                 .Kd = 0,
                 .DeadBand = YAW_SPEED_PID_DEADBAND_RAD,
@@ -53,7 +53,7 @@ void GimbalInit(void)
                 .IntegralLimit = YAW_SPEED_PID_INTEGRAL_LIMIT,
                 .CoefA = YAW_SPEED_PID_COEF_A_RAD,
                 .CoefB = YAW_SPEED_PID_COEF_B_RAD,
-                .MaxOut = 10,
+                .MaxOut = 15,
             },
             .other_angle_feedback_ptr = &gimba_IMU_data->YawTotalAngle,
             .other_speed_feedback_ptr = &gimba_IMU_data->Gyro[2],
@@ -77,21 +77,21 @@ void GimbalInit(void)
         },
         .controller_param_init_config = {
             .angle_PID = {
-                .Kp = 0.92,
+                .Kp = 4.5,
                 .Ki = 0.0,
-                .Kd = 0.0,
+                .Kd = 0.01,
                 .DeadBand = 0.0,
                 .Improve = PID_Trapezoid_Intergral | PID_Integral_Limit | PID_Derivative_On_Measurement,
                 .IntegralLimit = 100,
-                .MaxOut = 5,
+                .MaxOut = 15,
             },
             .speed_PID = {
-                .Kp = -6.84,
-                .Ki = -0.23,
+                .Kp = 1.2,
+                .Ki = 0,
                 .Kd = 0,
                 .Improve = PID_Trapezoid_Intergral | PID_Integral_Limit | PID_Derivative_On_Measurement,
                 .IntegralLimit = 5,
-                .MaxOut = 15,
+                .MaxOut = 25,
             },
             .other_angle_feedback_ptr = &gimba_IMU_data->Pitch,
             .other_speed_feedback_ptr = &gimba_IMU_data->Gyro[1],
@@ -128,9 +128,9 @@ void GimbalInit(void)
 /* 机器人云台控制核心任务,后续考虑只保留 IMU 控制,不再需要电机的反馈 */
 void GimbalTask(void)
 {
-    static gimbal_mode_e last_gimbal_mode = GIMBAL_ZERO_FORCE; // 记录上一拍云台模式，目的是只有在模式切换边沿才需要清空 yaw 速度环积分，避免每拍都把 Ki 的作用抹掉。
-    static uint8_t last_yaw_motor_online = 0u; // 记录 yaw 电机上一拍在线状态，目的是只在掉线/复活边沿清一次 PID，避免正常运行时反复抹掉控制状态。
-    static uint8_t last_pitch_motor_online = 0u; // 记录 pitch 电机上一拍在线状态，目的是只有识别出 pitch 的掉线/复活边沿，才能在重连时清掉旧控制残留。
+    static gimbal_mode_e last_gimbal_mode = GIMBAL_ZERO_FORCE; // 记录上一拍云台模式，目的是前馈和模式边沿逻辑仍要基于真实切换事件工作，不能因为删除 PID 清零链就把边沿判断也一起丢掉。
+    static uint8_t last_yaw_motor_online = 0u; // 记录 yaw 电机上一拍在线状态，目的是前馈和反馈冻结逻辑仍要识别掉线/复活边沿，不能再把这个状态只理解成“是否触发 PID 清零”。
+    static uint8_t last_pitch_motor_online = 0u; // 记录 pitch 电机上一拍在线状态，目的是 pitch 前馈滤波状态和反馈发布同样依赖在线边沿，去掉 PID 清零后这里依然必须保留。
     static float yaw_motor_single_round_cache_deg = 0.0f; // 缓存最后一次可信的 yaw 单圈机械角，目的是电机离线时继续发布这个值，底盘跟随不会被脏反馈带偏。
     uint8_t yaw_motor_online = 0u;
     uint8_t pitch_motor_online = 0u;
@@ -148,7 +148,7 @@ void GimbalTask(void)
         memset(&gimbal_cmd_recv, 0, sizeof(gimbal_cmd_recv));
     }
 
-    // 采样 yaw/pitch 两个电机当前是否在线，目的是掉线与复活边沿需要驱动 PID 复位和反馈冻结策略。
+    // 采样 yaw/pitch 两个电机当前是否在线，目的是掉线与复活边沿仍要驱动前馈状态收口和反馈冻结策略。
     if (yaw_motor != NULL && DMMotorIsOnline(yaw_motor) != 0u) {
         yaw_motor_online = 1u;
     }
@@ -157,37 +157,22 @@ void GimbalTask(void)
     }
 
     if (yaw_motor_online != last_yaw_motor_online) {
-        // yaw 电机在线状态变化时立即清掉控制残留，目的是复活重新上电后的第一拍不能继续带着掉线前的历史误差工作。
+        // yaw 电机在线状态变化时仅上报边沿，目的是当前这轮明确去掉手动 PID 清状态链，但前馈与反馈发布仍需要知道什么时候发生了掉线/复活。
         yaw_motor_online_changed = 1u;
-        ResetYawMotorRuntimeState();
         last_yaw_motor_online = yaw_motor_online;
     }
     if (pitch_motor_online != last_pitch_motor_online) {
-        // pitch 电机在线状态变化时立即清掉控制残留，目的是电机重连后的第一拍绝不能继续吃死亡前遗留的误差和积分。
+        // pitch 电机在线状态变化时同样只保留边沿信息，目的是恢复链路继续依赖在线状态贴齐目标，但不再额外手搓 PID 内部状态。
         pitch_motor_online_changed = 1u;
-        ResetPitchMotorRuntimeState();
         last_pitch_motor_online = pitch_motor_online;
     }
 
-    if (gimbal_cmd_recv.yaw_pid_reset_request != 0u && yaw_motor != NULL) {
-        // 收到 cmd 侧的小陀螺切换复位请求时清空 yaw 速度环状态，目的是进入/退出小陀螺只改了 chassis_mode，不会触发 gimbal_mode 边沿，必须靠显式请求来消掉残留积分。
-        ResetPIDRuntimeState(&yaw_motor->speed_PID);
-        ResetPIDRuntimeState(&yaw_motor->angle_PID);
-    }
-
-    // 先锁存本拍最终要给 pitch 的参考角，目的是pitch 回零请求只负责清状态，不再在 gimbal 侧改写 cmd 已经贴好的目标姿态。
+    // 先锁存本拍最终要给 pitch 的参考角，目的是当前恢复链已经简化成单纯的目标同步，这里不再额外夹带任何 PID 状态操作。
     pitch_ref = gimbal_cmd_recv.pitch;
-    if (gimbal_cmd_recv.pitch_reset_request != 0u) {
-        // 收到 cmd 侧的 pitch 状态复位请求时先清空运行时状态，目的是恢复动作的关键是去掉死亡前或零力前留下的 PID 历史。
-        ResetPitchMotorRuntimeState();
-    }
 
     if (gimbal_cmd_recv.gimbal_mode != last_gimbal_mode) {
-        // 模式切换时只在边沿复位 yaw 运行时状态，目的是若每拍都清空积分，yaw 速度环的 Ki 就永远起不到作用。
+        // 模式切换时只保留边沿标记，目的是前馈和其余运行时逻辑仍需要知道模式发生了变化，但不再借这个边沿去强行清空 PID 内部状态。
         gimbal_mode_changed = 1u;
-        if (yaw_motor != NULL) {
-            ResetYawMotorRuntimeState();
-        }
         last_gimbal_mode = gimbal_cmd_recv.gimbal_mode;
     }
 

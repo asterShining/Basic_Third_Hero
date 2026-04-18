@@ -123,7 +123,6 @@ void UpdateGimbalCurrentFeedforward(uint8_t gimbal_mode_changed,
         float yaw_ref_acc_raw = 0.0f;
         float yaw_ref_delta_deg = fabsf((yaw_ref_rad - last_yaw_ref_rad) * RAD_2_DEGREE);
         float gravity_ff;
-        float centrifugal_ff;
         float coriolis_ff;
         float yaw_inertia_ff;
         float yaw_viscous_ff;
@@ -138,9 +137,8 @@ void UpdateGimbalCurrentFeedforward(uint8_t gimbal_mode_changed,
 
         if (gimbal_mode_changed != 0u ||
             yaw_motor_online_changed != 0u ||
-            gimbal_cmd_recv.yaw_pid_reset_request != 0u ||
             yaw_ref_delta_deg > YAW_REF_DERIV_RESET_THRESHOLD_DEG) {
-            // 在模式切换、在线状态变化、外部请求复位和大步跳目标时重置 Yaw 参考导数，目的是这些场景下目标角通常不是连续变化，继续求导只会制造假前馈尖峰。
+            // 在模式切换、在线状态变化和大步跳目标时重置 Yaw 参考导数，目的是这些场景下目标角通常不是连续变化，继续求导只会制造假前馈尖峰。
             ResetYawReferenceDerivativeState(yaw_ref_rad);
         } else {
             // 在非跳变工况下对 Yaw 目标角做求导，目的是不改双板协议也能估出参考速度和加速度，用来补齐 Yaw 力控的惯量与摩擦前馈。
@@ -175,10 +173,8 @@ void UpdateGimbalCurrentFeedforward(uint8_t gimbal_mode_changed,
                                               GIMBAL_FEEDFORWARD_RATE_LPF_RC,
                                               ff_dt_s);
 
-        // 保留现有 Pitch 重力补偿拟合式，目的是这是当前已经验证可用的主补偿项，新增耦合项只是在其上做增量补偿。
+        // 当前 Pitch 电流前馈只保留重力补偿，目的是先把高仰角静态持位问题收敛到最基础的重力模型上，避免再叠加小陀螺耦合项把现象搅混。
         gravity_ff = -(PITCH_GRAVITY_COEFFICIENT_K1 * pitch_cos - PITCH_GRAVITY_COEFFICIENT_K2 * pitch_sin) + PITCH_GRAVITY_OFFSET;
-        // 增加 Pitch 离心项补偿，目的是底盘或 Yaw 高速旋转时，枪管会上下“发飘”，提前补力矩能减轻 Pitch 跟随滞后。
-        centrifugal_ff = PITCH_CENTRIFUGAL_FEEDFORWARD_K * yaw_rate_filtered * yaw_rate_filtered * pitch_coupling;
         // 增加 Yaw 科氏耦合项补偿，目的是Yaw 与 Pitch 复合快速运动时会出现转速突变和卡顿，需要给 Yaw 一层动态前馈卸掉误差环压力。
         coriolis_ff = -YAW_CORIOLIS_FEEDFORWARD_K * yaw_rate_filtered * pitch_rate_filtered * pitch_coupling;
         // 根据当前 Pitch 姿态修正 Yaw 有效惯量，目的是枪管姿态变化会改变 Yaw 负载分布，只用常数惯量会让不同俯仰角下的补偿不一致。
@@ -194,7 +190,8 @@ void UpdateGimbalCurrentFeedforward(uint8_t gimbal_mode_changed,
             yaw_static_ff = 0.0f;
         }
 
-        pitch_ff_storage = ClampSymmetric(gravity_ff + centrifugal_ff, PITCH_FEEDFORWARD_LIMIT);
+        // Pitch 前馈输出现在只由重力项构成，目的是让驱动端收到的补偿力矩与静态标定一一对应，后续出现高位点头时能直接围绕重力项本身排查。
+        pitch_ff_storage = ClampSymmetric(gravity_ff, PITCH_FEEDFORWARD_LIMIT);
         yaw_ff_storage = ClampSymmetric(yaw_inertia_ff + yaw_viscous_ff + yaw_static_ff + coriolis_ff,
                                         YAW_FEEDFORWARD_LIMIT);
 
