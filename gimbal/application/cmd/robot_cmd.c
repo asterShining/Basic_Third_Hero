@@ -127,6 +127,8 @@ float keyboard_vy_smoothed = 0.0f;
 uint32_t keyboard_ramp_last_ms = 0u;
 // 保存当前主控输入源，目的是整个 cmd 模块都要围绕 VT03 主控、DT7 回退和双离线零力做统一仲裁。
 ControlSource_e current_control_source = CONTROL_SOURCE_NONE;
+// 保存 VT03 左自定义键上一拍电平，目的是这次把摩擦轮切换改到左 `fn` 后，仍然必须用边沿触发避免按住期间连续翻转。
+uint8_t vt03_fn_left_last = 0u;
 // 保存 VT03 右自定义键上一拍电平，目的是自定义键是电平输入，必须由 cmd 层自行做上升沿锁存。
 uint8_t vt03_fn_right_last = 0u;
 // 保存 VT03 扳机上一拍电平，目的是单发拨弹只能响应上升沿，不能把电平直接送进装填状态机。
@@ -149,6 +151,8 @@ uint8_t vt03_mode_sw_last = VT03_MODE_SW_INVALID;
 uint8_t pitch_target_sync_hold_ticks = 0u;
 // 保存这次 pitch 恢复时要贴齐的目标角，目的是恢复窗口内必须反复下发同一个姿态目标。
 float pitch_recover_target_deg = 0.0f;
+// 保存进入 pitch 标定那一拍锁住的 yaw 目标，目的是标定全过程里云台 yaw 必须停在当前朝向，不能再被遥控器或键鼠增量改写。
+float pitch_cali_yaw_lock_target_deg = 0.0f;
 // 保存底盘跟随接管请求剩余保持拍数，目的是双板调度可能错开，边沿请求需要保持几拍才稳妥。
 uint8_t follow_transition_request_hold_ticks = 0u;
 // 保存最后一次可信的真实云台-底盘夹角，目的是yaw 电机离线时要冻结到最近可信值，而不是继续算假偏角。
@@ -234,6 +238,7 @@ void RobotCMDInit(void)
     last_effective_gimbal_mode = GIMBAL_ZERO_FORCE;
     pitch_target_sync_hold_ticks = 0u;
     pitch_recover_target_deg = 0.0f;
+    pitch_cali_yaw_lock_target_deg = 0.0f;
     follow_transition_request_hold_ticks = 0u;
     rc_data = RemoteControlInit(&huart3);
     // 将 VT03 图传链路恢复到 USART6，目的是当前实车接线走的是云台板 USART6，挂到 USART1 会导致 VT03 遥控和键鼠都收不到有效帧。
@@ -427,6 +432,11 @@ void RobotCMDTask(void)
         LimitGimbalPitchTarget();
         // 这里只继续保持“贴当前姿态”覆盖，不再额外夹带 PID 状态清零，目的是把恢复链简化成单一的目标同步语义。
         pitch_target_sync_hold_ticks--;
+    }
+    if (GimbalPitchCalibrationActive() != 0u &&
+        gimbal_cmd_send.gimbal_mode != GIMBAL_ZERO_FORCE) {
+        // pitch 标定运行期间每拍都把 yaw 目标覆盖回进入标定时锁住的那一拍姿态，目的是即使遥控器摇杆、鼠标或键盘还在产生命令，yaw 轴也不能被带离当前朝向。
+        gimbal_cmd_send.yaw = pitch_cali_yaw_lock_target_deg;
     }
     // 把云台实时姿态信息显式附带到底盘命令，目的是底盘 UI 和跟随链需要在同一帧里拿到与控制同拍的数据。
     chassis_cmd_send.gimbal_gyro_z = gimbal_fetch_data.gimbal_imu_data.Gyro[2] * RAD_2_DEGREE;

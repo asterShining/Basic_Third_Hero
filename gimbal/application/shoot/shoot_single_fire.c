@@ -179,6 +179,8 @@ static void AcceptPendingSingleFireRequest(float current_time)
     single_fire.recover_stable_count = 0;
     single_fire.lock_target_angle = loader->measure.total_angle;
     single_fire.brake_start_time = current_time;
+    // 这里在状态机真正接纳一次单发事务时记录起点，目的是 ready_wait 必须从“开始等待摩擦轮就绪”这一刻算起，而不是从更早的按键边沿算起。
+    ShootVofa_OnSingleFireAccepted(current_time);
     LoaderSetAngleRef(single_fire.lock_target_angle);
 }
 
@@ -195,6 +197,8 @@ void AbortSingleFire(void)
     single_fire.inner_dip_stable_count = 0;
     single_fire.recover_stable_count = 0;
     fire_trigger.pending_fire = 0;
+    // 这里在事务被急停、停火或模式切换中断时同步清掉 VOFA 的瞬态计时，目的是下一次单发不能沿用上一笔未完成事务的时间戳。
+    ShootVofa_ResetTransactionState();
     SetFrictionFeedforward(0.0f, 0.0f);
 }
 
@@ -236,6 +240,8 @@ static void BeginSingleFireFeedAttempt(float current_time, float feed_bullet_cou
 
     RecordDipBaseline();
     RecordControlDipBaseline();
+    // 这里在拨盘真正开始一次送弹尝试时记录 ready_wait/feed 起点，目的是后续要把“等到速花了多久”和“送弹花了多久”拆开量化。
+    ShootVofa_OnFeedStart(current_time);
     SetFrictionFeedforward(0.0f, 0.0f);
     LoaderSetAngleRef(single_fire.rush_target_angle);
 }
@@ -283,6 +289,8 @@ static void FinishSingleFire(float current_time, uint8_t shot_success)
     single_fire.recover_stable_count = 0;
     // 单发事务结束时主动清空挂起请求，目的是当前策略明确禁止“上一发执行过程中顺延排队下一发”，否则一次点击仍可能被拆成连续两发。
     fire_trigger.pending_fire = 0;
+    // 这里在单发事务完成时锁存一次结果，目的是 VOFA 侧要保留最近一发的送弹耗时与成功标志，而不是只看瞬时状态。
+    ShootVofa_OnShotFinish(current_time, shot_success);
     SetFrictionFeedforward(0.0f, 0.0f);
 
     if (shot_success) {
@@ -429,6 +437,8 @@ void HandleSingleFire(uint8_t trigger_active)
     case SF_WAIT_RECOVER:
         if (ShootIsSpeedRecovered()) {
             // 回速完成后统一退回锁角保持，目的是当前需求是防双发优先，因此即便恢复期间出现新点击，也不能在这一拍自动续上一发。
+            // 这里在回速判定真正收口的这一拍记录 recover_ms，目的是后续要用每一发的恢复时间分布来判断供能恢复是否是主要抖动来源。
+            ShootVofa_OnRecoverDone(current_time);
             single_fire.state = SF_LOCKING;
         }
         LoaderSetAngleRef(single_fire.lock_target_angle);

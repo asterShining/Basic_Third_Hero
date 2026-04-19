@@ -194,6 +194,8 @@ void ShootInit(void)
     p_stall_debug = ShootDebug_GetStallPtr();
     p_sf_debug = ShootDebug_GetSingleFirePtr();
     p_dip_snapshot = ShootDebug_GetDipSnapshotPtr();
+    // 这里把 VOFA 输出链路在 shoot 初始化阶段一并拉起，目的是发射观测只从属于 shoot 模块，不能散落在别的应用里各自初始化。
+    ShootVofa_Init();
     // 初始化摩擦轮 ramp 的时间基准，目的是第一次进入时间型斜坡时不能拿到异常大的 dt，否则会把目标一步跳满。
     DWT_GetDeltaT(&friction_ramp_dwt_cnt);
 }
@@ -367,5 +369,7 @@ void ShootTask(void)
     last_report_fire_count = single_fire.fire_count;
     shoot_feedback_data.empty_flag = (single_fire.feed_timeout_count > 0u);
 
+    // 这里在反馈数据完成本拍收口后再推 VOFA，目的是串口记录必须拿到与上送 cmd 完全一致的一份 fire_count 和 empty_flag。
+    ShootVofa_SendFrameIfDue(current_time_ms);
     PubPushMessage(shoot_pub, (void *)&shoot_feedback_data);
 }

@@ -33,8 +33,8 @@
 // 云台参数
 #define YAW_CHASSIS_ALIGN_DEG 0.0f // 将 yaw 对正基准统一成 DM 硬件零点 0 度，目的是cmd 初始化与 offset 计算都已围绕 0 度闭环，继续保留旧机械角只会让双板调试语义分叉。
 #define PITCH_HORIZON_ECD 0 // 云台处于水平位置时编码器值,若对云台有机械改动需要修改
-#define PITCH_MAX_ANGLE 45 // 将云台上抬软件限位收紧到 25 度，目的是用户反馈 45 度抬头过高，降低上限同时保留足够仰角空间。
-#define PITCH_MIN_ANGLE -11 // 云台陀螺仪竖直方向最小角度
+#define PITCH_MAX_ANGLE 41 // 将云台上抬软件限位收紧到 25 度，目的是用户反馈 45 度抬头过高，降低上限同时保留足够仰角空间。
+#define PITCH_MIN_ANGLE -10 // 云台陀螺仪竖直方向最小角度
 // 发射参数
 #define ONE_BULLET_DELTA_ANGLE 80 // 发射一发弹丸拨盘转动的距离,由机械设计图纸给出
 #define REDUCTION_RATIO_LOADER 16.0f // 英雄需要修改为3508的15.7f

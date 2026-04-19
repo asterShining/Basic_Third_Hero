@@ -250,6 +250,7 @@ void HandleControlSourceSwitch(ControlSource_e new_source)
     if (new_source == CONTROL_SOURCE_DT7) {
         last_switch_left = rc_data[TEMP].rc.switch_left;
         last_switch_right = rc_data[TEMP].rc.switch_right;
+        vt03_fn_left_last = 0u;
         vt03_fn_right_last = 0u;
         vt03_trigger_last = 0u;
         mouse_key_source = &rc_data[TEMP];
@@ -257,11 +258,13 @@ void HandleControlSourceSwitch(ControlSource_e new_source)
         last_switch_left = RC_SW_DOWN;
         last_switch_right = RC_SW_DOWN;
         if (video_link_remote_state != NULL) {
+            vt03_fn_left_last = video_link_remote_state->fn_left_button_down;
             vt03_fn_right_last = video_link_remote_state->fn_right_button_down;
             vt03_trigger_last = video_link_remote_state->trigger_button_down;
             vt03_pause_last = video_link_remote_state->pause_button_down;
             vt03_mode_sw_last = video_link_remote_state->mode_sw;
         } else {
+            vt03_fn_left_last = 0u;
             vt03_fn_right_last = 0u;
             vt03_trigger_last = 0u;
             vt03_pause_last = 0u;
@@ -281,6 +284,7 @@ void HandleControlSourceSwitch(ControlSource_e new_source)
     } else {
         last_switch_left = RC_SW_DOWN;
         last_switch_right = RC_SW_DOWN;
+        vt03_fn_left_last = 0u;
         vt03_fn_right_last = 0u;
         vt03_trigger_last = 0u;
     }

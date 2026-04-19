@@ -184,7 +184,7 @@ void DMMotorOuterLoop(DMMotorInstance *motor, Closeloop_Type_e type)
     motor->motor_settings.outer_loop_type = type;
 }
 
-//@Todo: 目前只实现了力控，更多位控PID等请自行添加
+
 void DMMotorTask(void const *argument)
 {
     float pid_ref;

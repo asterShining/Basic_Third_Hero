@@ -296,12 +296,44 @@ static void RemoteControlSetDT7(void)
 }
 
 /**
- * @brief 处理 VT03 遥控器发射逻辑
+ * @brief 处理 VT03 右侧 fn 进入 pitch 标定的触发逻辑
  *
  * @param video_link_remote_state VT03 遥控器状态
  */
-static void ApplyVT03ShootLogic(const VideoLinkKM_RemoteState_s *video_link_remote_state)
+static void HandleVT03PitchCalibrationTrigger(const VideoLinkKM_RemoteState_s *video_link_remote_state)
 {
+    uint8_t fn_right_pressed;
+
+    if (video_link_remote_state == NULL) {
+        return;
+    }
+
+    fn_right_pressed = video_link_remote_state->fn_right_button_down;
+    if (fn_right_pressed &&
+        !vt03_fn_right_last &&
+        GimbalPitchCalibrationActive() == 0u &&
+        gimbal_cmd_send.gimbal_mode != GIMBAL_ZERO_FORCE) {
+        // 触发标定前先把云台目标贴齐当前姿态，目的是 pitch 标定应该从“当前枪口停住”的状态起步，不能带着旧的 yaw/pitch 目标继续跑。
+        SyncGimbalTargetToCurrentAttitude();
+        // 把进入标定这一拍的 yaw 姿态锁存下来，目的是后续即使遥控器或键鼠还有输入，yaw 也必须持续停在这个朝向。
+        pitch_cali_yaw_lock_target_deg = gimbal_cmd_send.yaw;
+        // 这里只通过公共云台接口触发标定，目的是 `robot_cmd` 不直接接触云台内部句柄，避免后续接口再次分叉。
+        GimbalStartPitchCalibration();
+    }
+
+    // 无论本拍是否真正启动标定，都要同步右 `fn` 的上一拍电平，目的是重复按压、按住和释放都必须走同一套边沿判断。
+    vt03_fn_right_last = fn_right_pressed;
+}
+
+/**
+ * @brief 处理 VT03 遥控器发射逻辑
+ *
+ * @param video_link_remote_state VT03 遥控器状态
+ * @param pitch_cali_active 当前 pitch 标定是否正在运行
+ */
+static void ApplyVT03ShootLogic(const VideoLinkKM_RemoteState_s *video_link_remote_state, uint8_t pitch_cali_active)
+{
+    uint8_t fn_left_pressed;
     uint8_t fn_right_pressed;
     uint8_t trigger_pressed;
 
@@ -309,13 +341,16 @@ static void ApplyVT03ShootLogic(const VideoLinkKM_RemoteState_s *video_link_remo
         return;
     }
 
+    fn_left_pressed = video_link_remote_state->fn_left_button_down;
     fn_right_pressed = video_link_remote_state->fn_right_button_down;
     trigger_pressed = video_link_remote_state->trigger_button_down;
 
-    if (fn_right_pressed && !vt03_fn_right_last) {
-        // 使用 VT03 右自定义键切换摩擦轮，目的是VT03 遥控器没有 DT7 的拨杆边沿接口，需要在 cmd 层用自定义键承接启停。
+    if (pitch_cali_active == 0u && fn_left_pressed && !vt03_fn_left_last) {
+        // 这次把摩擦轮切换迁到左 `fn`，目的是右 `fn` 要让给 pitch 标定入口，同时继续保留单击边沿切换的发射手感。
         friction_switch_state = (uint8_t)!friction_switch_state;
     }
+    // 右 `fn` 现在只用于 pitch 标定，不再在发射逻辑里承担任何业务，目的是避免同一个按键同时触发“进标定”和“切摩擦轮”两套冲突语义。
+    (void)fn_right_pressed;
 
     if (friction_switch_state != 0u) {
         shoot_cmd_send.shoot_mode = SHOOT_ON;
@@ -335,7 +370,8 @@ static void ApplyVT03ShootLogic(const VideoLinkKM_RemoteState_s *video_link_remo
         shoot_cmd_send.shoot_rate = 0.0f;
     }
 
-    vt03_fn_right_last = fn_right_pressed;
+    // 发射逻辑结束后统一更新左 `fn` 与扳机的上一拍电平，目的是下一个控制周期继续基于正确边沿做切换和单发判定。
+    vt03_fn_left_last = fn_left_pressed;
     vt03_trigger_last = trigger_pressed;
 }
 
@@ -352,6 +388,7 @@ static void RemoteControlSetVT03(void)
     float rocker_ly;
     float rocker_rx;
     float rocker_ry;
+    uint8_t pitch_cali_active;
 
     if (video_link_remote_state == NULL || video_link_data == NULL) {
         // VT03 状态视图失效时只复位 Pause 本次按压会话，目的是图传临时掉帧不应把已经锁住的零力状态顺手解除，否则链路恢复时会出现“自己突然使能”。
@@ -374,6 +411,7 @@ static void RemoteControlSetVT03(void)
             // 非零力态按下 Pause 时立即进入零力，目的是保留 VT03 的短按失能入口，同时禁止第一次按住就直接跨过零力触发校零。
             vt03_pause_press_started_in_zero_force = 0u;
             vt03_pause_zero_force_latched = 1u;
+            vt03_fn_left_last = video_link_remote_state->fn_left_button_down;
             vt03_fn_right_last = video_link_remote_state->fn_right_button_down;
             vt03_trigger_last = video_link_remote_state->trigger_button_down;
             vt03_mode_sw_last = video_link_remote_state->mode_sw;
@@ -389,6 +427,7 @@ static void RemoteControlSetVT03(void)
         if (vt03_pause_press_started_in_zero_force != 0u && vt03_pause_longpress_handled == 0u) {
             // 零力中短按并松开时退出零力，目的是用户需要在不校零的情况下，通过一次短按恢复正常有力控制。
             vt03_pause_zero_force_latched = 0u;
+            vt03_fn_left_last = video_link_remote_state->fn_left_button_down;
             vt03_fn_right_last = video_link_remote_state->fn_right_button_down;
             vt03_trigger_last = video_link_remote_state->trigger_button_down;
             vt03_mode_sw_last = video_link_remote_state->mode_sw;
@@ -401,6 +440,7 @@ static void RemoteControlSetVT03(void)
 
     if (vt03_pause_zero_force_latched != 0u) {
         // Pause 锁存零力期间持续更新 VT03 边沿历史，目的是用户在零力时改挡位或按住扳机，恢复时不应该被当成新的边沿事件。
+        vt03_fn_left_last = video_link_remote_state->fn_left_button_down;
         vt03_fn_right_last = video_link_remote_state->fn_right_button_down;
         vt03_trigger_last = video_link_remote_state->trigger_button_down;
         vt03_mode_sw_last = video_link_remote_state->mode_sw;
@@ -440,12 +480,21 @@ static void RemoteControlSetVT03(void)
     rocker_rx = ApplyRCDeadzone((float)video_link_data[TEMP].rc.rocker_r_);
     rocker_ry = ApplyRCDeadzone((float)video_link_data[TEMP].rc.rocker_r1);
 
-    ApplyRemoteGimbalStickControl(rocker_lx, rocker_ly, video_link_data[TEMP].rc.dial);
+    // 先处理右 `fn` 的标定上升沿，目的是“进入 pitch 标定”必须先于本拍摇杆增量生效，这样才能从当前姿态原地起步。
+    HandleVT03PitchCalibrationTrigger(video_link_remote_state);
+    pitch_cali_active = GimbalPitchCalibrationActive();
+    if (pitch_cali_active == 0u) {
+        // 只有 pitch 标定空闲时才允许遥控器继续改写云台目标，目的是标定运行期间要把 pitch 控制权完整交给云台内部状态机。
+        ApplyRemoteGimbalStickControl(rocker_lx, rocker_ly, video_link_data[TEMP].rc.dial);
+    } else {
+        // 标定期间把 yaw 目标即时拉回进入标定时锁住的姿态，目的是这一层先拦住 VT03 摇杆输入，避免同拍里先被改走再等主循环末尾纠正。
+        gimbal_cmd_send.yaw = pitch_cali_yaw_lock_target_deg;
+    }
     ApplyRemoteChassisStickControl(rocker_rx, rocker_ry);
 
     // VT03 遥控分支显式关闭当前未接到图传遥控器上的辅助机构，目的是本轮只恢复主驾驶和发射，不让上岛逻辑误吃到图传状态。
     ResetChassisAuxState();
-    ApplyVT03ShootLogic(video_link_remote_state);
+    ApplyVT03ShootLogic(video_link_remote_state, pitch_cali_active);
     vt03_mode_sw_last = video_link_remote_state->mode_sw;
 }
 

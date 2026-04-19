@@ -39,3 +39,7 @@ Makefile
 .DS_Store
 .vscode/
 .omx/
+
+# --- Python 工具缓存 ---
+__pycache__/
+*.pyc

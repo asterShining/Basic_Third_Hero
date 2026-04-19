@@ -19,12 +19,13 @@
 #include <stdint.h>
 #include <string.h>
 
-// 这里直接填入 2026-04-18 这轮 pitch 标定数据经 /home/aster/robo-misc/python_pitch.py 最小二乘得到的一阶余弦系数，目的是固件里的重力前馈公式要与离线拟合模型严格同符号、同尺度，不能再沿用旧枪管载荷下的历史值。
-#define PITCH_GRAVITY_COEFFICIENT_K1 16.8578f
-// 这里同步填入同一批标定数据解出的正弦修正项，目的是枪管重心不完全落在纯余弦项上，若这项仍保留旧值，抬头和低头两侧会重新出现一边托得住、一边托不住的非对称误差。
-#define PITCH_GRAVITY_COEFFICIENT_K2 11.3775f
-// 这里保留脚本解出的常值偏置，目的是当前机构静态平衡点明显不在零力附近，若忽略这项，整段姿态都会残留同方向的恒定欠补或过补。
-#define PITCH_GRAVITY_OFFSET 16.9757f
+// 这里直接填入 2026-04-18 这轮“新一批” pitch 标定数据经 /home/aster/robo-misc/python_pitch.py 同款最小二乘重新计算后得到的一阶余弦系数，目的是固件里的重力前馈公式要与这次最新离线拟合模型严格同符号、同尺度，不能继续沿用上一轮旧数据的结果。
+// 这次拟合前仍按同一套规则先剔除了明显坏点：目标力矩格式错位的 x.99 行，以及 |Target_Torque-Real_Torque| > 0.25Nm 的异常行，目的是把 RTT 导出里的错位样本和明显失真样本挡在拟合外面，避免重力前馈被脏数据拉偏。
+#define PITCH_GRAVITY_COEFFICIENT_K1 5.8370f
+// 这里同步填入同一批新数据清洗后有效样本解出的正弦修正项，目的是枪管重心不完全落在纯余弦项上，若这项仍保留上一轮旧值，高低俯仰两侧的补偿误差会重新变得不对称。
+#define PITCH_GRAVITY_COEFFICIENT_K2 8.9759f
+// 这里保留同一轮新数据拟合出的常值偏置，目的是当前机构静态平衡点明显不在零力附近，若忽略这项，整段姿态都会残留同方向的恒定欠补或过补。
+#define PITCH_GRAVITY_OFFSET 5.8526f
 
 // 定义 Yaw 轴科氏项前馈初始系数，目的是复合甩头时先补一层轻量耦合，减少仅靠误差环追赶带来的卡顿。
 #define YAW_CORIOLIS_FEEDFORWARD_K 0.10f
@@ -50,7 +51,7 @@
 // 定义 Yaw 参考导数状态的跳变复位阈值，目的是切源、贴齐当前姿态或外部大步跳目标时，直接求导会产生假加速度尖峰。
 #define YAW_REF_DERIV_RESET_THRESHOLD_DEG 10.0f
 // 这里把 Pitch 前馈总限幅同步抬到略高于本轮静态标定最大实测力矩的位置，目的是新拟合的重力项在大仰角已经接近 12Nm，若仍卡在旧的 7.5Nm，会在高角度长期被截断，导致“参数换了但实车托不住”的假象。
-#define PITCH_FEEDFORWARD_LIMIT 15.0f
+#define PITCH_FEEDFORWARD_LIMIT 12.0f
 // 定义 Yaw 前馈输出限幅，目的是当前 Yaw 只加动态耦合项，先用更保守的上限保证复合运动不过激。
 #define YAW_FEEDFORWARD_LIMIT 3.0f
 

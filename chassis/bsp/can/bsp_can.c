@@ -117,7 +117,7 @@ uint8_t CANTransmit(CANInstance *_instance, float timeout)
     wait_time = DWT_GetTimeline_ms() - dwt_start;
     // tx_mailbox会保存实际填入了这一帧消息的邮箱,但是知道是哪个邮箱发的似乎也没啥用
     if (HAL_CAN_AddTxMessage(_instance->can_handle, &_instance->txconf, _instance->tx_buff, &_instance->tx_mailbox)) {
-        LOGWARNING("[bsp_can] CAN bus BUS! cnt:%d", busy_count);
+        // LOGWARNING("[bsp_can] CAN bus BUS! cnt:%d", busy_count);
         busy_count++;
         if (busy_count % 200 == 0) {
             // 获取 CAN 发送状态寄存器 (TSR) 和 错误状态寄存器 (ESR)

@@ -122,5 +122,14 @@ void AbortSingleFire(void);
 uint8_t SingleFireIsRetryActive(void);
 void HandleSingleFire(uint8_t trigger_active);
 loader_mode_e HandleLoaderStall(loader_mode_e current_mode);
+// VOFA 量化记录链路只服务 shoot 模块内部，目的是把串口输出与控制链解耦到独立编译单元里，后续增删观测字段时不需要再碰主控制流程。
+void ShootVofa_Init(void);
+void ShootVofa_UpdateTarget(float inner_mps, float outer_mps);
+void ShootVofa_OnSingleFireAccepted(float current_time_ms);
+void ShootVofa_OnFeedStart(float current_time_ms);
+void ShootVofa_OnShotFinish(float current_time_ms, uint8_t shot_success);
+void ShootVofa_OnRecoverDone(float current_time_ms);
+void ShootVofa_ResetTransactionState(void);
+void ShootVofa_SendFrameIfDue(float current_time_ms);
 
 #endif // SHOOT_PRIVATE_H

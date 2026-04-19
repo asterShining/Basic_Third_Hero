@@ -260,6 +260,9 @@ void ShootSetSpeedDual(float inner_mps, float outer_mps)
     float ref_inner_base;
     float ref_outer_base;
 
+    // 这里先把当前拍的线速度目标同步给独立 VOFA 模块，目的是串口记录要直接看到上层弹速命令，而不是再从角速度目标反推一遍。
+    ShootVofa_UpdateTarget(inner_mps, outer_mps);
+
     // 按真实 dt 推进摩擦轮升降速，目的是这样 ready 时间由“秒”决定，不再由任务循环次数偶然决定。
     current_inner_deg = RampFrictionRef(current_inner_deg, target_inner_deg,
                                         FRICTION_RAMP_UP_RATE_DPS_PER_S,

@@ -36,24 +36,24 @@ typedef struct
 
 typedef struct
 {
-    uint32_t usb_rx_packets;         // 记录 USB RX 包数，便于确认上位机是否持续送协议包
-    uint32_t usb_rx_bytes;           // 记录 USB RX 字节数，便于核对链路吞吐
-    uint16_t last_usb_rx_len;        // 记录最近一次 USB RX 包长，便于确认上位机当前是否真的在送有效负载
-    uint32_t last_usb_rx_tick_ms;    // 记录最近一次 USB RX 时刻，便于区分“刚启动还没来包”和“已经断流”
-    uint32_t usb_queue_drop_count;   // 记录 USB 回调槽位挤爆时丢弃旧包的次数
-    uint32_t pending_reset_count;    // 记录任务侧原始 USB 缓冲溢出后清空的次数
+    uint32_t usb_rx_packets; // 记录 USB RX 包数，便于确认上位机是否持续送协议包
+    uint32_t usb_rx_bytes; // 记录 USB RX 字节数，便于核对链路吞吐
+    uint16_t last_usb_rx_len; // 记录最近一次 USB RX 包长，便于确认上位机当前是否真的在送有效负载
+    uint32_t last_usb_rx_tick_ms; // 记录最近一次 USB RX 时刻，便于区分“刚启动还没来包”和“已经断流”
+    uint32_t usb_queue_drop_count; // 记录 USB 回调槽位挤爆时丢弃旧包的次数
+    uint32_t pending_reset_count; // 记录任务侧原始 USB 缓冲溢出后清空的次数
     uint32_t inner_proto_invalid_count; // 记录 inner packet v3 头字段校验失败的次数
-    uint32_t inner_resync_drop_bytes;   // 记录为了重新对齐 magic/version 而丢弃的原始字节数
-    uint32_t packet_queue_drop_count;   // 记录 packet 队列满时丢弃旧 packet 的次数
-    uint32_t uart_tx_packet_count;      // 记录成功下发的 0x0310 包数
-    uint32_t last_uart_tx_tick_ms;      // 记录最近一次 0x0310 成功下发时刻，便于判断桥接是否只收不发
-    uint32_t uart_busy_skip_count;      // 记录因 USART6 TX 忙而本周期跳过发送的次数
-    uint32_t uart_tx_error_count;       // 记录 HAL_UART_Transmit_DMA 返回失败的次数
-    uint32_t last_packet_seq;           // 记录最近一次成功下发的 inner packet packet_seq
-    uint32_t stream_reset_seen_count;   // 记录最近观察到的 stream_reset 包次数
-    uint32_t last_logged_usb_rx_packets;    // 记录上一次打印日志时的累计 USB 包数
+    uint32_t inner_resync_drop_bytes; // 记录为了重新对齐 magic/version 而丢弃的原始字节数
+    uint32_t packet_queue_drop_count; // 记录 packet 队列满时丢弃旧 packet 的次数
+    uint32_t uart_tx_packet_count; // 记录成功下发的 0x0310 包数
+    uint32_t last_uart_tx_tick_ms; // 记录最近一次 0x0310 成功下发时刻，便于判断桥接是否只收不发
+    uint32_t uart_busy_skip_count; // 记录因 USART6 TX 忙而本周期跳过发送的次数
+    uint32_t uart_tx_error_count; // 记录 HAL_UART_Transmit_DMA 返回失败的次数
+    uint32_t last_packet_seq; // 记录最近一次成功下发的 inner packet packet_seq
+    uint32_t stream_reset_seen_count; // 记录最近观察到的 stream_reset 包次数
+    uint32_t last_logged_usb_rx_packets; // 记录上一次打印日志时的累计 USB 包数
     uint32_t last_logged_uart_tx_packet_count; // 记录上一次打印日志时的累计 0x0310 包数
-    uint32_t last_log_tick_ms;          // 记录上次打印诊断的时间，用于日志限频
+    uint32_t last_log_tick_ms; // 记录上次打印诊断的时间，用于日志限频
 } CustomImageBridgeDiag_s;
 
 static uint8_t *custom_image_bridge_usb_rx_buffer;
