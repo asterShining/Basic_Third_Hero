@@ -173,27 +173,6 @@ static void RemoteControlSetDT7(void)
         ApplyRemoteGimbalStickControl(rocker_lx, rocker_ly, rc_data[TEMP].rc.dial);
     }
 
-    if (switch_is_up(current_switch_right)) {
-        if (gimbal_cmd_send.gimbal_mode == GIMBAL_GYRO_MODE) {
-            float current_yaw_total = gimbal_fetch_data.gimbal_imu_data.VISION_YAW_AXIS * VISION_YAW_SIGN;
-            float current_pitch = gimbal_fetch_data.gimbal_imu_data.VISION_PITCH_AXIS * VISION_PITCH_SIGN;
-
-            // 继续复用现有自瞄入口，目的是本轮拆文件只做职责划分，不改变自瞄接管条件和输出写回方式。
-            auto_aim_state = AutoGimbalRun(
-                vision_recv_data,
-                current_yaw_total,
-                current_pitch,
-                &gimbal_cmd_send.yaw,
-                &gimbal_cmd_send.pitch);
-
-            if (auto_aim_state == AUTO_AIM_TRACKING) {
-                // 当前保持原策略不在此处强改底盘模式，目的是用户这次只要求拆文件，不额外引入新的战术决策变化。
-            }
-        } else {
-            auto_aim_state = AUTO_AIM_IDLE;
-        }
-    }
-
     ApplyRemoteChassisStickControl(rocker_rx, rocker_ry);
 
     if (!switch_is_down(current_switch_right)) {
@@ -296,36 +275,6 @@ static void RemoteControlSetDT7(void)
 }
 
 /**
- * @brief 处理 VT03 右侧 fn 进入 pitch 标定的触发逻辑
- *
- * @param video_link_remote_state VT03 遥控器状态
- */
-static void HandleVT03PitchCalibrationTrigger(const VideoLinkKM_RemoteState_s *video_link_remote_state)
-{
-    uint8_t fn_right_pressed;
-
-    if (video_link_remote_state == NULL) {
-        return;
-    }
-
-    fn_right_pressed = video_link_remote_state->fn_right_button_down;
-    if (fn_right_pressed &&
-        !vt03_fn_right_last &&
-        GimbalPitchCalibrationActive() == 0u &&
-        gimbal_cmd_send.gimbal_mode != GIMBAL_ZERO_FORCE) {
-        // 触发标定前先把云台目标贴齐当前姿态，目的是 pitch 标定应该从“当前枪口停住”的状态起步，不能带着旧的 yaw/pitch 目标继续跑。
-        SyncGimbalTargetToCurrentAttitude();
-        // 把进入标定这一拍的 yaw 姿态锁存下来，目的是后续即使遥控器或键鼠还有输入，yaw 也必须持续停在这个朝向。
-        pitch_cali_yaw_lock_target_deg = gimbal_cmd_send.yaw;
-        // 这里只通过公共云台接口触发标定，目的是 `robot_cmd` 不直接接触云台内部句柄，避免后续接口再次分叉。
-        GimbalStartPitchCalibration();
-    }
-
-    // 无论本拍是否真正启动标定，都要同步右 `fn` 的上一拍电平，目的是重复按压、按住和释放都必须走同一套边沿判断。
-    vt03_fn_right_last = fn_right_pressed;
-}
-
-/**
  * @brief 处理 VT03 遥控器发射逻辑
  *
  * @param video_link_remote_state VT03 遥控器状态
@@ -334,7 +283,6 @@ static void HandleVT03PitchCalibrationTrigger(const VideoLinkKM_RemoteState_s *v
 static void ApplyVT03ShootLogic(const VideoLinkKM_RemoteState_s *video_link_remote_state, uint8_t pitch_cali_active)
 {
     uint8_t fn_left_pressed;
-    uint8_t fn_right_pressed;
     uint8_t trigger_pressed;
 
     if (video_link_remote_state == NULL) {
@@ -342,15 +290,12 @@ static void ApplyVT03ShootLogic(const VideoLinkKM_RemoteState_s *video_link_remo
     }
 
     fn_left_pressed = video_link_remote_state->fn_left_button_down;
-    fn_right_pressed = video_link_remote_state->fn_right_button_down;
     trigger_pressed = video_link_remote_state->trigger_button_down;
 
     if (pitch_cali_active == 0u && fn_left_pressed && !vt03_fn_left_last) {
-        // 这次把摩擦轮切换迁到左 `fn`，目的是右 `fn` 要让给 pitch 标定入口，同时继续保留单击边沿切换的发射手感。
+        // 左 `fn` 继续承担摩擦轮边沿切换，目的是在移除 VT03 的 pitch 标定入口后，发射侧手感和按键语义保持不变。
         friction_switch_state = (uint8_t)!friction_switch_state;
     }
-    // 右 `fn` 现在只用于 pitch 标定，不再在发射逻辑里承担任何业务，目的是避免同一个按键同时触发“进标定”和“切摩擦轮”两套冲突语义。
-    (void)fn_right_pressed;
 
     if (friction_switch_state != 0u) {
         shoot_cmd_send.shoot_mode = SHOOT_ON;
@@ -473,15 +418,15 @@ static void RemoteControlSetVT03(void)
         gimbal_cmd_send.gimbal_mode = GIMBAL_GYRO_MODE;
     }
     shoot_cmd_send.shoot_mode = SHOOT_ON;
-    auto_aim_state = AUTO_AIM_IDLE;
 
     rocker_lx = ApplyRCDeadzone((float)video_link_data[TEMP].rc.rocker_l_);
     rocker_ly = ApplyRCDeadzone((float)video_link_data[TEMP].rc.rocker_l1);
     rocker_rx = ApplyRCDeadzone((float)video_link_data[TEMP].rc.rocker_r_);
     rocker_ry = ApplyRCDeadzone((float)video_link_data[TEMP].rc.rocker_r1);
 
-    // 先处理右 `fn` 的标定上升沿，目的是“进入 pitch 标定”必须先于本拍摇杆增量生效，这样才能从当前姿态原地起步。
-    HandleVT03PitchCalibrationTrigger(video_link_remote_state);
+    // VT03 不再负责触发 pitch 标定，因此这里直接读取当前标定占用状态；
+    // 原因是用户要求只移除遥控器上的 pitch 标定入口，但若标定由其它入口启动，VT03 仍应在运行期间让出 pitch/yaw 的相关控制权。
+    vt03_fn_right_last = video_link_remote_state->fn_right_button_down;
     pitch_cali_active = GimbalPitchCalibrationActive();
     if (pitch_cali_active == 0u) {
         // 只有 pitch 标定空闲时才允许遥控器继续改写云台目标，目的是标定运行期间要把 pitch 控制权完整交给云台内部状态机。

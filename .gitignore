@@ -1,5 +1,7 @@
 # --- 编译输出目录 ---
 build/
+build-host/
+gimbal/build-host/
 bin/
 obj/
 

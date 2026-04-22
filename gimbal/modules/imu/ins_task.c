@@ -18,7 +18,6 @@
 #include "tim.h"
 #include "user_lib.h"
 #include "general_def.h"
-#include "master_process.h"
 
 static INS_t INS;
 static IMU_Param_t IMU_Param;
@@ -172,15 +171,6 @@ void INS_Task(void)
         INS.Roll = QEKF_INS.Roll;
         INS.YawTotalAngle = QEKF_INS.YawTotalAngle;
 
-        // 同步 IMU 数据到视觉通信模块 (四元数 + 姿态角 + 角速度)
-        // [轴互换后] INS.Pitch 已是物理 Pitch 轴数据
-        // [修复] EKF 输出为角度制(度), 协议要求弧度制(rad), 除以 57.3 转换
-        VisionSetQuaternion(INS.q);
-        VisionSetAltitude(
-            INS.Yaw / 57.295779513f, // 角度 → 弧度
-            INS.Pitch / 57.295779513f, // 角度 → 弧度
-            INS.Gyro[Z], // 陀螺仪角速度已是 rad/s, 无需转换
-            INS.Gyro[Y]);
     }
 
     // temperature control

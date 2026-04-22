@@ -2,7 +2,6 @@
 #define SHOOT_PRIVATE_H
 
 #include "shoot.h"
-#include "master_process.h"
 #include "motor_def.h"
 #include "robot_def.h"
 

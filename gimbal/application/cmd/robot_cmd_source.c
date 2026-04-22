@@ -239,7 +239,6 @@ void HandleControlSourceSwitch(ControlSource_e new_source)
     ResetChassisAuxState();
     friction_switch_state = 0u;
     shoot_cmd_send.shoot_rate = 0.0f;
-    auto_aim_state = AUTO_AIM_IDLE;
     // 切换主控源时同步清掉 DT7 校零锁存，目的是内八组合已经失效，继续沿用旧触发状态会让蜂鸣器残留或下次组合无法重新触发。
     cali_triggered = 0u;
     // 切换主控源时只清理 Pause 本次按压会话，不清零力锁存，目的是VT03 短暂掉帧或切回 DT7 时若把失能锁存一起清掉，链路恢复后机器人会自己突然重新使能。

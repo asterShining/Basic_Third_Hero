@@ -27,10 +27,6 @@ Chassis_Upload_Data_s chassis_fetch_data = { 0 };
 RC_ctrl_t *rc_data = NULL;
 // 图传键鼠数据指针在初始化后全局复用，目的是VT03 主控和键鼠输入都依赖同一份图传解析结果。
 RC_ctrl_t *video_link_data = NULL;
-// 视觉接收数据指针仍保留原接口位置，目的是这次只拆文件，不改现有自瞄接线和上层数据通路。
-Vision_Recv_s *vision_recv_data = NULL;
-// 视觉发送缓存继续保留，目的是现有工程虽然暂未启用发送链，但拆文件不应顺手删除已有状态位。
-Vision_Send_s vision_send_data = { 0 };
 
 // 云台命令发布者用于把 cmd 结果送到 gimbal 应用，目的是入口和恢复逻辑都会往同一条消息链里写命令。
 Publisher_t *gimbal_cmd_pub = NULL;
@@ -78,8 +74,6 @@ uint8_t front_track_switch_state = 0u;
 #endif
 // 保存 DT7 内八校零是否已在本次组合中触发，目的是校零属于重动作，同一组合里必须只发一次。
 uint8_t cali_triggered = 0u;
-// 保存当前自瞄状态，目的是遥控器分支需要把自瞄结果持续反馈给下游逻辑。
-AutoAim_State_e auto_aim_state = AUTO_AIM_IDLE;
 
 // 键鼠火力锁存用于记住“鼠标已经请求开火”，目的是当前只接 `mouse.press_l`，必须靠锁存维持预热后的后续点射与连发。
 uint8_t mouse_fire_friction_latched = 0u;
@@ -220,7 +214,6 @@ static void PrepareControlCommandBase(void)
     shoot_cmd_send.friction_mode = FRICTION_OFF;
     shoot_cmd_send.shoot_rate = 0.0f;
 
-    auto_aim_state = AUTO_AIM_IDLE;
 }
 
 void RobotCMDInit(void)
@@ -243,7 +236,6 @@ void RobotCMDInit(void)
     rc_data = RemoteControlInit(&huart3);
     // 将 VT03 图传链路恢复到 USART6，目的是当前实车接线走的是云台板 USART6，挂到 USART1 会导致 VT03 遥控和键鼠都收不到有效帧。
     video_link_data = VideoLinkKMInit(&huart6);
-    // vision_recv_data = VisionInit(&huart1);
     Buzzer_config_s hint_config = {
         .alarm_level = ALARM_LEVEL_MEDIUM,
         .octave = OCTAVE_5,

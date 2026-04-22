@@ -8,14 +8,12 @@
 
 #include "remote_control.h"
 #include "ins_task.h"
-#include "master_process.h"
 #include "message_center.h"
 #include "general_def.h"
 #include "user_lib.h"
 #include "dji_motor.h"
 #include "bmi088.h"
 #include "buzzer.h"
-#include "auto_gimbal.h"
 #include "video_link_km.h"
 
 #include "bsp_dwt.h"
@@ -89,8 +87,6 @@ extern Chassis_Ctrl_Cmd_s chassis_cmd_send;
 extern Chassis_Upload_Data_s chassis_fetch_data;
 extern RC_ctrl_t *rc_data;
 extern RC_ctrl_t *video_link_data;
-extern Vision_Recv_s *vision_recv_data;
-extern Vision_Send_s vision_send_data;
 extern Publisher_t *gimbal_cmd_pub;
 extern Subscriber_t *gimbal_feed_sub;
 extern Gimbal_Ctrl_Cmd_s gimbal_cmd_send;
@@ -113,7 +109,6 @@ extern uint8_t fire_mode_state;
 extern uint8_t front_track_switch_state;
 #endif
 extern uint8_t cali_triggered;
-extern AutoAim_State_e auto_aim_state;
 extern uint8_t mouse_fire_friction_latched;
 extern uint8_t mouse_left_last;
 extern uint8_t mouse_left_burst_active;

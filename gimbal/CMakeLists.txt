@@ -50,7 +50,6 @@ file(GLOB_RECURSE SOURCES
     "application/shoot/*.c"
     "application/gimbal/*.c"
     "application/cmd/*.c"
-    "application/auto_gimbal.c"
     "bsp/*.c"
     "bsp/can/*.c"
     "bsp/usart/*.c"
@@ -74,7 +73,6 @@ file(GLOB_RECURSE SOURCES
     "modules/encoder/*.c"
     "modules/imu/*.c"
     "modules/ist8310/*.c"
-    "modules/master_machine/*.c"
     "modules/message_center/*.c"
     "modules/motor/DJImotor/*.c"
     "modules/motor/DMmotor/*.c"
@@ -137,7 +135,6 @@ target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
     modules/encoder
     modules/imu
     modules/ist8310
-    modules/master_machine
     modules/message_center
     modules/motor
     modules/motor/DJImotor

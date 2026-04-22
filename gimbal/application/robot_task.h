@@ -11,7 +11,6 @@
 #include "ins_task.h"
 #include "motor_task.h"
 #include "referee_task.h"
-#include "master_process.h"
 #include "daemon.h"
 #include "HT04.h"
 #include "buzzer.h"
@@ -25,6 +24,11 @@ osThreadId motorTaskHandle;
 osThreadId daemonTaskHandle;
 osThreadId uiTaskHandle;
 osThreadId customImageBridgeTaskHandle;
+
+// 这里把图像桥接任务周期单独抽成常量，作用是显式绑定 0x0310 的 50Hz 发送上限；
+// 原因是协议限制决定了下位机最多每 20ms 只应推进一包 300B payload，若以后有人顺手把 osDelay 改快，
+// 不仅不会提高有效带宽，还会把 USART6 busy_skip 和无效轮询噪声一起拉高。
+#define CUSTOM_IMAGE_BRIDGE_TASK_PERIOD_MS 20u
 
 void StartINSTASK(void const *argument);
 void StartMOTORTASK(void const *argument);
@@ -78,7 +82,6 @@ __attribute__((noreturn)) void StartINSTASK(void const *argument)
         if (ins_dt > 1)
             LOGERROR("[freeRTOS] INS Task DELAY! dt = %d us", (int)(ins_dt * 1000));
 
-        VisionSend();
         osDelay(1);
     }
 }
@@ -157,7 +160,7 @@ __attribute__((noreturn)) void StartCUSTOMIMAGEBRIDGETASK(void const *argument)
         if (custom_image_bridge_dt > 1)
             LOGERROR("[freeRTOS] CUSTOM IMAGE BRIDGE Task DELAY! dt = %d us", (int)(custom_image_bridge_dt * 1000));
 
-        osDelay(20);
+        osDelay(CUSTOM_IMAGE_BRIDGE_TASK_PERIOD_MS);
     }
 }
 

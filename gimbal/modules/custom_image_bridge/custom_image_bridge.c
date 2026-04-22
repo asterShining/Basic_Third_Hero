@@ -8,30 +8,29 @@
 #include "string.h"
 #include "usart.h"
 
-#define CUSTOM_IMAGE_BRIDGE_USB_PACKET_SLOT_COUNT 4u
+#define CUSTOM_IMAGE_BRIDGE_USB_PACKET_SLOT_COUNT 12u
 #define CUSTOM_IMAGE_BRIDGE_USB_PACKET_MAX_BYTES APP_RX_DATA_SIZE
-#define CUSTOM_IMAGE_BRIDGE_PENDING_BUFFER_BYTES 2048u
+#define CUSTOM_IMAGE_BRIDGE_PENDING_BUFFER_BYTES 6144u
 #define CUSTOM_IMAGE_BRIDGE_PACKET_QUEUE_SLOT_COUNT 16u
-#define CUSTOM_IMAGE_BRIDGE_PAYLOAD_BYTES LEN_robot_custom_data_2
+#define CUSTOM_IMAGE_BRIDGE_CHUNK_BYTES LEN_robot_custom_data_2
+#define CUSTOM_IMAGE_BRIDGE_PROTOCOL_PAYLOAD_BYTES 300u
 #define CUSTOM_IMAGE_BRIDGE_FRAME_BYTES (LEN_HEADER + LEN_CMDID + LEN_robot_custom_data_2 + LEN_TAIL)
 #define CUSTOM_IMAGE_BRIDGE_LOG_INTERVAL_MS 1000u
 
-#define CUSTOM_VIDEO_PACKET_MAGIC0 0x44u
-#define CUSTOM_VIDEO_PACKET_MAGIC1 0x4Cu
-#define CUSTOM_VIDEO_PACKET_VERSION 0x03u
-#define CUSTOM_VIDEO_PACKET_HEADER_BYTES 16u
-#define CUSTOM_VIDEO_PACKET_PAYLOAD_BYTES 284u
-#define CUSTOM_VIDEO_PACKET_FLAG_STREAM_RESET 0x01u
-#define CUSTOM_VIDEO_PACKET_FLAG_GRAYSCALE 0x02u
-#define CUSTOM_VIDEO_PACKET_FLAG_ROI_VIEW 0x04u
-#define CUSTOM_VIDEO_PACKET_FLAG_INDEPENDENT_FRAME 0x08u
-#define CUSTOM_VIDEO_PACKET_ALLOWED_FLAGS (CUSTOM_VIDEO_PACKET_FLAG_STREAM_RESET | CUSTOM_VIDEO_PACKET_FLAG_GRAYSCALE | CUSTOM_VIDEO_PACKET_FLAG_ROI_VIEW | CUSTOM_VIDEO_PACKET_FLAG_INDEPENDENT_FRAME)
+// 这里用编译期断言把 0x0310 的 payload 大小钉死为协议要求的 300B；
+// 原因是这条桥就是靠“上位机原始 H.264 字节流 -> 300B 固定块 -> 0x0310”工作的，
+// 一旦裁判协议常量或本地宏被人顺手改掉，继续编译运行只会把整条图传链 silently 打坏。
+_Static_assert(CUSTOM_IMAGE_BRIDGE_CHUNK_BYTES == CUSTOM_IMAGE_BRIDGE_PROTOCOL_PAYLOAD_BYTES,
+               "custom image bridge payload must stay at 300 bytes for 0x0310");
+
+// 这里将图像桥接缓存收敛到“中间档”，目的是在视频稳定性和板上 RAM 余量之间取平衡。
+// 满配缓存会把当前云台板 RAM 顶到接近 100%，而最小缓存又已经在实机上暴露出恢复慢、画面断续的问题。
+// 现有上位机稳态码率约 8~10kB/s，这组尺寸能比最小档多覆盖几拍 USB CDC / VT03 串口抖动，
+// 同时显著低于满配缓存的占用；后续继续调时，应直接看 `pending_drop`、`usb_queue_drop_count` 和客户端 AU 恢复速率。
 
 typedef struct
 {
-    uint8_t bytes[CUSTOM_IMAGE_BRIDGE_PAYLOAD_BYTES];
-    uint32_t packet_seq;
-    uint8_t flags;
+    uint8_t bytes[CUSTOM_IMAGE_BRIDGE_CHUNK_BYTES];
 } CustomImageBridgePacketSlot_s;
 
 typedef struct
@@ -41,16 +40,14 @@ typedef struct
     uint16_t last_usb_rx_len; // 记录最近一次 USB RX 包长，便于确认上位机当前是否真的在送有效负载
     uint32_t last_usb_rx_tick_ms; // 记录最近一次 USB RX 时刻，便于区分“刚启动还没来包”和“已经断流”
     uint32_t usb_queue_drop_count; // 记录 USB 回调槽位挤爆时丢弃旧包的次数
-    uint32_t pending_reset_count; // 记录任务侧原始 USB 缓冲溢出后清空的次数
-    uint32_t inner_proto_invalid_count; // 记录 inner packet v3 头字段校验失败的次数
-    uint32_t inner_resync_drop_bytes; // 记录为了重新对齐 magic/version 而丢弃的原始字节数
+    uint32_t pending_trim_count; // 记录原始缓存因拥塞被裁剪的次数
+    uint32_t pending_drop_bytes; // 记录为了保留最新视频流而丢掉的历史原始字节数
     uint32_t packet_queue_drop_count; // 记录 packet 队列满时丢弃旧 packet 的次数
     uint32_t uart_tx_packet_count; // 记录成功下发的 0x0310 包数
+    uint32_t uart_tx_bytes; // 记录成功发出的原始视频字节数，便于和上位机限速配置核对
     uint32_t last_uart_tx_tick_ms; // 记录最近一次 0x0310 成功下发时刻，便于判断桥接是否只收不发
     uint32_t uart_busy_skip_count; // 记录因 USART6 TX 忙而本周期跳过发送的次数
     uint32_t uart_tx_error_count; // 记录 HAL_UART_Transmit_DMA 返回失败的次数
-    uint32_t last_packet_seq; // 记录最近一次成功下发的 inner packet packet_seq
-    uint32_t stream_reset_seen_count; // 记录最近观察到的 stream_reset 包次数
     uint32_t last_logged_usb_rx_packets; // 记录上一次打印日志时的累计 USB 包数
     uint32_t last_logged_uart_tx_packet_count; // 记录上一次打印日志时的累计 0x0310 包数
     uint32_t last_log_tick_ms; // 记录上次打印诊断的时间，用于日志限频
@@ -87,94 +84,6 @@ static void CustomImageBridgeExitCritical(uint32_t primask)
     }
 }
 
-static uint32_t CustomImageBridgeReadLE32(const uint8_t *buffer)
-{
-    return (uint32_t)buffer[0] |
-           ((uint32_t)buffer[1] << 8) |
-           ((uint32_t)buffer[2] << 16) |
-           ((uint32_t)buffer[3] << 24);
-}
-
-static uint16_t CustomImageBridgeReadLE16(const uint8_t *buffer)
-{
-    return (uint16_t)buffer[0] | ((uint16_t)buffer[1] << 8);
-}
-
-static int32_t CustomImageBridgeFindPacketStart(const uint8_t *buffer, size_t buffer_len)
-{
-    size_t index = 0u;
-
-    if (buffer == NULL || buffer_len < 3u) {
-        return -1;
-    }
-
-    for (index = 0u; index + 2u < buffer_len; index++) {
-        if (buffer[index] == CUSTOM_VIDEO_PACKET_MAGIC0 &&
-            buffer[index + 1u] == CUSTOM_VIDEO_PACKET_MAGIC1 &&
-            buffer[index + 2u] == CUSTOM_VIDEO_PACKET_VERSION) {
-            return (int32_t)index;
-        }
-    }
-
-    return -1;
-}
-
-static uint16_t CustomImageBridgeInnerCRC16(const uint8_t *data, uint16_t len)
-{
-    return Get_CRC16_Check_Sum((uint8_t *)data, len, 0xFFFFu);
-}
-
-static uint8_t CustomImageBridgeValidateInnerPacket(const uint8_t *packet, uint32_t *packet_seq_out, uint8_t *flags_out)
-{
-    uint8_t flags = 0u;
-    uint8_t width = 0u;
-    uint8_t height = 0u;
-    uint16_t payload_len = 0u;
-    uint16_t payload_crc = 0u;
-
-    if (packet == NULL) {
-        return 0u;
-    }
-
-    if (packet[0] != CUSTOM_VIDEO_PACKET_MAGIC0 ||
-        packet[1] != CUSTOM_VIDEO_PACKET_MAGIC1 ||
-        packet[2] != CUSTOM_VIDEO_PACKET_VERSION) {
-        return 0u;
-    }
-
-    flags = packet[3];
-    if ((flags & (~CUSTOM_VIDEO_PACKET_ALLOWED_FLAGS)) != 0u) {
-        return 0u;
-    }
-    if ((flags & CUSTOM_VIDEO_PACKET_FLAG_INDEPENDENT_FRAME) == 0u) {
-        return 0u;
-    }
-
-    width = packet[8];
-    height = packet[9];
-    payload_len = CustomImageBridgeReadLE16(packet + 12u);
-    payload_crc = CustomImageBridgeReadLE16(packet + 14u);
-
-    if (width == 0u || height == 0u) {
-        return 0u;
-    }
-    if (payload_len == 0u || payload_len > CUSTOM_VIDEO_PACKET_PAYLOAD_BYTES) {
-        return 0u;
-    }
-    if (CustomImageBridgeInnerCRC16(packet + CUSTOM_VIDEO_PACKET_HEADER_BYTES, payload_len) != payload_crc) {
-        return 0u;
-    }
-
-    if (packet_seq_out != NULL) {
-        *packet_seq_out = CustomImageBridgeReadLE32(packet + 4u);
-    }
-    if (flags_out != NULL) {
-        *flags_out = flags;
-    }
-
-    return 1u;
-}
-
 static void CustomImageBridgeDropOldestPacket(void)
 {
     if (custom_image_bridge_packet_queue_count == 0u) {
@@ -187,7 +96,7 @@ static void CustomImageBridgeDropOldestPacket(void)
     custom_image_bridge_diag.packet_queue_drop_count++;
 }
 
-static void CustomImageBridgeEnqueuePacket(const uint8_t *packet, uint32_t packet_seq, uint8_t flags)
+static void CustomImageBridgeEnqueuePacket(const uint8_t *packet)
 {
     uint8_t write_index = custom_image_bridge_packet_queue_write_index;
 
@@ -200,9 +109,7 @@ static void CustomImageBridgeEnqueuePacket(const uint8_t *packet, uint32_t packe
     }
 
     write_index = custom_image_bridge_packet_queue_write_index;
-    memcpy(custom_image_bridge_packet_queue[write_index].bytes, packet, CUSTOM_IMAGE_BRIDGE_PAYLOAD_BYTES);
-    custom_image_bridge_packet_queue[write_index].packet_seq = packet_seq;
-    custom_image_bridge_packet_queue[write_index].flags = flags;
+    memcpy(custom_image_bridge_packet_queue[write_index].bytes, packet, CUSTOM_IMAGE_BRIDGE_CHUNK_BYTES);
     custom_image_bridge_packet_queue_write_index =
         (uint8_t)((write_index + 1u) % CUSTOM_IMAGE_BRIDGE_PACKET_QUEUE_SLOT_COUNT);
     custom_image_bridge_packet_queue_count++;
@@ -261,8 +168,20 @@ static void CustomImageBridgeAppendPendingBytes(const uint8_t *data, uint16_t da
     }
 
     if (custom_image_bridge_pending_len + valid_len > CUSTOM_IMAGE_BRIDGE_PENDING_BUFFER_BYTES) {
-        custom_image_bridge_pending_len = 0u;
-        custom_image_bridge_diag.pending_reset_count++;
+        size_t bytes_to_drop =
+            custom_image_bridge_pending_len + valid_len - CUSTOM_IMAGE_BRIDGE_PENDING_BUFFER_BYTES;
+
+        if (bytes_to_drop >= custom_image_bridge_pending_len) {
+            custom_image_bridge_pending_len = 0u;
+        } else {
+            memmove(custom_image_bridge_pending_bytes,
+                    custom_image_bridge_pending_bytes + bytes_to_drop,
+                    custom_image_bridge_pending_len - bytes_to_drop);
+            custom_image_bridge_pending_len -= bytes_to_drop;
+        }
+
+        custom_image_bridge_diag.pending_trim_count++;
+        custom_image_bridge_diag.pending_drop_bytes += (uint32_t)bytes_to_drop;
     }
 
     memcpy(custom_image_bridge_pending_bytes + custom_image_bridge_pending_len, data, valid_len);
@@ -291,9 +210,6 @@ static void CustomImageBridgeDrainUSBQueue(void)
     uint16_t recv_len = 0u;
     uint8_t read_index = 0u;
     uint32_t primask = 0u;
-    int32_t packet_start = 0;
-    uint32_t packet_seq = 0u;
-    uint8_t flags = 0u;
 
     while (1) {
         primask = CustomImageBridgeEnterCritical();
@@ -317,50 +233,23 @@ static void CustomImageBridgeDrainUSBQueue(void)
         CustomImageBridgeAppendPendingBytes(custom_image_bridge_task_chunk, recv_len);
     }
 
-    while (custom_image_bridge_pending_len >= 3u) {
-        packet_start = CustomImageBridgeFindPacketStart(custom_image_bridge_pending_bytes, custom_image_bridge_pending_len);
-        if (packet_start < 0) {
-            if (custom_image_bridge_pending_len > 2u) {
-                custom_image_bridge_diag.inner_resync_drop_bytes += (uint32_t)(custom_image_bridge_pending_len - 2u);
-                CustomImageBridgeConsumePendingPrefix(custom_image_bridge_pending_len - 2u);
-            }
-            return;
-        }
-
-        if (packet_start > 0) {
-            custom_image_bridge_diag.inner_resync_drop_bytes += (uint32_t)packet_start;
-            CustomImageBridgeConsumePendingPrefix((size_t)packet_start);
-        }
-
-        if (custom_image_bridge_pending_len < CUSTOM_IMAGE_BRIDGE_PAYLOAD_BYTES) {
-            return;
-        }
-
-        if (!CustomImageBridgeValidateInnerPacket(custom_image_bridge_pending_bytes, &packet_seq, &flags)) {
-            custom_image_bridge_diag.inner_proto_invalid_count++;
-            CustomImageBridgeConsumePendingPrefix(1u);
-            continue;
-        }
-
-        CustomImageBridgeEnqueuePacket(custom_image_bridge_pending_bytes, packet_seq, flags);
-        if ((flags & CUSTOM_VIDEO_PACKET_FLAG_STREAM_RESET) != 0u) {
-            custom_image_bridge_diag.stream_reset_seen_count++;
-        }
-        CustomImageBridgeConsumePendingPrefix(CUSTOM_IMAGE_BRIDGE_PAYLOAD_BYTES);
+    while (custom_image_bridge_pending_len >= CUSTOM_IMAGE_BRIDGE_CHUNK_BYTES) {
+        CustomImageBridgeEnqueuePacket(custom_image_bridge_pending_bytes);
+        CustomImageBridgeConsumePendingPrefix(CUSTOM_IMAGE_BRIDGE_CHUNK_BYTES);
     }
 }
 
 static void CustomImageBridgePack0310Frame(const uint8_t *packet)
 {
     custom_image_bridge_tx_frame[0] = REFEREE_SOF;
-    custom_image_bridge_tx_frame[1] = (uint8_t)(CUSTOM_IMAGE_BRIDGE_PAYLOAD_BYTES & 0xFFu);
-    custom_image_bridge_tx_frame[2] = (uint8_t)((CUSTOM_IMAGE_BRIDGE_PAYLOAD_BYTES >> 8) & 0xFFu);
+    custom_image_bridge_tx_frame[1] = (uint8_t)(CUSTOM_IMAGE_BRIDGE_CHUNK_BYTES & 0xFFu);
+    custom_image_bridge_tx_frame[2] = (uint8_t)((CUSTOM_IMAGE_BRIDGE_CHUNK_BYTES >> 8) & 0xFFu);
     custom_image_bridge_tx_frame[3] = custom_image_bridge_tx_seq++;
     custom_image_bridge_tx_frame[4] =
         Get_CRC8_Check_Sum(custom_image_bridge_tx_frame, LEN_CRC8, 0xFFu);
     custom_image_bridge_tx_frame[5] = (uint8_t)(ID_robot_custom_data_2 & 0xFFu);
     custom_image_bridge_tx_frame[6] = (uint8_t)((ID_robot_custom_data_2 >> 8) & 0xFFu);
-    memcpy(custom_image_bridge_tx_frame + DATA_Offset, packet, CUSTOM_IMAGE_BRIDGE_PAYLOAD_BYTES);
+    memcpy(custom_image_bridge_tx_frame + DATA_Offset, packet, CUSTOM_IMAGE_BRIDGE_CHUNK_BYTES);
     Append_CRC16_Check_Sum(custom_image_bridge_tx_frame, CUSTOM_IMAGE_BRIDGE_FRAME_BYTES);
 }
 
@@ -386,9 +275,9 @@ static void CustomImageBridgeTrySend0310(void)
         return;
     }
 
-    custom_image_bridge_diag.last_packet_seq = packet_slot->packet_seq;
     custom_image_bridge_diag.last_uart_tx_tick_ms = HAL_GetTick();
     custom_image_bridge_diag.uart_tx_packet_count++;
+    custom_image_bridge_diag.uart_tx_bytes += CUSTOM_IMAGE_BRIDGE_CHUNK_BYTES;
 
     custom_image_bridge_packet_queue_read_index =
         (uint8_t)((custom_image_bridge_packet_queue_read_index + 1u) % CUSTOM_IMAGE_BRIDGE_PACKET_QUEUE_SLOT_COUNT);
@@ -425,7 +314,7 @@ static void CustomImageBridgeMaybeLog(void)
     custom_image_bridge_diag.last_logged_uart_tx_packet_count = custom_image_bridge_diag.uart_tx_packet_count;
 
     if (usb_rx_packets_delta == 0u) {
-        LOGWARNING("[img_bridge] 上位机预览包未接收 usb_pkt_total:%lu usb_bytes_total:%lu pending_raw:%u pkt_queue:%u last_rx_len:%u silence_ms:%lu tx0310_total:%lu tx_silence_ms:%lu proto_invalid:%lu resync_drop:%lu",
+        LOGWARNING("[img_bridge] 上位机视频流未接收 usb_pkt_total:%lu usb_bytes_total:%lu pending_raw:%u pkt_queue:%u last_rx_len:%u silence_ms:%lu tx0310_total:%lu tx_silence_ms:%lu pending_drop:%lu usb_drop:%lu",
                    (unsigned long)custom_image_bridge_diag.usb_rx_packets,
                    (unsigned long)custom_image_bridge_diag.usb_rx_bytes,
                    (unsigned int)custom_image_bridge_pending_len,
@@ -434,13 +323,13 @@ static void CustomImageBridgeMaybeLog(void)
                    (unsigned long)usb_silence_ms,
                    (unsigned long)custom_image_bridge_diag.uart_tx_packet_count,
                    (unsigned long)uart_tx_silence_ms,
-                   (unsigned long)custom_image_bridge_diag.inner_proto_invalid_count,
-                   (unsigned long)custom_image_bridge_diag.inner_resync_drop_bytes);
+                   (unsigned long)custom_image_bridge_diag.pending_drop_bytes,
+                   (unsigned long)custom_image_bridge_diag.usb_queue_drop_count);
         return;
     }
 
     if (uart_tx_packets_delta == 0u) {
-        LOGINFO("[img_bridge] 已收预览包 但本周期未转发0310 usb_pkt_delta:%lu usb_pkt_total:%lu pending_raw:%u pkt_queue:%u busy_skip:%lu tx_err:%lu pkt_drop:%lu proto_invalid:%lu resync_drop:%lu",
+        LOGINFO("[img_bridge] 已收视频流 但本周期未转发0310 usb_pkt_delta:%lu usb_pkt_total:%lu pending_raw:%u pkt_queue:%u busy_skip:%lu tx_err:%lu pkt_drop:%lu pending_trim:%lu pending_drop:%lu",
                 (unsigned long)usb_rx_packets_delta,
                 (unsigned long)custom_image_bridge_diag.usb_rx_packets,
                 (unsigned int)custom_image_bridge_pending_len,
@@ -448,12 +337,12 @@ static void CustomImageBridgeMaybeLog(void)
                 (unsigned long)custom_image_bridge_diag.uart_busy_skip_count,
                 (unsigned long)custom_image_bridge_diag.uart_tx_error_count,
                 (unsigned long)custom_image_bridge_diag.packet_queue_drop_count,
-                (unsigned long)custom_image_bridge_diag.inner_proto_invalid_count,
-                (unsigned long)custom_image_bridge_diag.inner_resync_drop_bytes);
+                (unsigned long)custom_image_bridge_diag.pending_trim_count,
+                (unsigned long)custom_image_bridge_diag.pending_drop_bytes);
         return;
     }
 
-    LOGINFO("[img_bridge] 通信正常 usb_pkt_delta:%lu usb_pkt_total:%lu usb_bytes_total:%lu pending_raw:%u pkt_queue:%u tx0310_delta:%lu tx0310_total:%lu last_packet_seq:%lu reset_seen:%lu pkt_drop:%lu",
+    LOGINFO("[img_bridge] 通信正常 usb_pkt_delta:%lu usb_pkt_total:%lu usb_bytes_total:%lu pending_raw:%u pkt_queue:%u tx0310_delta:%lu tx0310_total:%lu tx_bytes_total:%lu pkt_drop:%lu pending_drop:%lu",
             (unsigned long)usb_rx_packets_delta,
             (unsigned long)custom_image_bridge_diag.usb_rx_packets,
             (unsigned long)custom_image_bridge_diag.usb_rx_bytes,
@@ -461,9 +350,9 @@ static void CustomImageBridgeMaybeLog(void)
             (unsigned int)custom_image_bridge_packet_queue_count,
             (unsigned long)uart_tx_packets_delta,
             (unsigned long)custom_image_bridge_diag.uart_tx_packet_count,
-            (unsigned long)custom_image_bridge_diag.last_packet_seq,
-            (unsigned long)custom_image_bridge_diag.stream_reset_seen_count,
-            (unsigned long)custom_image_bridge_diag.packet_queue_drop_count);
+            (unsigned long)custom_image_bridge_diag.uart_tx_bytes,
+            (unsigned long)custom_image_bridge_diag.packet_queue_drop_count,
+            (unsigned long)custom_image_bridge_diag.pending_drop_bytes);
 }
 
 void CustomImageBridgeInit(void)
@@ -485,10 +374,10 @@ void CustomImageBridgeInit(void)
     usb_conf.rx_cbk = CustomImageBridgeUSBRxCallback;
     custom_image_bridge_usb_rx_buffer = USBInit(usb_conf);
 
-    LOGINFO("[img_bridge] init ok, usb_rx_buf=%p, preview_v3=%uB, referee_payload=%uB",
+    LOGINFO("[img_bridge] init ok, usb_rx_buf=%p, raw_h264_chunk=%uB, referee_payload=%uB",
             custom_image_bridge_usb_rx_buffer,
-            (unsigned int)CUSTOM_IMAGE_BRIDGE_PAYLOAD_BYTES,
-            (unsigned int)CUSTOM_IMAGE_BRIDGE_PAYLOAD_BYTES);
+            (unsigned int)CUSTOM_IMAGE_BRIDGE_CHUNK_BYTES,
+            (unsigned int)CUSTOM_IMAGE_BRIDGE_CHUNK_BYTES);
 }
 
 void CustomImageBridgeTask(void)

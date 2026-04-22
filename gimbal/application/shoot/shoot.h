@@ -8,7 +8,7 @@
 // 摩擦轮半径 (单位: 米), 例如 30mm = 0.03m
 #define FRICTION_WHEEL_RADIUS 0.03f
 // 打滑补偿系数 (需要实测微调, 通常在 1.0 - 1.2 之间)
-#define SLIP_COMPENSATION 1.03f
+#define SLIP_COMPENSATION 1.01f
 
 // 定义摩擦轮升速斜率 (deg/s^2)，目的是用户要求把预热再放慢一点，这里下调升速斜率以拉长到稳态速度的时间，同时减轻上电瞬间电流冲击。
 #define FRICTION_RAMP_UP_RATE_DPS_PER_S 60000.0f

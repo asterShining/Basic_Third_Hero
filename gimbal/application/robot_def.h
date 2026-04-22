@@ -13,16 +13,12 @@
 #define ROBOT_DEF_H
 
 #include "ins_task.h"
-#include "master_process.h"
 #include "stdint.h"
 
 /* 开发板类型定义,烧录时注意不要弄错对应功能;修改定义后需要重新编译,只能存在一个定义! */
 // #define ONE_BOARD // 单板控制整车
 // #define CHASSIS_BOARD //底盘板
 #define GIMBAL_BOARD // 云台板
-
-#define VISION_USE_VCP // 使用虚拟串口发送视觉数据
-// #define VISION_USE_UART // 使用串口发送视觉数据
 
 // ==========================================
 // [新增] 上岛辅助机构开关 (取消注释以启用上岛)
@@ -82,23 +78,6 @@
 #define GYRO2GIMBAL_DIR_ROLL 1 // 陀螺仪 data相较于云台的roll的方向,1为相同,-1为相反
 
 // ==========================================
-// [新增] 视觉自瞄专用 IMU 映射宏
-// 用于解决 user 提到的 "Roll 是 Pitch" 问题
-// ==========================================
-// 视觉算法需要的 Pitch 数据实际上对应 IMU 的 Roll 轴
-#define VISION_PITCH_AXIS Pitch // [轴互换后] 直接映射
-// 视觉 Pitch 轴的方向修正 (EKF Pitch 正方向 = 抬头, 与上位机一致, 无需取反)
-#define VISION_PITCH_SIGN 1.0f
-
-// 视觉算法需要的 Yaw 数据对应 IMU 的 YawTotalAngle (累计角度)
-#define VISION_YAW_AXIS YawTotalAngle
-// 视觉 Yaw 轴的方向修正
-#define VISION_YAW_SIGN 1.0f
-
-#define GYRO2GIMBAL_DIR_PITCH -1 // [保留原宏兼容]
-#define GYRO2GIMBAL_DIR_ROLL 1 // [保留原宏兼容]
-
-// ==========================================
 // [新增] 底盘速度限制参数 (m/s)
 // 用于遥控器控制时正确映射摇杆值到底盘速度
 // ==========================================
@@ -123,6 +102,17 @@ typedef enum {
     ROBOT_STOP = 0,
     ROBOT_READY,
 } Robot_Status_e;
+
+// 弹速枚举是机器人控制与发射模块的公共类型，目的是让 `robot_def.h`
+// 自己完整声明本工程真正需要的通用数据类型，避免把无关模块的类型依赖继续带进公共配置头。
+typedef enum {
+    BULLET_SPEED_NONE = 0,
+    BIG_AMU_12 = 12,
+    SMALL_AMU_15 = 15,
+    BIG_AMU_16 = 16,
+    SMALL_AMU_20 = 20,
+    SMALL_AMU_30 = 30,
+} Bullet_Speed_e;
 
 // 应用状态
 typedef enum {
