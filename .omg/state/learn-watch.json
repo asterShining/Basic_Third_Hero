@@ -1,0 +1,12 @@
+{
+  "last_session_id": "1d39fec8-b56f-45dc-8340-665e94fa617d",
+  "last_event_key": "1d39fec8-b56f-45dc-8340-665e94fa617d:transcript:543541fd7e8d364806a9d5cbfcadd77495a82ebcc567d11b9f723510e8a6a385",
+  "last_prompted_session_id": "",
+  "last_reason": "short-session",
+  "last_prompted_at": "",
+  "last_user_message_count": 2,
+  "last_actionable_message_count": 1,
+  "deep_interview_lock_active": false,
+  "deep_interview_lock_source": "/home/aster/robomaster/Basic_Third_Hero/.omg/state/deep-interview.json",
+  "updated_at": "2026-04-22T11:17:39.637Z"
+}

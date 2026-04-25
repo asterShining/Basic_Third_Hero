@@ -144,6 +144,11 @@
 #define UI_LABEL_FRIC_Y 808u
 #define UI_LABEL_FRIC_FONT 30u
 #define UI_LABEL_FRIC_WIDTH 3u
+// 这组坐标专门留给 F 旁的 12/16 档位数字，目的是把当前预选弹速贴在摩擦轮标签右侧，操作者不用再把视线切到右侧实时弹速区。
+#define UI_LABEL_FRIC_SPEED_X 246u
+#define UI_LABEL_FRIC_SPEED_Y 808u
+#define UI_LABEL_FRIC_SPEED_FONT 20u
+#define UI_LABEL_FRIC_SPEED_WIDTH 2u
 #define UI_LABEL_POWER_X 1590u
 #define UI_LABEL_POWER_Y 514u
 #define UI_LABEL_POWER_FONT 31u
@@ -244,6 +249,8 @@ typedef enum {
 
 typedef enum {
     UI_STRING_FRIC = 0,
+    // 这个字符串单独承载 F 旁的档位值，目的是初始化和运行期都复用同一套字符绘制通道，不再额外塞进已经满载的 Draw5 数据包。
+    UI_STRING_FRIC_SPEED,
     UI_STRING_POWER,
     UI_STRING_PITCH,
     UI_STRING_ROBOT,
@@ -297,6 +304,7 @@ typedef struct
     int32_t bullet_speed_milli_mps;
     int32_t power_milli_w;
     int32_t bullet_num;
+    uint8_t ui_bullet_speed_value;
     uint32_t pitch_needle_start_x;
     uint32_t pitch_needle_start_y;
     uint32_t pitch_needle_end_x;
@@ -315,8 +323,11 @@ typedef struct
     uint32_t next_data_due_tick_ms;
     uint8_t dirty_state_mask;
     uint8_t state_retry_count[UI_STATE_FIGURE_COUNT];
+    uint8_t fire_speed_string_dirty;
+    uint8_t fire_speed_string_retry_count;
     Graph_Data_t last_move_figures[UI_MOVE_FIGURE_COUNT];
     Graph_Data_t last_data_figures[UI_DATA_FIGURE_COUNT];
+    String_Data_t last_fire_speed_string;
     UIIndicatorState_t last_indicator_state;
 } UIRuntime_t;
 
@@ -342,10 +353,12 @@ static void UIBuildStaticFigures(uint32_t operate_type);
 static void UIBuildStateFigures(uint32_t operate_type, const UIIndicatorState_t *indicator_state);
 static void UIBuildMoveFigures(uint32_t operate_type, const UIDisplaySnapshot_t *snapshot);
 static void UIBuildDataFigures(uint32_t operate_type, const UIDisplaySnapshot_t *snapshot);
-static void UIBuildStrings(uint32_t operate_type);
+static void UIBuildStrings(uint32_t operate_type, const UIDisplaySnapshot_t *snapshot);
 static void UIRefreshStateChanges(const UIIndicatorState_t *indicator_state);
+static void UIRefreshFireSpeedString(const UIDisplaySnapshot_t *snapshot);
 static void UIProcessRuntimeUpdate(uint32_t now_tick_ms);
 static uint8_t UISendNextDirtyState(uint32_t now_tick_ms);
+static uint8_t UISendDirtyFireSpeedString(uint32_t now_tick_ms);
 static void UISendMovePacket(uint32_t now_tick_ms);
 static void UISendDataPacket(uint32_t now_tick_ms);
 static uint8_t UIMovePacketIsDirty(const UIDisplaySnapshot_t *snapshot);
@@ -448,6 +461,11 @@ static void UIRuntimeReset(void)
     // What: 复位后立刻同步当前显示状态；Why: 初始化建图和运行期基线都必须以最新实测值为起点，避免先闪一帧占位数据。
     UIBuildDisplaySnapshot(&snapshot);
     ui_runtime.last_indicator_state = snapshot.indicator_state;
+    // 复位时把当前档位字符串也同步成运行期基线，目的是初始化完成前后都只围绕同一份 12/16 真值做脏检查，不会平白多发一轮字符刷新。
+    UIBuildStrings(UI_Graph_Change, &snapshot);
+    ui_runtime.last_fire_speed_string = ui_strings[UI_STRING_FRIC_SPEED];
+    ui_runtime.fire_speed_string_dirty = 0u;
+    ui_runtime.fire_speed_string_retry_count = 0u;
     // What: 复位时清空状态灯重发计数；Why: 避免旧的脏状态残留到下一轮建图后继续重复发送。
     memset(ui_runtime.state_retry_count, 0, sizeof(ui_runtime.state_retry_count));
 }
@@ -458,6 +476,8 @@ static void UIStartInitCycle(uint32_t now_tick_ms)
     ui_runtime.init_stage = UI_INIT_STAGE_DELETE_ALL;
     ui_runtime.last_packet_tick_ms = now_tick_ms - UI_INIT_PACKET_GAP_MS;
     ui_runtime.dirty_state_mask = 0u;
+    ui_runtime.fire_speed_string_dirty = 0u;
+    ui_runtime.fire_speed_string_retry_count = 0u;
     // What: 开始整页重建时同步清空状态灯重发队列；Why: 初始化阶段会重新 add 正确状态圆环，旧 change 重发已经没有意义。
     memset(ui_runtime.state_retry_count, 0, sizeof(ui_runtime.state_retry_count));
 }
@@ -479,8 +499,12 @@ static void UIFinishInitCycle(uint32_t now_tick_ms)
     UIBuildDisplaySnapshot(&snapshot);
     UIBuildMoveFigures(UI_Graph_Change, &snapshot);
     UIBuildDataFigures(UI_Graph_Change, &snapshot);
+    UIBuildStrings(UI_Graph_Change, &snapshot);
     memcpy(ui_runtime.last_move_figures, ui_move_figures, sizeof(ui_runtime.last_move_figures));
     memcpy(ui_runtime.last_data_figures, ui_data_figures, sizeof(ui_runtime.last_data_figures));
+    ui_runtime.last_fire_speed_string = ui_strings[UI_STRING_FRIC_SPEED];
+    ui_runtime.fire_speed_string_dirty = 0u;
+    ui_runtime.fire_speed_string_retry_count = 0u;
     ui_runtime.last_indicator_state = snapshot.indicator_state;
 }
 
@@ -580,7 +604,7 @@ static void UIAdvanceInitStage(uint32_t now_tick_ms)
             ui_runtime.init_stage < (UI_INIT_STAGE_DRAW_STRING_0 + UI_STRING_COUNT)) {
             // What: 字符串初始化阶段每拍只发一个字符串；Why: 字符包单独占一帧，拆开后更容易稳稳落到客户端。
             string_index = (uint8_t)(ui_runtime.init_stage - UI_INIT_STAGE_DRAW_STRING_0);
-            UIBuildStrings(UI_Graph_ADD);
+            UIBuildStrings(UI_Graph_ADD, &snapshot);
             UICharRefresh(&referee_recv_info->referee_id, ui_strings[string_index]);
 
             if (string_index + 1u >= UI_STRING_COUNT) {
@@ -645,6 +669,8 @@ static void UIBuildDisplaySnapshot(UIDisplaySnapshot_t *snapshot)
         shoot_speed_mps = referee_recv_info->ShootData.initial_speed;
     }
     snapshot->bullet_speed_milli_mps = UIRoundFloatToInt(shoot_speed_mps * 1000.0f);
+    // F 旁的档位显示只关心当前预选值，因此这里直接把底盘 UI 数据里的弹速档位压成 12/16 两个安全值，避免异常枚举把左侧提示刷成不可预期文本。
+    snapshot->ui_bullet_speed_value = (interactive_data->ui_bullet_speed == BIG_AMU_16) ? 16u : 12u;
 
     // What: 数字全部按协议要求缩放到毫单位；Why: 裁判客户端会把 `UIFloatDraw` 的 int32 除以 1000 显示，必须先在固件侧统一处理。
     snapshot->power_milli_w = UIRoundFloatToInt(interactive_data->chassis_power_w * 1000.0f);
@@ -801,11 +827,21 @@ static void UIBuildDataFigures(uint32_t operate_type, const UIDisplaySnapshot_t 
                 UI_BULLET_SPEED_FONT, UI_BULLET_SPEED_DIGIT, UI_BULLET_SPEED_WIDTH, UI_BULLET_SPEED_X, UI_BULLET_SPEED_Y, snapshot->bullet_speed_milli_mps);
 }
 
-static void UIBuildStrings(uint32_t operate_type)
+static void UIBuildStrings(uint32_t operate_type, const UIDisplaySnapshot_t *snapshot)
 {
+    const char *fric_speed_text = "12";
+
+    // 这里把 F 旁的档位限制成 12/16 两种字符串，目的是左侧提示只承担“当前预选档位”这一件事，避免混入右侧实时弹速那种连续数值语义。
+    if (snapshot != NULL && snapshot->ui_bullet_speed_value == 16u) {
+        fric_speed_text = "16";
+    }
+
     // What: 原有文本标签继续保留当前布局；Why: 这次只是在现有 UI 上补参考工程的距离刻度文字，其他语义标签不应该被连带改动。
     UICharDraw(&ui_strings[UI_STRING_FRIC], "frc", operate_type, UI_LAYER_MAIN, UI_Color_Yellow,
                UI_LABEL_FRIC_FONT, UI_LABEL_FRIC_WIDTH, UI_LABEL_FRIC_X, UI_LABEL_FRIC_Y, "F");
+    // F 旁的数值单独用字符对象发送，目的是现有 Draw5 数据包已经装满，新增档位显示只能走独立的字符串刷新链。
+    UICharDraw(&ui_strings[UI_STRING_FRIC_SPEED], "fsv", operate_type, UI_LAYER_MAIN, UI_Color_Yellow,
+               UI_LABEL_FRIC_SPEED_FONT, UI_LABEL_FRIC_SPEED_WIDTH, UI_LABEL_FRIC_SPEED_X, UI_LABEL_FRIC_SPEED_Y, (char *)fric_speed_text);
     UICharDraw(&ui_strings[UI_STRING_POWER], "pow", operate_type, UI_LAYER_MAIN, UI_Color_Yellow,
                UI_LABEL_POWER_FONT, UI_LABEL_POWER_WIDTH, UI_LABEL_POWER_X, UI_LABEL_POWER_Y, "p");
     // What: `pitch` 标签跟随新圆盘区域移动到右侧；Why: 旧滑块删除后，若仍停在左侧会和新的 pitch 数值及指针完全脱节。
@@ -821,6 +857,22 @@ static void UIBuildStrings(uint32_t operate_type)
                UI_TEXT_3_FONT, UI_TEXT_3_WIDTH, UI_TEXT_3_X, UI_TEXT_3_Y, "3m");
     UICharDraw(&ui_strings[UI_STRING_TEXT_5], "t05", operate_type, UI_LAYER_MAIN, UI_Color_Green,
                UI_TEXT_5_FONT, UI_TEXT_5_WIDTH, UI_TEXT_5_X, UI_TEXT_5_Y, "5m");
+}
+
+static void UIRefreshFireSpeedString(const UIDisplaySnapshot_t *snapshot)
+{
+    if (snapshot == NULL) {
+        return;
+    }
+
+    // 每拍先按当前快照重建一次 F 旁字符串，目的是后续脏检查和补发都只围绕最新的 12/16 真值展开，不会把旧字符继续往客户端重复推送。
+    UIBuildStrings(UI_Graph_Change, snapshot);
+    if (memcmp(&ui_runtime.last_fire_speed_string, &ui_strings[UI_STRING_FRIC_SPEED], sizeof(String_Data_t)) != 0) {
+        // 一旦发现档位文本变化，就立即把新的目标文本锁成运行期基线，并安排两次发送，目的是既保证切档立刻可见，也给偶发丢包留一次自愈机会。
+        ui_runtime.last_fire_speed_string = ui_strings[UI_STRING_FRIC_SPEED];
+        ui_runtime.fire_speed_string_dirty = 1u;
+        ui_runtime.fire_speed_string_retry_count = 2u;
+    }
 }
 
 static void UIRefreshStateChanges(const UIIndicatorState_t *indicator_state)
@@ -896,6 +948,12 @@ static void UIProcessRuntimeUpdate(uint32_t now_tick_ms)
         return;
     }
 
+    UIRefreshFireSpeedString(&snapshot);
+    if (ui_runtime.fire_speed_string_dirty != 0u) {
+        (void)UISendDirtyFireSpeedString(now_tick_ms);
+        return;
+    }
+
     move_dirty = UIMovePacketIsDirty(&snapshot);
     data_dirty = UIDataPacketIsDirty(&snapshot);
     packet_to_send = UISelectRuntimePacket(now_tick_ms, move_dirty, data_dirty);
@@ -931,6 +989,24 @@ static uint8_t UISendNextDirtyState(uint32_t now_tick_ms)
     }
 
     return 0u;
+}
+
+static uint8_t UISendDirtyFireSpeedString(uint32_t now_tick_ms)
+{
+    if (ui_runtime.fire_speed_string_dirty == 0u) {
+        return 0u;
+    }
+
+    // F 旁档位单独按字符包发送，目的是不挤占现有 Draw5 数值组结构，同时仍能在切档时立刻刷新到客户端。
+    UICharRefresh(&referee_recv_info->referee_id, ui_strings[UI_STRING_FRIC_SPEED]);
+    if (ui_runtime.fire_speed_string_retry_count > 0u) {
+        ui_runtime.fire_speed_string_retry_count--;
+    }
+    if (ui_runtime.fire_speed_string_retry_count == 0u) {
+        ui_runtime.fire_speed_string_dirty = 0u;
+    }
+    ui_runtime.last_packet_tick_ms = now_tick_ms;
+    return 1u;
 }
 
 static void UISendMovePacket(uint32_t now_tick_ms)

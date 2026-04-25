@@ -233,19 +233,36 @@ void ChassisTask(void)
 
 #ifdef USE_SUPER_CAP
     {
-        float super_cap_bonus = GetAggressiveSuperCapBonus(referee_buffer_energy, chassis_output_allowed);
+        float super_cap_bonus = GetAggressiveSuperCapBonus(referee_power_limit, referee_buffer_energy, chassis_output_allowed);
+        float reported_power_limit = 0.0f;
 
         if (super_cap_bonus > 0.0f) {
-            // 按电容电量和裁判缓冲动态叠加更激进的超电 bonus，目的是固定 bonus 只能在一种工况下合适，分档后才能既更猛又不至于一下子放空。
+            // 把跟随超电板真实能力算出的动态 bonus 叠加到底盘总功率上限，目的是让底盘不再只吃固定 75W，而是尽量往超电板当前真的能给出的功率区间逼近。
             final_power_limit += super_cap_bonus;
+        }
+
+        // 若超电板已经回传了可信的实际可给功率上限，就在底盘侧再做一次保护性裁剪，目的是让轮组功率请求和电源链真实能力保持一致。
+        if (cap != NULL &&
+            super_cap_policy_state.assist_enabled != 0u &&
+            SuperCapIsOnline(cap) != 0u &&
+            SuperCapHasHardFault(cap) == 0u &&
+            SuperCapIsOutputDisabled(cap) == 0u) {
+            reported_power_limit = (float)SuperCapGetReportedPowerLimit(cap);
+            if (reported_power_limit >= CHASSIS_SUPER_CAP_REPORTED_LIMIT_MIN_W) {
+                super_cap_policy_state.reported_limit_valid = 1u;
+                // 这里保留一次最终裁剪，目的是即使 helper 前面已经按 `chassisPowerLimit - 5W` 算了额外功率，本层仍确保总预算不会因为跨拍状态差异而超过同一拍回传上限。
+                reported_power_limit -= CHASSIS_SUPER_CAP_REPORTED_LIMIT_MARGIN_W;
+                if (final_power_limit > reported_power_limit) {
+                    final_power_limit = reported_power_limit;
+                }
+            } else {
+                super_cap_policy_state.reported_limit_valid = 0u;
+            }
+        } else {
+            super_cap_policy_state.reported_limit_valid = 0u;
         }
     }
 #endif // USE_SUPER_CAP
-
-    if (final_power_limit > CHASSIS_TOTAL_POWER_LIMIT_MAX_W) {
-        // 将底盘侧总功率硬上限放宽到 165W，目的是让更大的超电加成真正落到底盘电机功率控制，而不是被旧上限提前卡死。
-        final_power_limit = CHASSIS_TOTAL_POWER_LIMIT_MAX_W;
-    }
     // 把最终预算交给底盘功率控制算法，目的是轮组参考值后续都必须在同一套预算下闭环，不应该各自单独裁剪。
     SetPowerLimit(final_power_limit);
 

@@ -63,11 +63,12 @@ SuperCapInstance *SuperCapInit(SuperCap_Init_Config_s *config)
     config->can_config.can_module_callback = SuperCapRxCallback;
     g_super_cap_instance->can_ins = CANRegister(&config->can_config);
 
-    // 配置看门狗 (100ms超时，假设10Hz更新频率)
+    // 底盘任务以 5ms 周期持续给超电板发命令，超电板正常回包时 DaemonTask 会以 100Hz 被周期性喂狗，
+    // 这里把离线阈值设成 20 拍，相当于约 200ms 内没有收到 0x051 回包就判离线，既能比旧配置更快回退，又不会被偶发单帧抖动误伤。
     Daemon_Init_Config_s daemon_config = {
         .callback = SuperCapLostCallback,
         .owner_id = g_super_cap_instance,
-        .reload_count = 100, // 根据实际刷新频率调整
+        .reload_count = 20,
     };
     g_super_cap_instance->daemon_ins = DaemonRegister(&daemon_config);
 
@@ -108,8 +109,9 @@ void SuperCapSend(SuperCapInstance *instance)
     tx_buff[6] = 0;
     tx_buff[7] = 0;
 
-    // 发送CAN消息 (DLC=8)
-    CANTransmit(instance->can_ins, 10.0f);
+    // 超电命令由 200Hz 的底盘任务发出，若 CAN 邮箱长时间占满，继续在这里阻塞会直接把主控制拍拖慢，
+    // 因此只给 1ms 的等待窗口，发不出去就让本拍跳过，下一拍继续覆盖式发送最新命令。
+    CANTransmit(instance->can_ins, 1.0f);
 
     // 重启命令只发送一次，发送后立即清除
     if (tx_msg->systemRestart) {
@@ -137,7 +139,8 @@ void SuperCapSetPowerLimit(SuperCapInstance *instance, uint16_t power_limit)
     if (instance == NULL)
         return;
 
-    // 限制范围 30-250W
+    // 这个字段在超电板协议里就是裁判功率限制，不是底盘本地最终总预算，
+    // 因此这里只按超电板认可的 30~250W 裁判范围截断，避免下位机把更高的动态总预算错误塞进来后触发超电板主动关输出。
     if (power_limit < POWER_LIMIT_MIN) {
         power_limit = POWER_LIMIT_MIN;
     } else if (power_limit > POWER_LIMIT_MAX) {
@@ -183,11 +186,25 @@ float SuperCapGetEnergyPercent(SuperCapInstance *instance)
     return (float)instance->rx_msg.capEnergyPercent * 100.0f / 255.0f;
 }
 
+uint16_t SuperCapGetReportedPowerLimit(SuperCapInstance *instance)
+{
+    if (instance == NULL)
+        return 0u;
+    // 直接暴露超电板回传的功率上限，目的是让底盘策略层在不改协议的前提下就能用真实电源能力约束自己的请求。
+    return instance->rx_msg.chassisPowerLimit;
+}
+
 uint8_t SuperCapGetErrorCode(SuperCapInstance *instance)
 {
     if (instance == NULL)
         return 0;
     return instance->rx_msg.errorCode & 0x7F; // 只返回bit0-6
+}
+
+uint8_t SuperCapHasHardFault(SuperCapInstance *instance)
+{
+    // 这里刻意只看 bit0-bit6，目的是把“真实故障”和“输出当前被禁用”分开，避免状态机把 bit7 也当成硬故障反复拉闸。
+    return SuperCapGetErrorCode(instance) != 0u;
 }
 
 uint8_t SuperCapIsOnline(SuperCapInstance *instance)

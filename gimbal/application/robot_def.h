@@ -214,6 +214,7 @@ typedef struct
     super_cap_mode_e cap_mode;
     float gimbal_pitch_deg; // 把云台实际pitch角随双板命令发送到底盘，目的是底盘板 UI 需要基于机构真实位置驱动俯仰滑块。
     uint8_t friction_on; // 把摩擦轮实际启停状态随双板命令发送到底盘，目的是底盘板 UI 的 fric 指示必须和上板发射使能保持一致。
+    Bullet_Speed_e ui_bullet_speed; // 把当前预选弹速随双板命令发送到底盘，目的是裁判 UI 要在 F 旁直接显示 12/16 档位，而不是再去猜测瞬时发射命令。
     uint8_t ui_refresh_request; // 发送一次性 UI 刷新请求到底盘板，目的是手动重绘必须复用现有双板命令链，而不是额外开一条旁路。
     uint8_t follow_transition_request; // 显式标记“小陀螺退跟随”的接管边沿，目的是双板链路是覆盖式最新帧语义，只靠模式值本身无法稳定表达边沿事件。
     uint8_t follow_brake_request; // 显式请求底盘在跟随模式下临时只做阻尼刹停，目的是V 键掉头期间需要让底盘平滑停住而不是继续追随云台角速度与历史跟随误差。

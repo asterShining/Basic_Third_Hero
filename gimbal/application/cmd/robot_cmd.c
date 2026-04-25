@@ -75,18 +75,18 @@ uint8_t front_track_switch_state = 0u;
 // 保存 DT7 内八校零是否已在本次组合中触发，目的是校零属于重动作，同一组合里必须只发一次。
 uint8_t cali_triggered = 0u;
 
-// 键鼠火力锁存用于记住“鼠标已经请求开火”，目的是当前只接 `mouse.press_l`，必须靠锁存维持预热后的后续点射与连发。
+// 键鼠摩擦轮锁存用于记住 F 键当前是否处于开启态，目的是鼠标左键只负责拨弹，不能再顺带隐式开启摩擦轮。
 uint8_t mouse_fire_friction_latched = 0u;
-// 保存鼠标左键上一拍电平，目的是单发事务是边沿触发，不能把持续高电平直接当成多次请求。
+// 保存鼠标左键上一拍电平，目的是左键单发必须严格按边沿触发，按住期间绝不能重复拨弹。
 uint8_t mouse_left_last = 0u;
-// 保存鼠标左键是否已经进入长按连发，目的是需要明确区分短按单发和长按连发两种语义。
-uint8_t mouse_left_burst_active = 0u;
-// 保存鼠标左键按下时间戳，目的是长按阈值必须基于绝对时间而不是任务拍数估算。
-uint32_t mouse_left_press_start_ms = 0u;
 // 保存图传链路上一拍在线状态，目的是图传离线边沿需要第一时间清空旧的键鼠锁存。
 uint8_t last_video_link_online = 0u;
 // 保存 F 键上一拍电平，目的是键盘摩擦轮是开关语义，只能在真正上升沿触发一次。
 uint8_t keyboard_friction_toggle_last = 0u;
+// 保存 R 键上一拍电平，目的是 12/16m/s 的切换必须只响应一次上升沿，不能在按住时反复翻转。
+uint8_t keyboard_bullet_speed_toggle_last = 0u;
+// 保存键鼠当前预选弹速档位，目的是即使暂时关闭摩擦轮，UI 也要持续展示下一次 F 开启后会使用的档位。
+Bullet_Speed_e keyboard_bullet_speed_selected = BIG_AMU_12;
 // 保存 X 键上一拍电平，目的是小陀螺锁存切换必须依赖上升沿而不是电平。
 uint8_t keyboard_spin_toggle_last = 0u;
 // 保存 B 键上一拍电平，目的是自由模式锁存切换必须依赖上升沿而不是电平。
@@ -212,6 +212,8 @@ static void PrepareControlCommandBase(void)
     shoot_cmd_send.shoot_mode = SHOOT_OFF;
     shoot_cmd_send.load_mode = LOAD_STOP;
     shoot_cmd_send.friction_mode = FRICTION_OFF;
+    // 每拍都把弹速字段回到空值，目的是彻底斩断上一拍残留的档位，避免调试或 UI 侧误把旧值当成当前有效发射命令。
+    shoot_cmd_send.bullet_speed = BULLET_SPEED_NONE;
     shoot_cmd_send.shoot_rate = 0.0f;
 
 }
@@ -342,6 +344,8 @@ void EmergencyHandler(void)
     shoot_cmd_send.friction_mode = FRICTION_OFF;
     shoot_cmd_send.load_mode = LOAD_STOP;
     shoot_cmd_send.friction_mode = FRICTION_OFF;
+    // 紧急停止时同步清掉当前拍的发射档位，目的是恢复前任何模块都不该再读到旧的“可发射”弹速配置。
+    shoot_cmd_send.bullet_speed = BULLET_SPEED_NONE;
     shoot_cmd_send.shoot_rate = 0.0f;
     friction_switch_state = 0u;
     // 零力出口统一清空键鼠和遥控锁存，目的是否则恢复有力后会把暂停前的旧输入当成当前意图继续执行。
@@ -434,6 +438,12 @@ void RobotCMDTask(void)
     chassis_cmd_send.gimbal_gyro_z = gimbal_fetch_data.gimbal_imu_data.Gyro[2] * RAD_2_DEGREE;
     chassis_cmd_send.gimbal_pitch_deg = gimbal_fetch_data.gimbal_imu_data.Pitch;
     chassis_cmd_send.friction_on = (shoot_cmd_send.friction_mode == FRICTION_ON) ? 1u : 0u;
+    // 底盘 UI 优先显示本拍已经明确生效的弹速；若当前没有有效发射档位，再回落到键鼠预选值，保证 F 旁数字既能反映键鼠设置，也不会在遥控发射时停留在旧值。
+    if (shoot_cmd_send.bullet_speed != BULLET_SPEED_NONE) {
+        chassis_cmd_send.ui_bullet_speed = shoot_cmd_send.bullet_speed;
+    } else {
+        chassis_cmd_send.ui_bullet_speed = keyboard_bullet_speed_selected;
+    }
 
 #ifdef ONE_BOARD
     PubPushMessage(chassis_cmd_pub, (void *)&chassis_cmd_send);

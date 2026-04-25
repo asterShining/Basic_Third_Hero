@@ -6,6 +6,7 @@ static float spin_wave_current = 0.0f; // 缓存当前无节奏变速波形值�
 static float spin_wave_target = 0.0f; // 缓存当前随机变速目标，目的是让一段时间内的快慢趋势保持一致，而不是完全白噪声式乱跳。
 static uint32_t spin_wave_next_refresh_tick = 0u; // 记录下次刷新随机目标的时间戳，目的是让每次目标切换间隔本身也不固定，进一步去掉节奏感。
 static uint32_t spin_wave_rng_state = 0x13572468u; // 保存轻量级伪随机状态，目的是裸机/RTOS 环境下不用标准库随机数也能稳定生成无节奏变速序列。
+SuperCapPolicyState super_cap_policy_state = { 0 }; // 统一保存超电辅助预算和 DCDC 状态机的运行时状态，目的是让策略层和输出层围绕同一份状态协同工作。
 
 /**
  * @brief 生成一个 -1.0 ~ 1.0 的伪随机值
@@ -53,49 +54,85 @@ static float GetVariableSpinWave(void)
 /**
  * @brief 计算超电能给到底盘的激进 bonus
  *
+ * @param referee_power_limit 当前裁判系统功率限制
  * @param buffer_energy_j 当前裁判缓冲能量
  * @param chassis_output_allowed 当前拍是否允许底盘输出
  * @return float 额外附加功率
  */
-float GetAggressiveSuperCapBonus(float buffer_energy_j, uint8_t chassis_output_allowed)
+float GetAggressiveSuperCapBonus(float referee_power_limit, float buffer_energy_j, uint8_t chassis_output_allowed)
 {
     float cap_percent;
-    float bonus = 0.0f;
+    float bonus_step = 0.0f;
+    float reported_power_limit = 0.0f;
+    float available_bonus = 0.0f;
 
-    // 统一封装超电激进功率加成决策，目的是超电阈值、错误保护和模式判断分散写在任务里很容易互相打架，抽成单函数更不容易改坏。
-    if (cap == NULL || cap->is_online == 0u || chassis_output_allowed == 0u) {
+    // 超电离线、裁判切掉底盘输出或底盘进入零力时，辅助预算必须立刻清零，目的是这些场景都属于安全优先的硬退出条件，不应保留任何残余加成。
+    if (cap == NULL || SuperCapIsOnline(cap) == 0u || chassis_output_allowed == 0u ||
+        chassis_cmd_recv.chassis_mode == CHASSIS_ZERO_FORCE) {
+        super_cap_policy_state.assist_enabled = 0u;
+        super_cap_policy_state.assist_target_w = 0.0f;
+        super_cap_policy_state.assist_applied_w = 0.0f;
         return 0.0f;
     }
 
-    if (SuperCapGetErrorCode(cap) != 0u || SuperCapIsOutputDisabled(cap) != 0u) {
-        // 超电报真实错误或输出被禁用时直接不给 bonus，目的是此时继续放大底盘功率预算只会制造“指令很猛但电源不给”的假象。
+    // 一旦超电板报告真实硬错误或当前输出被禁用，就直接回到无辅助状态，目的是此时继续给底盘追加预算只会制造“功率指令很猛但电源不给”的假象。
+    if (SuperCapHasHardFault(cap) != 0u || SuperCapIsOutputDisabled(cap) != 0u) {
+        super_cap_policy_state.assist_enabled = 0u;
+        super_cap_policy_state.assist_target_w = 0.0f;
+        super_cap_policy_state.assist_applied_w = 0.0f;
         return 0.0f;
     }
 
-    if (chassis_cmd_recv.cap_mode != SUPER_CAP_ON &&
-        fabsf(Chassis_IMU_data->Pitch) <= CHASSIS_SLOPE_THRESHOLD) {
-        // 非常规爆发模式且不在坡道时不介入激进 bonus，目的是让超电加成仍受上层意图约束，避免全工况都顶着最高功率跑。
-        return 0.0f;
-    }
-
+    // 先根据电容百分比和裁判缓冲做进入/退出滞回判断，目的是把原来只看单个临界值的硬切换改成“进入”和“退出”两套门槛，减少边界抖动。
     cap_percent = SuperCapGetEnergyPercent(cap);
-    if (cap_percent >= CHASSIS_SUPER_CAP_HIGH_PERCENT ||
-        buffer_energy_j >= CHASSIS_SUPER_CAP_HIGH_BUFFER_J) {
-        bonus = CHASSIS_SUPER_CAP_BONUS_HIGH_W;
-    } else if (cap_percent >= CHASSIS_SUPER_CAP_MID_PERCENT ||
-               buffer_energy_j >= CHASSIS_SUPER_CAP_MID_BUFFER_J) {
-        bonus = CHASSIS_SUPER_CAP_BONUS_MID_W;
-    } else if (cap_percent >= CHASSIS_SUPER_CAP_MIN_PERCENT ||
-               buffer_energy_j >= CHASSIS_SUPER_CAP_MIN_BUFFER_J) {
-        bonus = CHASSIS_SUPER_CAP_BONUS_LOW_W;
+    if (super_cap_policy_state.assist_enabled == 0u) {
+        if (cap_percent >= CHASSIS_SUPER_CAP_ENTER_PERCENT &&
+            buffer_energy_j >= CHASSIS_SUPER_CAP_ENTER_BUFFER_J) {
+            super_cap_policy_state.assist_enabled = 1u;
+        }
+    } else if (cap_percent < CHASSIS_SUPER_CAP_EXIT_PERCENT ||
+               buffer_energy_j < CHASSIS_SUPER_CAP_EXIT_BUFFER_J) {
+        super_cap_policy_state.assist_enabled = 0u;
     }
 
-    if (bonus > 0.0f && chassis_cmd_recv.chassis_mode == CHASSIS_ROTATE) {
-        // 小陀螺工况额外叠一档 bonus，目的是自旋时轮组功率波动最大，只靠通用 bonus 往往还不够把转速真正托起来。
-        bonus += CHASSIS_SUPER_CAP_ROTATE_EXTRA_W;
+    // 进入辅助后不再对超电板回传上限额外乘电量或 buffer 系数，目的是用户明确希望主上限直接跟 `chassisPowerLimit` 走，而不是再做一层保守缩放。
+    if (super_cap_policy_state.assist_enabled != 0u) {
+        // 先取超电板当前回传的真实可给功率上限，目的是一旦过了最低门槛，就让底盘主功率直接贴着电源链真实能力跑。
+        reported_power_limit = (float)SuperCapGetReportedPowerLimit(cap);
+        if (reported_power_limit >= CHASSIS_SUPER_CAP_REPORTED_LIMIT_MIN_W) {
+            // 这里直接把“超电板当前可给上限减去安全余量”与“裁判基础功率”做差，得到本拍还允许额外加上的功率，目的是最终总功率尽量直接贴着 `chassisPowerLimit - 5W` 运行。
+            available_bonus = (reported_power_limit - CHASSIS_SUPER_CAP_REPORTED_LIMIT_MARGIN_W) - referee_power_limit;
+            if (available_bonus < 0.0f) {
+                available_bonus = 0.0f;
+            }
+
+            // 目标额外功率不再继续乘系数，目的是让过门槛后的响应尽可能直接，真正体现“按 chassisPowerLimit 动态设置功率”的策略。
+            super_cap_policy_state.assist_target_w = available_bonus;
+        } else {
+            // 若这一拍还没有拿到可信的超电板能力回报，就先不要虚构 bonus，目的是避免底盘在电源链信息缺失时盲目冲高总功率预算。
+            super_cap_policy_state.assist_target_w = 0.0f;
+        }
+    } else {
+        // 退出辅助后目标功率先回到 0，再交给斜率限制慢慢收掉，目的是保持体感平顺而不是瞬间断崖。
+        super_cap_policy_state.assist_target_w = 0.0f;
     }
 
-    return bonus;
+    // 对真正写入底盘总功率预算的辅助值做每拍斜率限制，目的是把策略层的目标变化转成连续输出，避免轮组功率参考突然跳变。
+    if (super_cap_policy_state.assist_applied_w < super_cap_policy_state.assist_target_w) {
+        bonus_step = super_cap_policy_state.assist_target_w - super_cap_policy_state.assist_applied_w;
+        if (bonus_step > CHASSIS_SUPER_CAP_ASSIST_SLEW_UP_W) {
+            bonus_step = CHASSIS_SUPER_CAP_ASSIST_SLEW_UP_W;
+        }
+        super_cap_policy_state.assist_applied_w += bonus_step;
+    } else if (super_cap_policy_state.assist_applied_w > super_cap_policy_state.assist_target_w) {
+        bonus_step = super_cap_policy_state.assist_applied_w - super_cap_policy_state.assist_target_w;
+        if (bonus_step > CHASSIS_SUPER_CAP_ASSIST_SLEW_DOWN_W) {
+            bonus_step = CHASSIS_SUPER_CAP_ASSIST_SLEW_DOWN_W;
+        }
+        super_cap_policy_state.assist_applied_w -= bonus_step;
+    }
+
+    return super_cap_policy_state.assist_applied_w;
 }
 #endif // USE_SUPER_CAP
 

@@ -6,13 +6,12 @@
  */
 void ResetMouseFireState(void)
 {
-    // 这里仅清空键鼠发射相关锁存，作用是关闭摩擦轮或急停后不残留开火意图；
-    // 原因是 F 键手动关摩擦轮也会复用这个函数，不能顺带把其它键鼠模式锁存一起清掉。
+    // 这里只清空键鼠射击链自己的跨拍状态，目的是 F 关闭、急停或切源后不残留任何拨弹与档位历史，同时又不影响小陀螺和自由模式等其它键鼠锁存。
     mouse_fire_friction_latched = 0;
     mouse_left_last = 0;
-    mouse_left_burst_active = 0;
-    mouse_left_press_start_ms = 0;
     keyboard_friction_toggle_last = 0;
+    keyboard_bullet_speed_toggle_last = 0;
+    keyboard_bullet_speed_selected = BIG_AMU_12;
 }
 
 /**
@@ -60,7 +59,8 @@ uint32_t GetControlSourceKeyFrameSerial(ControlSource_e source)
  */
 void ResetMouseControlLatchState(void)
 {
-    // 一次性清空键鼠发射、小陀螺、自由模式和一键掉头状态，目的是急停、断链和切源后不应继续沿用上一拍的火力或模式意图。
+    // 这里保留“安全出口硬清理”语义，作用是急停、零力或真正双离线时把全部键鼠模式锁存一起打回安全基线；
+    // 原因是这些场景下用户的旧模式意图已经失效，恢复后必须重新显式给出命令，不能让小陀螺或自由模式自己回来。
     ResetMouseFireState();
     keyboard_spin_toggle_last = 0u;
     keyboard_free_toggle_last = 0u;
@@ -70,6 +70,24 @@ void ResetMouseControlLatchState(void)
     keyboard_ui_refresh_last = 0u;
     keyboard_spin_mode_latched = 0u;
     keyboard_free_mode_latched = 0u;
+    ClearKeyboardTurnbackState();
+}
+
+/**
+ * @brief 在主控源切换时清空不该跨源沿用的瞬态锁存
+ *
+ */
+void ResetMouseControlLatchStateOnSourceSwitch(void)
+{
+    // 这里仅清空发射边沿、掉头去抖和一次性请求，作用是切到另一条输入链后先丢掉旧源的瞬态会话；
+    // 原因是这些状态继续沿用会把旧链路的半拍按键或去抖历史带到新链路里，但显式模式锁存仍应保留。
+    ResetMouseFireState();
+    keyboard_spin_toggle_last = 0u;
+    keyboard_free_toggle_last = 0u;
+    keyboard_turnback_toggle_last = 0u;
+    keyboard_turnback_last_frame_serial = 0u;
+    keyboard_turnback_press_frame_count = 0u;
+    keyboard_ui_refresh_last = 0u;
     ClearKeyboardTurnbackState();
 }
 
@@ -201,8 +219,10 @@ static void SyncMouseKeyEdgeState(ControlSource_e source, const RC_ctrl_t *mouse
         mouse_left_last = 0u;
     }
 
-    // 切换输入源时对齐键盘 F 键和鼠标左键边沿历史，目的是否则切源首拍会把“已经按住”的键误判成新的上升沿。
+    // 切换输入源时对齐键盘 F 键和鼠标左键边沿历史，目的是切源首拍不能把“本来就按住”的按键误判成新的安全动作或拨弹边沿。
     keyboard_friction_toggle_last = (uint8_t)((key_bits >> Key_F) & 0x1u);
+    // 同步对齐 R 键边沿历史，目的是用户若切源时正按着 R，不应该在新输入源首拍又被当成一次新的档位切换。
+    keyboard_bullet_speed_toggle_last = (uint8_t)((key_bits >> Key_R) & 0x1u);
     // 同步对齐 B 键边沿历史，目的是主控切换时若用户正按着 B，不应在切源首拍被误判成新的自由模式切换。
     keyboard_free_toggle_last = (uint8_t)((key_bits >> Key_B) & 0x1u);
     turnback_pressed = (uint8_t)((key_bits >> Key_V) & 0x1u);
@@ -233,8 +253,13 @@ void HandleControlSourceSwitch(ControlSource_e new_source)
         return;
     }
 
-    // 切换主控源时统一清空所有跨周期锁存，目的是不同链路的边沿语义不同，沿用旧状态会直接造成误开火或残留运动。
-    ResetMouseControlLatchState();
+    // 切换到仍然可用的主控源时只清旧输入链留下的瞬态状态，目的是保住 X/B 这种显式模式锁存，不让短时切源直接把模式打掉。
+    if (new_source == CONTROL_SOURCE_NONE) {
+        // 真正进入无主控状态时改走硬清理，目的是这一拍后马上会落到零力，所有模式锁存都必须一并作废。
+        ResetMouseControlLatchState();
+    } else {
+        ResetMouseControlLatchStateOnSourceSwitch();
+    }
     ResetKeyboardMotionState();
     ResetChassisAuxState();
     friction_switch_state = 0u;

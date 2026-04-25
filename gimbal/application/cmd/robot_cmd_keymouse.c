@@ -95,6 +95,7 @@ void MouseKeySet(void)
     uint8_t video_link_online = IsVideoLinkControlReady();
     uint16_t key_bits = mouse_key_source->key[KEY_PRESS].keys;
     uint8_t friction_toggle_pressed = (uint8_t)((key_bits >> Key_F) & 0x1u);
+    uint8_t bullet_speed_toggle_pressed = (uint8_t)((key_bits >> Key_R) & 0x1u);
     uint8_t free_toggle_pressed = (uint8_t)((key_bits >> Key_B) & 0x1u);
     uint8_t turnback_toggle_pressed = 0u;
     uint8_t turnback_toggle_raw_pressed = (uint8_t)((key_bits >> Key_V) & 0x1u);
@@ -110,12 +111,8 @@ void MouseKeySet(void)
     float keyboard_target_vx = (float)keyboard_vx * KEYBOARD_CHASSIS_CMD_SCALE;
     float keyboard_target_vy = (float)keyboard_vy * KEYBOARD_CHASSIS_CMD_SCALE;
 
-    // 这里检测图传离线边沿，作用是第一时间清掉键鼠锁存和残留发射意图；
-    // 原因是图传断链后会回退到 DBUS 源，若不在切换瞬间清理状态，旧图传命令会被继续沿用。
-    if (last_video_link_online && !video_link_online) {
-        ResetMouseControlLatchState();
-        ResetKeyboardMotionState();
-    }
+    // 这里仅刷新图传在线记忆，作用是让后续周期继续识别新的离线边沿；
+    // 原因是主控切换时需要清掉哪些旧状态，已经在 `HandleControlSourceSwitch` 里按新源统一处理过，这里再重置会破坏刚同步好的按键边沿。
     last_video_link_online = video_link_online;
 
     if (keyboard_ramp_last_ms != 0u) {
@@ -154,21 +151,30 @@ void MouseKeySet(void)
     gimbal_cmd_send.pitch += (float)mouse_key_source->mouse.y * MOUSE_PITCH_SENSITIVITY_DEG;
     LimitGimbalPitchTarget();
 
-    // 这里把 F 定义成键鼠摩擦轮开关键，作用是给电脑端一个显式的预热/关闭入口；
-    // 原因是当前版本只有鼠标左键会隐式拉起摩擦轮，没有独立关断键，调试和行进中都不方便。
+    // F 键现在只负责摩擦轮的显式开关，目的是把“预热”和“拨弹”彻底拆开，确保鼠标左键不会再隐式带起摩擦轮。
     if (friction_toggle_pressed && !keyboard_friction_toggle_last) {
         if (mouse_fire_friction_latched) {
             ResetMouseFireState();
             shoot_cmd_send.friction_mode = FRICTION_OFF;
             shoot_cmd_send.load_mode = LOAD_STOP;
+            shoot_cmd_send.bullet_speed = BULLET_SPEED_NONE;
             shoot_cmd_send.shoot_rate = 0.0f;
         } else {
-            mouse_fire_friction_latched = 1;
-            mouse_left_burst_active = 0;
-            mouse_left_press_start_ms = now_ms;
+            // 只锁存摩擦轮开启意图而不立即拨弹，目的是用户按下 F 后必须再明确点一次左键，才能触发真正的发射动作。
+            mouse_fire_friction_latched = 1u;
         }
     }
     keyboard_friction_toggle_last = friction_toggle_pressed;
+
+    // R 键独立切换 12/16m/s 预选档位，目的是让操作者在不开摩擦轮时也能先选好档位，并立即把结果同步到 UI。
+    if (bullet_speed_toggle_pressed && !keyboard_bullet_speed_toggle_last) {
+        if (keyboard_bullet_speed_selected == BIG_AMU_16) {
+            keyboard_bullet_speed_selected = BIG_AMU_12;
+        } else {
+            keyboard_bullet_speed_selected = BIG_AMU_16;
+        }
+    }
+    keyboard_bullet_speed_toggle_last = bullet_speed_toggle_pressed;
 
     if (free_toggle_pressed && !keyboard_free_toggle_last) {
         // B 键显式切模式前先取消一键掉头状态 用户已经给出新的自由模式意图，旧掉头任务和强制跟随锁存都不应继续霸占控制权。
@@ -283,39 +289,14 @@ void MouseKeySet(void)
         }
     }
 
-    // 鼠标首次请求开火时锁存摩擦轮开启，作用是让后续短按/长按都不需要额外按键预热；
-    // 原因是你本轮只要求接入 mouse.press_l，不能再依赖 F/Q/E 之类的旧调试键位。
-    if (mouse_left_pressed && !mouse_left_last) {
-        mouse_fire_friction_latched = 1;
-        mouse_left_burst_active = 0;
-        mouse_left_press_start_ms = now_ms;
+    // 只有 F 已经把摩擦轮明确打开后，左键上升沿才允许拨一发，目的是把“误触鼠标直接起火”的风险压到最低。
+    if (mouse_fire_friction_latched != 0u) {
         shoot_cmd_send.shoot_mode = SHOOT_ON;
         shoot_cmd_send.friction_mode = FRICTION_ON;
-        // 键鼠首个点射请求统一切到 16m/s 档位，目的是你已经明确要求键盘链路与 VT03 遥控链路保持同一射速，避免两套输入手感不一致。
-        shoot_cmd_send.bullet_speed = BIG_AMU_16;
-        shoot_cmd_send.load_mode = LOAD_1_BULLET;
-    } else if (mouse_left_pressed && ((now_ms - mouse_left_press_start_ms) >= LOAD_TRIGGER_DELAY)) {
-        mouse_left_burst_active = 1;
-    } else if (!mouse_left_pressed) {
-        mouse_left_burst_active = 0;
-    }
-
-    // 只要键鼠曾经请求过开火，就持续维持摩擦轮开启，作用是让鼠标短按之后可立即继续点射或转连发；
-    // 原因是当前版本没有显式“关闭键鼠摩擦轮”按键，掉电/急停前应保持 ready 状态。
-    if (mouse_fire_friction_latched) {
-        shoot_cmd_send.shoot_mode = SHOOT_ON;
-        shoot_cmd_send.friction_mode = FRICTION_ON;
-        if (shoot_cmd_send.bullet_speed == BULLET_SPEED_NONE) {
-            // 键鼠只做了摩擦轮预热但本拍还没显式触发装填时，也要把默认弹速补成 16m/s，目的是后续单发或连发直接沿用统一档位，不再回落到旧的 12m/s。
-            shoot_cmd_send.bullet_speed = BIG_AMU_16;
+        shoot_cmd_send.bullet_speed = keyboard_bullet_speed_selected;
+        if (mouse_left_pressed && !mouse_left_last) {
+            shoot_cmd_send.load_mode = LOAD_1_BULLET;
         }
-    }
-
-    // 长按进入连发，作用是让 mouse.press_l 兼顾点射和持续火力；
-    // 原因是 `shoot` 应用对 `LOAD_BURSTFIRE` 是电平语义，必须在长按期间持续下发。
-    if (mouse_left_burst_active) {
-        shoot_cmd_send.load_mode = LOAD_BURSTFIRE;
-        shoot_cmd_send.shoot_rate = MOUSE_BURST_FIRE_RATE;
     }
 
     if (keyboard_turnback_active != 0u) {

@@ -87,6 +87,7 @@ file(GLOB_RECURSE SOURCES
     "modules/TFminiPlus/*.c"
     "modules/unicomm/*.c"
     "modules/video_link/*.c"
+    "modules/vofa_debug/*.c"
     "Middlewares/Third_Party/SEGGER/RTT/*.c"
     "Middlewares/Third_Party/SEGGER/Config/*.c"
     
@@ -152,6 +153,7 @@ target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
     modules/TFminiPlus
     modules/unicomm
     modules/video_link
+    modules/vofa_debug
 
     Middlewares/Third_Party/SEGGER/Config
     Middlewares/Third_Party/SEGGER/RTT

@@ -14,6 +14,85 @@ static float real_vx = 0.0f; // 缓存融合后的真实前进速度，目的是
 static float real_vy = 0.0f; // 缓存融合后的真实横移速度，目的是横移估计同样需要跨拍连续状态，不能每次重算后立刻丢掉。
 static float real_wz = 0.0f; // 缓存融合后的真实旋转速度，目的是角速度估计最后一级低通滤波依赖历史输出。
 
+#ifdef USE_SUPER_CAP
+/**
+ * @brief 更新超电 DCDC 使能请求状态
+ *
+ * @param chassis_output_allowed 当前拍裁判系统是否允许底盘输出
+ */
+void UpdateSuperCapOutputState(uint8_t chassis_output_allowed)
+{
+    uint32_t now;
+    uint32_t fault_toggle_phase_ms;
+    uint8_t desired_enable = 0u;
+    uint8_t force_disable = 0u;
+    super_cap_dcdc_state_e last_dcdc_state;
+
+    if (cap == NULL) {
+        return;
+    }
+
+    now = HAL_GetTick();
+    last_dcdc_state = super_cap_policy_state.dcdc_state;
+
+    // 裁判切掉输出、底盘零力或超电离线时必须立即进入关闭态，目的是这些场景都属于安全优先路径，不应再等待最小切换时间。
+    if (SuperCapIsOnline(cap) == 0u ||
+        chassis_output_allowed == 0u ||
+        chassis_cmd_recv.chassis_mode == CHASSIS_ZERO_FORCE) {
+        super_cap_policy_state.dcdc_state = SUPER_CAP_DCDC_OFF;
+        super_cap_policy_state.fault_toggle_started_ms = 0u;
+        desired_enable = 0u;
+        force_disable = 1u;
+    } else if (SuperCapHasHardFault(cap) != 0u) {
+        // 真实硬错误存在时进入固定节拍的方波重试状态，目的是严格按“先关 1 秒、再开 1 秒”的节奏恢复，复现你当前实车需要的行为。
+        if (last_dcdc_state != SUPER_CAP_DCDC_FAULT_HOLD) {
+            // 第一次进入故障重试态时把当前时刻记成相位起点，目的是确保每次真实故障都从“关”这一半周期开始，而不是继承上次残留相位。
+            super_cap_policy_state.fault_toggle_started_ms = now;
+            force_disable = 1u;
+        }
+        super_cap_policy_state.dcdc_state = SUPER_CAP_DCDC_FAULT_HOLD;
+        fault_toggle_phase_ms =
+            (now - super_cap_policy_state.fault_toggle_started_ms) % (CHASSIS_SUPER_CAP_FAULT_TOGGLE_HALF_PERIOD_MS * 2u);
+        if (fault_toggle_phase_ms < CHASSIS_SUPER_CAP_FAULT_TOGGLE_HALF_PERIOD_MS) {
+            // 方波前半周期固定拉低 DCDC 请求，目的是先给超电板留一整秒完全退出故障态的窗口，避免刚报码就继续强推使能。
+            desired_enable = 0u;
+        } else {
+            // 方波后半周期固定拉高 DCDC 请求，目的是在真实故障仍未消失时也按 1 秒节拍自动重试，而不是等人工再次介入。
+            desired_enable = 1u;
+        }
+    } else if (super_cap_policy_state.assist_applied_w > 0.5f &&
+               SuperCapIsOutputDisabled(cap) == 0u) {
+        // 辅助预算已经真正生效且超电板未声明输出禁用时，进入 assist 状态，目的是把“在工作”与“仅待命”区分开。
+        super_cap_policy_state.dcdc_state = SUPER_CAP_DCDC_ASSIST;
+        super_cap_policy_state.fault_toggle_started_ms = 0u;
+        desired_enable = 1u;
+    } else {
+        // 在线且允许输出但当前没有追加辅助预算时仍保持 READY 使能，目的是继续允许超电板维持充电与待命，而不是每次没 bonus 就关掉 DCDC。
+        super_cap_policy_state.dcdc_state = SUPER_CAP_DCDC_READY;
+        super_cap_policy_state.fault_toggle_started_ms = 0u;
+        desired_enable = 1u;
+    }
+
+    // 只有请求状态真的变化时才执行开关动作，目的是把状态机和报文下发解耦，避免每拍都重复打日志或重写同一命令。
+    if (desired_enable != super_cap_policy_state.dcdc_requested_enable) {
+        if (desired_enable == 0u) {
+            if (force_disable != 0u ||
+                now - super_cap_policy_state.dcdc_last_switch_ms >= CHASSIS_SUPER_CAP_DCDC_MIN_SWITCH_MS) {
+                // 进入安全关闭或故障关闭时优先立即拉低请求，普通回收则仍受最小保持时间保护，避免边界状态下频繁抖动。
+                SuperCapDisable(cap);
+                super_cap_policy_state.dcdc_requested_enable = 0u;
+                super_cap_policy_state.dcdc_last_switch_ms = now;
+            }
+        } else if (now - super_cap_policy_state.dcdc_last_switch_ms >= CHASSIS_SUPER_CAP_DCDC_MIN_SWITCH_MS) {
+            // 重新请求使能前要求至少稳定一段时间，目的是错误刚恢复、在线状态刚回来或输出许可刚恢复时不立即重启 DCDC。
+            SuperCapEnable(cap);
+            super_cap_policy_state.dcdc_requested_enable = 1u;
+            super_cap_policy_state.dcdc_last_switch_ms = now;
+        }
+    }
+}
+#endif // USE_SUPER_CAP
+
 /**
  * @brief 计算每个轮毂电机的输出，正运动学解算
  *
@@ -69,37 +148,12 @@ void LimitChassisOutput(void)
 
         // 通过现有 helper 下发裁判缓冲能量，目的是统一复用范围限幅逻辑，避免后续超电协议调整后底盘侧还在直接写裸字段。
         SuperCapSetEnergyBuffer(cap, referee_buffer_j);
-        // 始终把当前合法裁判功率限制同步给超电板，目的是更激进的是底盘侧 bonus 策略，不是让超电板盲目突破裁判功率红线。
-        SuperCapSetPowerLimit(cap, (uint16_t)referee_limit);
+        // 这里恢复为只同步真实裁判功率限制，目的是超电板的这个协议字段本来就被当作 refereePowerLimit 使用，
+        // 若把底盘本地更高的最终预算原样塞进去，超电板会因为收到大于 250W 的“裁判功率”而直接切掉输出。
+        SuperCapSetPowerLimit(cap, (uint16_t)(referee_limit + 0.5f));
 
-        // 只要裁判系统允许底盘输出且超电在线，就持续发送 DCDC 使能请求，目的是让 C 板侧忽略 bit7=128，避免“输出禁用”状态被上层再次锁死。
-        if (chassis_output_allowed != 0u && cap->is_online) {
-            cap->tx_msg.enableDCDC = 1;
-        } else {
-            cap->tx_msg.enableDCDC = 0;
-        }
-
-        {
-            static uint32_t error_toggle_tick = 0u;
-
-            // 只对 bit0-bit6 的真实错误执行 2 秒关 / 2 秒开恢复，目的是bit7=128 只是输出禁用状态，不应再参与 C 板关断逻辑。
-            if (SuperCapGetErrorCode(cap) != 0u) {
-                uint32_t now = HAL_GetTick();
-                uint32_t elapsed;
-
-                if (error_toggle_tick == 0u) {
-                    error_toggle_tick = now;
-                }
-                elapsed = (now - error_toggle_tick) % 4000u;
-                if (elapsed < 2000u) {
-                    cap->tx_msg.enableDCDC = 0;
-                } else {
-                    cap->tx_msg.enableDCDC = 1;
-                }
-            } else {
-                error_toggle_tick = 0u;
-            }
-        }
+        // 统一由状态机决定本拍是否请求 DCDC 使能，目的是把离线、硬错误、待命和真实辅助输出这几种时序统一收口到一个地方处理。
+        UpdateSuperCapOutputState(chassis_output_allowed);
 
         // 在同一拍内完成超电命令下发，目的是这样 UI 和底盘功率逻辑读到的超电状态都和本拍控制动作对齐。
         SuperCapSend(cap);

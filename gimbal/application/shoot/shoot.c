@@ -1,4 +1,5 @@
 #include "shoot_private.h"
+#include "vofa_debug.h"
 
 // 当前内圈 ramp 输出需要跨控制周期保存，目的是摩擦轮软启动改成时间型斜坡后，不能每拍都从 0 重新推进。
 float current_inner_deg = 0.0f;
@@ -194,10 +195,11 @@ void ShootInit(void)
     p_stall_debug = ShootDebug_GetStallPtr();
     p_sf_debug = ShootDebug_GetSingleFirePtr();
     p_dip_snapshot = ShootDebug_GetDipSnapshotPtr();
-    // 这里把 VOFA 输出链路在 shoot 初始化阶段一并拉起，目的是发射观测只从属于 shoot 模块，不能散落在别的应用里各自初始化。
-    ShootVofa_Init();
     // 初始化摩擦轮 ramp 的时间基准，目的是第一次进入时间型斜坡时不能拿到异常大的 dt，否则会把目标一步跳满。
     DWT_GetDeltaT(&friction_ramp_dwt_cnt);
+
+    // 初始化 VOFA+ 调试输出模块，清零通道缓冲并准备 USART1 DMA 发送
+    VofaDebugInit();
 }
 
 /* 机器人发射机构控制核心任务 */
@@ -344,7 +346,7 @@ void ShootTask(void)
             ShootSetSpeedDual(16.2f, 16.2f);
             break;
         default:
-            ShootSetSpeedDual(15.5f, 16.1f);
+            ShootSetSpeedDual(15.2f, 16.3f);
             break;
         }
     } else {
@@ -369,7 +371,42 @@ void ShootTask(void)
     last_report_fire_count = single_fire.fire_count;
     shoot_feedback_data.empty_flag = (single_fire.feed_timeout_count > 0u);
 
-    // 这里在反馈数据完成本拍收口后再推 VOFA，目的是串口记录必须拿到与上送 cmd 完全一致的一份 fire_count 和 empty_flag。
-    ShootVofa_SendFrameIfDue(current_time_ms);
     PubPushMessage(shoot_pub, (void *)&shoot_feedback_data);
+
+    // 填充 VOFA+ 调试通道并发送 JustFloat 帧，复用 shoot_debug 已有数据源避免重复计算
+    {
+        FrictionWheelDebug_s *p_vofa_fric = ShootDebug_GetFrictionPtr();
+        SingleFireDebug_s *p_vofa_sf = ShootDebug_GetSingleFirePtr();
+
+        // ch0~ch5: 6 个摩擦轮实际线速度 (m/s)，观测摩擦轮升速、稳态和掉速全过程
+        VofaDebugSetChannel(0, p_vofa_fric->inner_left_mps);
+        VofaDebugSetChannel(1, p_vofa_fric->inner_right_mps);
+        VofaDebugSetChannel(2, p_vofa_fric->inner_down_mps);
+        VofaDebugSetChannel(3, p_vofa_fric->outer_left_mps);
+        VofaDebugSetChannel(4, p_vofa_fric->outer_right_mps);
+        VofaDebugSetChannel(5, p_vofa_fric->outer_down_mps);
+
+        // ch6: 拨盘电机速度 (deg/s)，观测送弹冲刺和堵转反转的速度响应
+        VofaDebugSetChannel(6, p_vofa_sf->loader_speed);
+
+        // ch7: 内圈掉速差 (baseline - current)，正值表示弹丸正在通过内圈摩擦轮
+        VofaDebugSetChannel(7, p_vofa_sf->speed_diff);
+
+        // ch8: 外圈掉速差 (outer_baseline - current_outer)，正值表示弹丸正在通过外圈摩擦轮
+        VofaDebugSetChannel(8, p_vofa_sf->outer_baseline_speed - p_vofa_sf->current_outer_speed);
+
+        // ch9: 累计发射计数，每跳一格代表成功检测到一发弹丸
+        VofaDebugSetChannel(9, (float)p_vofa_sf->fire_count);
+
+        // ch10~ch15: 6 个电机各自的实时掉速量 (baseline - |current|, deg/s)
+        // 从 dip_control 取送弹前锁存的基线，减去当前瞬时速度绝对值，正值代表该轮正在被弹丸减速
+        VofaDebugSetChannel(10, dip_control.inner_left_baseline - fabsf(GetMotorSpeedAps(friction_inner_left)));
+        VofaDebugSetChannel(11, dip_control.inner_right_baseline - fabsf(GetMotorSpeedAps(friction_inner_right)));
+        VofaDebugSetChannel(12, dip_control.inner_down_baseline - fabsf(GetMotorSpeedAps(friction_inner_down)));
+        VofaDebugSetChannel(13, dip_control.outer_left_baseline - fabsf(GetMotorSpeedAps(friction_outer_left)));
+        VofaDebugSetChannel(14, dip_control.outer_right_baseline - fabsf(GetMotorSpeedAps(friction_outer_right)));
+        VofaDebugSetChannel(15, dip_control.outer_down_baseline - fabsf(GetMotorSpeedAps(friction_outer_down)));
+
+        VofaDebugSend();
+    }
 }

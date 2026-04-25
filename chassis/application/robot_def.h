@@ -193,6 +193,7 @@ typedef enum {
 typedef enum {
     BULLET_SPEED_NONE = 0, // 未知或未配置
     BIG_AMU_10 = 10, // 大弹丸10m/s
+    BIG_AMU_12 = 12, // 大弹丸12m/s，目的是底盘侧 UI 与双板协议要能无歧义表达当前新增的键鼠默认档位。
     SMALL_AMU_15 = 15, // 小弹丸15m/s
     BIG_AMU_16 = 16, // 大弹丸16m/s
     SMALL_AMU_18 = 18, // 小弹丸18m/s
@@ -227,6 +228,7 @@ typedef struct
     super_cap_mode_e cap_mode;
     float gimbal_pitch_deg; // 双板下发云台实际pitch角，目的是底盘板绘制俯仰滑块时必须使用上板真实姿态而不是控制目标。
     uint8_t friction_on; // 双板下发摩擦轮启停状态，目的是裁判 UI 的 fric 指示需要跟随上板真实使能结果实时变化。
+    Bullet_Speed_e ui_bullet_speed; // 双板下发当前预选弹速，目的是底盘板裁判 UI 需要在 F 旁直接显示 12/16 档位，不能再依赖瞬时发射命令去反推。
     uint8_t ui_refresh_request; // 接收来自上板的一次性 UI 刷新请求，目的是底盘板只负责执行重绘，不应自己猜测操作者何时需要重建。
     uint8_t follow_transition_request; // 显式标记“小陀螺退跟随”的接管边沿，目的是双板链路是覆盖式最新帧语义，只靠模式值本身无法稳定表达边沿事件。
     uint8_t follow_brake_request; // 显式请求底盘在跟随模式下临时只做阻尼刹停，目的是V 键掉头期间底盘需要平滑停住，不能继续吃历史跟随误差和云台角速度前馈。

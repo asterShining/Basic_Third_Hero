@@ -29,8 +29,6 @@
 #endif
 
 // 统一声明 `robot_cmd` 拆分后跨编译单元共享的私有常量，目的是这些常量只服务 cmd 应用内部，不应该泄漏到公共头，但拆成多文件后又必须共享同一份定义。
-#define LOAD_TRIGGER_DELAY 500u
-
 // 私有宏,自动将编码器转换成角度值
 #define YAW_ALIGN_ANGLE (YAW_CHASSIS_ALIGN_ECD * ECD_ANGLE_COEF_DJI)
 #define PTICH_HORIZON_ANGLE (PITCH_HORIZON_ECD * ECD_ANGLE_COEF_DJI)
@@ -50,7 +48,6 @@
 #define KEYBOARD_CHASSIS_RAMP_UP_PER_SEC 22000.0f
 #define KEYBOARD_CHASSIS_RAMP_DOWN_PER_SEC 30000.0f
 #define KEYBOARD_CHASSIS_CMD_EPSILON 1.0f
-#define MOUSE_BURST_FIRE_RATE 8.0f
 #define VT03_MODE_SW_C 0u
 #define VT03_MODE_SW_N 1u
 #define VT03_MODE_SW_S 2u
@@ -109,12 +106,16 @@ extern uint8_t fire_mode_state;
 extern uint8_t front_track_switch_state;
 #endif
 extern uint8_t cali_triggered;
+// 保存键鼠摩擦轮锁存状态，目的是把“只有 F 键能开关摩擦轮”的安全语义固化成跨拍状态，避免鼠标按键再次隐式改写摩擦轮。
 extern uint8_t mouse_fire_friction_latched;
+// 保存鼠标左键上一拍电平，目的是左键拨弹现在严格按上升沿触发，按住期间不能被重复当成多次单发。
 extern uint8_t mouse_left_last;
-extern uint8_t mouse_left_burst_active;
-extern uint32_t mouse_left_press_start_ms;
 extern uint8_t last_video_link_online;
 extern uint8_t keyboard_friction_toggle_last;
+// 保存 R 键上一拍电平，目的是弹速档位切换必须只响应一次上升沿，不能按住期间反复来回跳档。
+extern uint8_t keyboard_bullet_speed_toggle_last;
+// 保存键鼠当前预选弹速档位，目的是即使摩擦轮关闭，UI 也要稳定显示下次开启后将使用的 12/16m/s 档位。
+extern Bullet_Speed_e keyboard_bullet_speed_selected;
 extern uint8_t keyboard_spin_toggle_last;
 extern uint8_t keyboard_free_toggle_last;
 extern uint8_t keyboard_turnback_toggle_last;
@@ -155,6 +156,7 @@ void ResetMouseFireState(void);
 void ClearKeyboardTurnbackState(void);
 uint32_t GetControlSourceKeyFrameSerial(ControlSource_e source);
 void ResetMouseControlLatchState(void);
+void ResetMouseControlLatchStateOnSourceSwitch(void);
 void ResetKeyboardMotionState(void);
 void SyncGimbalTargetToCurrentAttitude(void);
 void RequestPitchRecoverToCurrentAttitude(void);

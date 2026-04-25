@@ -171,6 +171,17 @@ void SetPowerLimit(float power_limit)
 }
 
 /**
+ * @brief 返回当前底盘功率控制模块正在使用的总功率预算
+ *
+ * @return float 当前生效的总功率上限
+ */
+float PowerControlGetPowerLimit(void)
+{
+    // 直接返回功率控制模块内部锁存的上限，目的是让超电下发链路复用同一份预算，避免两条功率链各自维护不同的目标值。
+    return chassis_max_power;
+}
+
+/**
  * @brief 根据电调/拨码开关上的ID,根据说明书的默认id分配方式计算发送ID和接收ID,
  *        并对电机进行分组以便处理多电机控制命令
  */

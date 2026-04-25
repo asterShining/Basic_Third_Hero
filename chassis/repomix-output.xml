@@ -6557,7 +6557,7 @@ IST8310Instance *IST8310Init(IST8310_Init_Config_s *config);
  * @brief  module for recv&send vision data
  * @version beta
  * @date 2022-11-03
- * @todo 增加对串口调试助手协议的支持,包括vofa和serial debug
+ * @todo 增加对串口调试助手协议的支持,包括serial debug
  * @copyright Copyright (c) 2022
  *
  */

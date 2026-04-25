@@ -40,6 +40,13 @@ void PowerControl(void);
 void SetPowerLimit(float power_limit);
 
 /**
+ * @brief 读取当前底盘功率控制模块采用的总功率预算
+ *
+ * @return float 本拍生效的底盘总功率上限
+ */
+float PowerControlGetPowerLimit(void);
+
+/**
  * @brief 更新底盘姿态信息用于坡道力补偿 (需要在底盘任务中定时调用)
  * @param pitch_rad 俯仰角 (弧度)
  * @param roll_rad  横滚角 (弧度)

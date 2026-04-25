@@ -80,17 +80,34 @@ _Static_assert(sizeof(Chassis_Ctrl_Cmd_s) <= CAN_COMM_MAX_BUFFSIZE,
 #define SPIN_WAVE_SMOOTH_ALPHA 0.06f // 定义当前波形向随机目标逼近的平滑系数，目的是让无节奏变速保持连续过渡，不出现突兀阶跃。
 #define TRANSLATION_PRIORITY_RATIO 0.6f // 定义平移优先系数，目的是贴边吃功率时仍优先保证平移手感，避免横移一给就把整车拖死。
 #define DEFAULT_TEST_BUFFER_ENERGY_J 60.0f // 定义无裁判系统时的默认缓冲能量，目的是场下调车也要能走通超电功率策略，不能因为没裁判就永远进不到激进分支。
-#define CHASSIS_SUPER_CAP_BONUS_LOW_W 35.0f // 定义超电低能量档的附加功率，目的是电容电量不高时也先给一小档放电，让体感尽快从“没反应”变成“有帮助”。
-#define CHASSIS_SUPER_CAP_BONUS_MID_W 60.0f // 定义超电中能量档的附加功率，目的是电容进入可用区后直接给明显增益，体现比基础模式更激进的输出。
-#define CHASSIS_SUPER_CAP_BONUS_HIGH_W 75.0f // 定义超电高能量档的附加功率，目的是电容和裁判缓冲都充足时允许更猛地放电，把爆发优势真正打出来。
-#define CHASSIS_SUPER_CAP_ROTATE_EXTRA_W 10.0f // 定义小陀螺工况额外附加的超电功率，目的是自旋时功率起伏最大，需要再补一档预算才能让实际转速更敢放。
-#define CHASSIS_SUPER_CAP_MIN_PERCENT 15.0f // 定义超电开始介入的最低电量百分比，目的是把起放门槛从保守值下探，让超电更早参与而不是一直等到很满才出手。
-#define CHASSIS_SUPER_CAP_MID_PERCENT 35.0f // 定义超电中档功率的电量阈值，目的是分档控制比单阈值更容易同时兼顾激进体感和低电量保护。
-#define CHASSIS_SUPER_CAP_HIGH_PERCENT 60.0f // 定义超电高档功率的电量阈值，目的是只有电容余量明显充足时才拉到最高 bonus，避免长期贴顶后一下子掉空。
-#define CHASSIS_SUPER_CAP_MIN_BUFFER_J 15.0f // 定义超电开始介入的最小裁判缓冲能量，目的是即使电容电量一般，只要裁判缓冲还厚，也允许先上低档爆发。
-#define CHASSIS_SUPER_CAP_MID_BUFFER_J 35.0f // 定义超电中档功率的裁判缓冲阈值，目的是把裁判缓冲一起纳入决策，避免只看电容百分比导致机会窗口利用不足。
-#define CHASSIS_SUPER_CAP_HIGH_BUFFER_J 60.0f // 定义超电高档功率的裁判缓冲阈值，目的是缓冲和电容都高时直接进入最猛档，让整车更敢吃功率。
-#define CHASSIS_TOTAL_POWER_LIMIT_MAX_W 165.0f // 定义超电介入后的底盘总功率硬上限，目的是用户要求更激进，就把总预算再往上抬一档，但仍保留硬上限避免完全失控。
+#define CHASSIS_SUPER_CAP_ENTER_PERCENT 15.0f // 定义超电辅助进入阈值，目的是电容刚进入可用区时就允许开始参与，但仍保留最基本的余量要求。
+#define CHASSIS_SUPER_CAP_EXIT_PERCENT 10.0f // 定义超电辅助退出阈值，目的是给电量判断留出滞回，避免百分比贴着边界时一拍开一拍关。
+#define CHASSIS_SUPER_CAP_ENTER_BUFFER_J 15.0f // 定义超电辅助进入所需的最小裁判缓冲，目的是避免裁判缓冲本就见底时还继续向上加总预算。
+#define CHASSIS_SUPER_CAP_EXIT_BUFFER_J 10.0f // 定义超电辅助退出缓冲阈值，目的是同样给 buffer 判断留滞回，减少临界点附近的策略抖动。
+#define CHASSIS_SUPER_CAP_ASSIST_SLEW_UP_W 10.0f // 定义每个 5ms 控制拍允许增加的超电额外功率，目的是直接跟随 `chassisPowerLimit` 后仍保留一点平滑，避免回传值一抖底盘就整拍猛跳。
+#define CHASSIS_SUPER_CAP_ASSIST_SLEW_DOWN_W 15.0f // 定义每个 5ms 控制拍允许减少的超电额外功率，目的是回收功率要比放功率更快，好在超电能力突然掉下去时更及时收回来。
+#define CHASSIS_SUPER_CAP_REPORTED_LIMIT_MARGIN_W 5.0f // 定义跟随超电板回传功率上限时预留的安全余量，目的是给 CAN 离散化和测量抖动留一点呼吸空间，避免底盘一直顶着边界来回抖。
+#define CHASSIS_SUPER_CAP_REPORTED_LIMIT_MIN_W 30.0f // 定义判定超电板回传功率上限有效的最小值，目的是把 0 或异常小值挡在策略层之外。
+#define CHASSIS_SUPER_CAP_DCDC_MIN_SWITCH_MS 200u // 定义 DCDC 请求最小开关保持时间，目的是输出许可和临界状态抖动时不让底板频繁反复启停。
+#define CHASSIS_SUPER_CAP_FAULT_TOGGLE_HALF_PERIOD_MS 1000u // 定义真实硬错误恢复方波的半周期，目的是严格按 1 秒关 / 1 秒开节拍重试，而不是一次性冷却后直接常开。
+
+typedef enum {
+    SUPER_CAP_DCDC_OFF = 0, // 定义彻底关闭状态，目的是裁判禁用、零力或离线时明确进入安全关闭态。
+    SUPER_CAP_DCDC_READY, // 定义待命状态，目的是允许超电保持在线充电，但本拍尚未真正给底盘追加辅助预算。
+    SUPER_CAP_DCDC_ASSIST, // 定义辅助输出状态，目的是标记当前超电辅助预算已经生效，便于状态机和 UI 读同一份语义。
+    SUPER_CAP_DCDC_FAULT_HOLD, // 定义故障方波重试状态，目的是真实硬错误存在期间按固定节拍开关 DCDC，而不是让正常状态机继续接管。
+} super_cap_dcdc_state_e;
+
+typedef struct {
+    uint8_t assist_enabled; // 记录辅助功能是否处于进入后的保持态，目的是用滞回避免电量或 buffer 临界时反复跨阈值抖动。
+    float assist_target_w; // 记录本拍根据电量和缓冲算出的目标辅助功率，目的是把“策略想要多少”与“实际已经给多少”分开。
+    float assist_applied_w; // 记录经过斜率限制后真正叠加到底盘预算里的辅助功率，目的是让输出变化连续可控。
+    uint32_t fault_toggle_started_ms; // 记录当前真实硬错误方波重试的起始时刻，目的是后续可根据经过时间稳定推导出“当前该关还是该开”。
+    uint32_t dcdc_last_switch_ms; // 记录上一次切换 DCDC 请求的时刻，目的是执行最小开关保持时间。
+    uint8_t reported_limit_valid; // 记录本拍超电板回传功率上限是否可信，目的是调试时能直接区分“没用到”和“算出来无效”。
+    uint8_t dcdc_requested_enable; // 记录当前向超电板请求的 DCDC 使能状态，目的是状态机不再直接依赖裸字段判断自己上一次发了什么。
+    super_cap_dcdc_state_e dcdc_state; // 记录当前 DCDC 状态机所处阶段，目的是让辅助功率决策和输出时序共用一份明确状态。
+} SuperCapPolicyState;
 
 // 下面这些状态在底盘入口任务和拆分后的 helper 之间共同维护，目的是多个编译单元围绕同一拍控制命令、功率状态和接管锁存协同工作时，必须继续共用同一份运行时数据。
 #ifdef CHASSIS_BOARD
@@ -102,6 +119,7 @@ extern referee_info_t *referee_data;
 extern Referee_Interactive_info_t ui_data;
 #ifdef USE_SUPER_CAP
 extern SuperCapInstance *cap;
+extern SuperCapPolicyState super_cap_policy_state;
 #endif
 extern DJIMotorInstance *motor_lf;
 extern DJIMotorInstance *motor_rf;
@@ -118,7 +136,8 @@ extern uint32_t follow_control_dwt_cnt;
 
 // 下面这些函数虽然只在底盘模块内部使用，但拆分后要跨多个 `.c` 互相调用，目的是集中在私有头声明，能避免把内部实现泄漏到公共接口。
 #ifdef USE_SUPER_CAP
-float GetAggressiveSuperCapBonus(float buffer_energy_j, uint8_t chassis_output_allowed);
+float GetAggressiveSuperCapBonus(float referee_power_limit, float buffer_energy_j, uint8_t chassis_output_allowed);
+void UpdateSuperCapOutputState(uint8_t chassis_output_allowed);
 #endif
 float OptimizedSpinSpeed(float base_target_wz, float vx_cmd, float vy_cmd);
 float GetAdaptiveSpinBase(float power_limit);

@@ -1,0 +1,19 @@
+{
+  "turn_count": 1,
+  "last_session_id": "1d39fec8-b56f-45dc-8340-665e94fa617d",
+  "last_event_key": "1d39fec8-b56f-45dc-8340-665e94fa617d:transcript:543541fd7e8d364806a9d5cbfcadd77495a82ebcc567d11b9f723510e8a6a385",
+  "last_transcript_hash": "543541fd7e8d364806a9d5cbfcadd77495a82ebcc567d11b9f723510e8a6a385",
+  "last_model": "gemini-3.1-pro-preview",
+  "last_provider": "gemini",
+  "last_turn_total_tokens": 32082,
+  "last_session_total_tokens": 200202,
+  "session_totals_by_model": {
+    "gemini-3.1-pro-preview": 200202
+  },
+  "session_totals_by_provider": {
+    "gemini": 200202
+  },
+  "cwd_mode": "parent-leaf",
+  "last_cwd_label": "robomaster/Basic_Third_Hero",
+  "updated_at": "2026-04-22T11:17:39.665Z"
+}
