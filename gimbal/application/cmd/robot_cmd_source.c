@@ -74,24 +74,6 @@ void ResetMouseControlLatchState(void)
 }
 
 /**
- * @brief 在主控源切换时清空不该跨源沿用的瞬态锁存
- *
- */
-void ResetMouseControlLatchStateOnSourceSwitch(void)
-{
-    // 这里仅清空发射边沿、掉头去抖和一次性请求，作用是切到另一条输入链后先丢掉旧源的瞬态会话；
-    // 原因是这些状态继续沿用会把旧链路的半拍按键或去抖历史带到新链路里，但显式模式锁存仍应保留。
-    ResetMouseFireState();
-    keyboard_spin_toggle_last = 0u;
-    keyboard_free_toggle_last = 0u;
-    keyboard_turnback_toggle_last = 0u;
-    keyboard_turnback_last_frame_serial = 0u;
-    keyboard_turnback_press_frame_count = 0u;
-    keyboard_ui_refresh_last = 0u;
-    ClearKeyboardTurnbackState();
-}
-
-/**
  * @brief 清空键盘平移斜坡状态
  *
  */
@@ -253,13 +235,9 @@ void HandleControlSourceSwitch(ControlSource_e new_source)
         return;
     }
 
-    // 切换到仍然可用的主控源时只清旧输入链留下的瞬态状态，目的是保住 X/B 这种显式模式锁存，不让短时切源直接把模式打掉。
-    if (new_source == CONTROL_SOURCE_NONE) {
-        // 真正进入无主控状态时改走硬清理，目的是这一拍后马上会落到零力，所有模式锁存都必须一并作废。
-        ResetMouseControlLatchState();
-    } else {
-        ResetMouseControlLatchStateOnSourceSwitch();
-    }
+    // 切换主控源时统一清空跨周期键鼠锁存，目的是恢复旧逻辑，让不同链路的模式状态不要互相继承。
+    // 这样做的代价是 X 小陀螺和 B 自由模式都会在切源时失效，但行为更贴近之前依赖当前主控源重新给模式意图的方案。
+    ResetMouseControlLatchState();
     ResetKeyboardMotionState();
     ResetChassisAuxState();
     friction_switch_state = 0u;

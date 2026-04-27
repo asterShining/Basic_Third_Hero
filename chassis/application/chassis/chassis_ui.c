@@ -8,9 +8,6 @@ void RefereeUIUpdateData(void)
 {
     uint8_t chassis_output_allowed = 1u;
     uint8_t chassis_rotate_active = 0u;
-#ifdef USE_SUPER_CAP
-    uint8_t cap_output_enabled = 0u;
-#endif
 
     // 先取一份当前裁判系统对底盘输出的许可状态，目的是小陀螺和 cap 的显示都应该反映“这拍是否真的允许输出”，不能继续只看抽象模式或慢一拍的回包位。
     if (referee_data != NULL) {
@@ -19,6 +16,9 @@ void RefereeUIUpdateData(void)
 
     // 汇总底盘板本地和双板下发的 UI 实时数据，目的是把数据采集与 UI 绘制解耦后，裁判任务只关心显示调度，避免读多处模块造成状态不一致。
     ui_data.chassis_yaw_rate_dps = Chassis_IMU_data->Gyro[Z] * RAD_2_DEGREE;
+    // 先给超电显示量安全默认值，目的是即使后面超电离线或本拍直接走回退分支，UI 也不会继续沿用上一拍残留的状态字或圆灯状态。
+    ui_data.cap_state = UI_CAP_STATE_OFF;
+    ui_data.cap_on = 0u;
 
 #ifdef CHASSIS_BOARD
     if (chasiss_can_comm != NULL && CANCommIsOnline(chasiss_can_comm) != 0u) {
@@ -54,20 +54,36 @@ void RefereeUIUpdateData(void)
 #endif
 
 #ifdef USE_SUPER_CAP
-    if (SuperCapIsOnline(cap) != 0u) {
+    if (cap != NULL && SuperCapIsOnline(cap) != 0u) {
         // 超电在线时优先显示其回传的真实底盘功率，目的是功率值本身就该尽量贴近真实电源链路表现，而不是退回到底盘侧估算。
         ui_data.chassis_power_w = SuperCapGetChassisPower(cap);
-        // cap 指示只反映“这拍超电是否真的还能给底盘供能”，目的是用户已要求在线自动启用超电，
-        // 此时继续拿上板 cap_mode 参与点灯会把真实工作态遮住，导致超电明明在工作但 UI 还显示关闭。
-        cap_output_enabled = (uint8_t)(cap->tx_msg.enableDCDC != 0u &&
-                                       chassis_output_allowed != 0u &&
-                                       SuperCapGetErrorCode(cap) == 0u);
-        ui_data.cap_on = cap_output_enabled;
+
+        // 先处理最宽泛的 OFF 场景，目的是离线之外，裁判切掉底盘输出和零力模式同样都属于“本拍不该让超电参与”的关闭态。
+        if (chassis_output_allowed == 0u || chassis_cmd_recv.chassis_mode == CHASSIS_ZERO_FORCE) {
+            ui_data.cap_state = UI_CAP_STATE_OFF;
+        } else if (SuperCapHasHardFault(cap) != 0u) {
+            // 真实硬错误优先显示为 FAULT，目的是把故障与普通关闭态彻底区分开，方便场上直接判断是板子异常还是策略没开。
+            ui_data.cap_state = UI_CAP_STATE_FAULT;
+        } else if (SuperCapIsOutputDisabled(cap) != 0u) {
+            // 只有超电板明确回报 bit7 输出禁用时才显示 DISABLED，目的是把“板子在线但当前不给输出”单独做成一类可见语义。
+            ui_data.cap_state = UI_CAP_STATE_DISABLED;
+        } else if (super_cap_policy_state.dcdc_state == SUPER_CAP_DCDC_ASSIST &&
+                   super_cap_policy_state.assist_applied_w > 0.5f) {
+            // 进入 ASSIST 的条件既看状态机也看实际已加上的功率，目的是避免状态刚切过去但本拍还没真正放出额外功率时 UI 过早亮成辅助态。
+            ui_data.cap_state = UI_CAP_STATE_ASSIST;
+        } else {
+            // 其余在线且健康的场景统一归为 READY，目的是把“板子在、能工作、但还没真正辅助中”稳定表达出来。
+            ui_data.cap_state = UI_CAP_STATE_READY;
+        }
+
+        // 圆灯继续只承担粗粒度 on/off 语义，目的是保留原有一眼看开关态的习惯，而五态细分交给右侧状态字承担。
+        ui_data.cap_on = (uint8_t)(ui_data.cap_state == UI_CAP_STATE_READY || ui_data.cap_state == UI_CAP_STATE_ASSIST);
         return;
     }
 #endif
 
     // 超电离线时回退到底盘功率控制模块的本地估算值，目的是即使辅助供电链路失效，选手端仍需要持续看到一个稳定更新的功率读数。
     ui_data.chassis_power_w = PowerControlGetChassisPower();
+    ui_data.cap_state = UI_CAP_STATE_OFF;
     ui_data.cap_on = 0u;
 }

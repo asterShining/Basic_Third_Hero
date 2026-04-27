@@ -156,7 +156,6 @@ void ResetMouseFireState(void);
 void ClearKeyboardTurnbackState(void);
 uint32_t GetControlSourceKeyFrameSerial(ControlSource_e source);
 void ResetMouseControlLatchState(void);
-void ResetMouseControlLatchStateOnSourceSwitch(void);
 void ResetKeyboardMotionState(void);
 void SyncGimbalTargetToCurrentAttitude(void);
 void RequestPitchRecoverToCurrentAttitude(void);

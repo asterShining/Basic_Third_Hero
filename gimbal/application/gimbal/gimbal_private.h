@@ -26,6 +26,16 @@
 #define PITCH_GRAVITY_COEFFICIENT_K2 8.9759f
 // 这里保留同一轮新数据拟合出的常值偏置，目的是当前机构静态平衡点明显不在零力附近，若忽略这项，整段姿态都会残留同方向的恒定欠补或过补。
 #define PITCH_GRAVITY_OFFSET 5.8526f
+// 这里给 Pitch 目标角加速度前馈一个保守初值，目的是快速抬头/压头起停时先帮速度环分担一点惯量负担，但在未上车细调前不能给得太猛。
+#define PITCH_INERTIA_FEEDFORWARD_K 0.015f
+// 这里给 Pitch 目标角速度相关阻力补偿一个低幅值初值，目的是连续运动时先减掉一部分黏性负载，又不至于一上来就把匀速段顶得发硬。
+#define PITCH_VISCOUS_FEEDFORWARD_K 0.080f
+// 这里给 Pitch 低速起转补一小段平滑静摩擦前馈，目的是细微抬头和压头时减少“推不动”的涩感，但仍把幅值压在较保守范围。
+#define PITCH_STATIC_FEEDFORWARD_K 0.120f
+// 这里用平滑带宽控制 Pitch 静摩擦项的过零柔和度，目的是慢速过零时不要像硬 sign 一样突然翻转，避免目标点附近细碎抖动。
+#define PITCH_STATIC_SMOOTH_BAND_RAD_S 0.180f
+// 这里沿用仓库里历史上用过的小陀螺 Pitch 抗扰量级作为保守起点，目的是先给高速 Yaw 旋转工况一层离心补偿，同时尽量不偏离你之前验证过的结构。
+#define PITCH_CENTRIFUGAL_FEEDFORWARD_K 0.090f
 
 // 定义 Yaw 轴科氏项前馈初始系数，目的是复合甩头时先补一层轻量耦合，减少仅靠误差环追赶带来的卡顿。
 #define YAW_CORIOLIS_FEEDFORWARD_K 0.10f
@@ -42,12 +52,18 @@
 
 // 定义前馈角速度低通时间常数，目的是关节速率直接进入动力学耦合项对噪声很敏感，必须先做轻度滤波抑制抖动。
 #define GIMBAL_FEEDFORWARD_RATE_LPF_RC 0.020f
+// 定义 Pitch 目标速度估计低通时间常数，目的是 Pitch 参考角同样来自离散输入，直接求导会放大量化噪声，必须先平滑再参与动力学前馈。
+#define PITCH_REF_RATE_LPF_RC 0.020f
+// 定义 Pitch 目标加速度估计低通时间常数，目的是二次求导比速度更容易尖峰，先做保守滤波才能把惯量项控制在可用范围。
+#define PITCH_REF_ACC_LPF_RC 0.030f
 // 定义 Yaw 目标速度估计低通时间常数，目的是参考角度离散求导会放大量化噪声，先滤波后再生成惯量和摩擦前馈更稳。
 #define YAW_REF_RATE_LPF_RC 0.015f
 // 定义 Yaw 目标加速度估计低通时间常数，目的是二次求导最容易尖峰，必须再滤一次才能给惯量前馈使用。
 #define YAW_REF_ACC_LPF_RC 0.025f
 // 定义云台前馈周期后备值，目的是DWT 首拍或异常值不能直接拿去更新滤波器，否则会把耦合项瞬间放大。
 #define GIMBAL_FEEDFORWARD_DT_FALLBACK 0.005f
+// 定义 Pitch 参考导数状态的跳变复位阈值，目的是切模式、贴当前姿态或外部目标大步跳变时，不允许沿用旧导数去制造假惯量尖峰。
+#define PITCH_REF_DERIV_RESET_THRESHOLD_DEG 6.0f
 // 定义 Yaw 参考导数状态的跳变复位阈值，目的是切源、贴齐当前姿态或外部大步跳目标时，直接求导会产生假加速度尖峰。
 #define YAW_REF_DERIV_RESET_THRESHOLD_DEG 10.0f
 // 这里把 Pitch 前馈总限幅同步抬到略高于本轮静态标定最大实测力矩的位置，目的是新拟合的重力项在大仰角已经接近 12Nm，若仍卡在旧的 7.5Nm，会在高角度长期被截断，导致“参数换了但实车托不住”的假象。

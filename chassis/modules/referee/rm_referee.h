@@ -65,6 +65,16 @@ typedef struct
 
 } referee_info_t;
 
+// 这个枚举专门承载 UI 上展示的超电工作状态，目的是把底盘内部更复杂的在线/错误/辅助输出语义整理成一组稳定的显示值，避免 UI 线程自己跨模块拼状态。
+typedef enum
+{
+	UI_CAP_STATE_OFF = 0, // 表示超电当前处于关闭或不可参与状态，目的是把离线、裁判禁用底盘输出和零力这类“本拍不该有超电输出”的场景统一收敛成一类显示语义。
+	UI_CAP_STATE_READY, // 表示超电在线且健康，但当前还没有真正给到底盘额外功率，目的是把“待命可用”和“已经辅助中”区分开。
+	UI_CAP_STATE_ASSIST, // 表示超电已经真正参与当前拍功率输出，目的是让选手端能直接看到“现在就是在吃超电”。
+	UI_CAP_STATE_FAULT, // 表示超电板存在 bit0-bit6 的真实硬错误，目的是让故障和普通关闭态在 UI 上被清楚地区分开。
+	UI_CAP_STATE_DISABLED, // 表示超电板当前回报了输出禁用状态，目的是把“板子在线但不给输出”与离线或主动关闭分开。
+} UICapState_e;
+
 // 此结构体承载底盘板本地或双板下发的实时UI数据，裁判原生数据仍直接从referee_info_t读取
 typedef struct
 {
@@ -76,6 +86,7 @@ typedef struct
 	uint8_t friction_on; // What: 摩擦轮当前启停状态；Why: fric状态指示必须反映上板真实发射使能结果。
 	Bullet_Speed_e ui_bullet_speed; // 当前预选弹速，目的是在 F 旁稳定显示 12/16 档位，而不是依赖最近一发的实时弹速。
 	uint8_t robot_spin_on; // What: 小陀螺当前是否真正处于执行态；Why: on_2 需要反映本拍是否仍在按自旋模式输出，不能继续被历史模式残留误导。
+	UICapState_e cap_state; // 超电当前的五态显示值，目的是给 UI 直接消费 OFF/READY/ASSIST/FAULT/DISABLED，而不是再让显示层自己推断。
 	uint8_t cap_on; // 超电当前是否真正处于可输出工作态，目的是 cap 指示必须直接反映本拍还能不能给底盘供能，不能再混入上层意图位造成误判。
 } Referee_Interactive_info_t;
 

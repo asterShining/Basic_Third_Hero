@@ -165,6 +165,11 @@
 #define UI_LABEL_CAP_Y 661u
 #define UI_LABEL_CAP_FONT 31u
 #define UI_LABEL_CAP_WIDTH 3u
+// 超电状态字和 F 旁的档位数字共用同一套横向间距规则，目的是让左侧三组状态列的文本节奏保持一致，不再让 CAP 这一列显得特别散。
+#define UI_LABEL_CAP_STATE_X (UI_LABEL_CAP_X + (UI_LABEL_FRIC_SPEED_X - UI_LABEL_FRIC_X))
+#define UI_LABEL_CAP_STATE_Y UI_LABEL_CAP_Y
+#define UI_LABEL_CAP_STATE_FONT UI_LABEL_FRIC_SPEED_FONT
+#define UI_LABEL_CAP_STATE_WIDTH UI_LABEL_FRIC_SPEED_WIDTH
 
 // What: 这组横线和竖线直接继承参考工程里的 `meter_5/meter_3/ChuiZhi`；Why: 用户这次明确要求把这 3 条静态标尺整合进当前 UI，并且不改原有通信方式。
 #define UI_METER_5_START_X 594u
@@ -255,6 +260,8 @@ typedef enum {
     UI_STRING_PITCH,
     UI_STRING_ROBOT,
     UI_STRING_CAP,
+    // 这个字符串单独承载超电状态字，目的是把 CAP 这一列压缩成单行语义，减少百分比频繁跳动带来的突兀感。
+    UI_STRING_CAP_STATE,
     // What: 这 2 个字符串直接对应参考工程里的 `3m/5m`；Why: 新增标尺如果没有文字刻度，操作者很难把横线快速理解成距离参考。
     UI_STRING_TEXT_3,
     UI_STRING_TEXT_5,
@@ -305,6 +312,7 @@ typedef struct
     int32_t power_milli_w;
     int32_t bullet_num;
     uint8_t ui_bullet_speed_value;
+    UICapState_e cap_state;
     uint32_t pitch_needle_start_x;
     uint32_t pitch_needle_start_y;
     uint32_t pitch_needle_end_x;
@@ -325,9 +333,12 @@ typedef struct
     uint8_t state_retry_count[UI_STATE_FIGURE_COUNT];
     uint8_t fire_speed_string_dirty;
     uint8_t fire_speed_string_retry_count;
+    uint8_t cap_state_string_dirty;
+    uint8_t cap_state_string_retry_count;
     Graph_Data_t last_move_figures[UI_MOVE_FIGURE_COUNT];
     Graph_Data_t last_data_figures[UI_DATA_FIGURE_COUNT];
     String_Data_t last_fire_speed_string;
+    String_Data_t last_cap_state_string;
     UIIndicatorState_t last_indicator_state;
 } UIRuntime_t;
 
@@ -356,9 +367,11 @@ static void UIBuildDataFigures(uint32_t operate_type, const UIDisplaySnapshot_t 
 static void UIBuildStrings(uint32_t operate_type, const UIDisplaySnapshot_t *snapshot);
 static void UIRefreshStateChanges(const UIIndicatorState_t *indicator_state);
 static void UIRefreshFireSpeedString(const UIDisplaySnapshot_t *snapshot);
+static void UIRefreshCapStateString(const UIDisplaySnapshot_t *snapshot);
 static void UIProcessRuntimeUpdate(uint32_t now_tick_ms);
 static uint8_t UISendNextDirtyState(uint32_t now_tick_ms);
 static uint8_t UISendDirtyFireSpeedString(uint32_t now_tick_ms);
+static uint8_t UISendDirtyCapStateString(uint32_t now_tick_ms);
 static void UISendMovePacket(uint32_t now_tick_ms);
 static void UISendDataPacket(uint32_t now_tick_ms);
 static uint8_t UIMovePacketIsDirty(const UIDisplaySnapshot_t *snapshot);
@@ -464,8 +477,12 @@ static void UIRuntimeReset(void)
     // 复位时把当前档位字符串也同步成运行期基线，目的是初始化完成前后都只围绕同一份 12/16 真值做脏检查，不会平白多发一轮字符刷新。
     UIBuildStrings(UI_Graph_Change, &snapshot);
     ui_runtime.last_fire_speed_string = ui_strings[UI_STRING_FRIC_SPEED];
+    // 复位时把超电状态字同步成运行期基线，目的是初始化完成后只有状态真变了才发字符 change 包，不会再被旧缓存误判成脏数据。
+    ui_runtime.last_cap_state_string = ui_strings[UI_STRING_CAP_STATE];
     ui_runtime.fire_speed_string_dirty = 0u;
     ui_runtime.fire_speed_string_retry_count = 0u;
+    ui_runtime.cap_state_string_dirty = 0u;
+    ui_runtime.cap_state_string_retry_count = 0u;
     // What: 复位时清空状态灯重发计数；Why: 避免旧的脏状态残留到下一轮建图后继续重复发送。
     memset(ui_runtime.state_retry_count, 0, sizeof(ui_runtime.state_retry_count));
 }
@@ -478,6 +495,8 @@ static void UIStartInitCycle(uint32_t now_tick_ms)
     ui_runtime.dirty_state_mask = 0u;
     ui_runtime.fire_speed_string_dirty = 0u;
     ui_runtime.fire_speed_string_retry_count = 0u;
+    ui_runtime.cap_state_string_dirty = 0u;
+    ui_runtime.cap_state_string_retry_count = 0u;
     // What: 开始整页重建时同步清空状态灯重发队列；Why: 初始化阶段会重新 add 正确状态圆环，旧 change 重发已经没有意义。
     memset(ui_runtime.state_retry_count, 0, sizeof(ui_runtime.state_retry_count));
 }
@@ -503,8 +522,11 @@ static void UIFinishInitCycle(uint32_t now_tick_ms)
     memcpy(ui_runtime.last_move_figures, ui_move_figures, sizeof(ui_runtime.last_move_figures));
     memcpy(ui_runtime.last_data_figures, ui_data_figures, sizeof(ui_runtime.last_data_figures));
     ui_runtime.last_fire_speed_string = ui_strings[UI_STRING_FRIC_SPEED];
+    ui_runtime.last_cap_state_string = ui_strings[UI_STRING_CAP_STATE];
     ui_runtime.fire_speed_string_dirty = 0u;
     ui_runtime.fire_speed_string_retry_count = 0u;
+    ui_runtime.cap_state_string_dirty = 0u;
+    ui_runtime.cap_state_string_retry_count = 0u;
     ui_runtime.last_indicator_state = snapshot.indicator_state;
 }
 
@@ -675,6 +697,8 @@ static void UIBuildDisplaySnapshot(UIDisplaySnapshot_t *snapshot)
     // What: 数字全部按协议要求缩放到毫单位；Why: 裁判客户端会把 `UIFloatDraw` 的 int32 除以 1000 显示，必须先在固件侧统一处理。
     snapshot->power_milli_w = UIRoundFloatToInt(interactive_data->chassis_power_w * 1000.0f);
     snapshot->bullet_num = (int32_t)referee_recv_info->ProjectileAllowance.projectile_allowance_17mm;
+    // 这里直接把 UI 数据入口里已经归一化好的超电状态拷进快照，目的是后面的字符串绘制只消费一份稳定结果，不再跨模块重复推断状态。
+    snapshot->cap_state = interactive_data->cap_state;
 
     buffer_ratio = (float)referee_recv_info->PowerHeatData.buffer_energy / UI_BUFFER_FULL_SCALE_J;
     buffer_ratio = UIClampFloat(buffer_ratio, 0.0f, 1.0f);
@@ -830,10 +854,25 @@ static void UIBuildDataFigures(uint32_t operate_type, const UIDisplaySnapshot_t 
 static void UIBuildStrings(uint32_t operate_type, const UIDisplaySnapshot_t *snapshot)
 {
     const char *fric_speed_text = "12";
+    const char *cap_state_text = "OFF";
 
     // 这里把 F 旁的档位限制成 12/16 两种字符串，目的是左侧提示只承担“当前预选档位”这一件事，避免混入右侧实时弹速那种连续数值语义。
     if (snapshot != NULL && snapshot->ui_bullet_speed_value == 16u) {
         fric_speed_text = "16";
+    }
+    if (snapshot != NULL) {
+        if (snapshot->cap_state == UI_CAP_STATE_READY) {
+            // 在线健康但当前没在实际放功率时显示 STB，目的是把“可用待命”和“已经输出”区别开，同时避开 RDY 读起来发硬的问题。
+            cap_state_text = "STB";
+        } else if (snapshot->cap_state == UI_CAP_STATE_ASSIST) {
+            // 一旦超电已经真正参与当前拍输出，就统一显示 OUT，目的是让操作者一眼读成“现在正在出力”。
+            cap_state_text = "OUT";
+        } else if (snapshot->cap_state == UI_CAP_STATE_FAULT) {
+            cap_state_text = "FLT";
+        } else if (snapshot->cap_state == UI_CAP_STATE_DISABLED) {
+            // 在线但被超电板禁止输出时改成 CUT，目的是直接表达“输出被切掉”，比 DIS 更贴近现场判断语义。
+            cap_state_text = "CUT";
+        }
     }
 
     // What: 原有文本标签继续保留当前布局；Why: 这次只是在现有 UI 上补参考工程的距离刻度文字，其他语义标签不应该被连带改动。
@@ -851,6 +890,9 @@ static void UIBuildStrings(uint32_t operate_type, const UIDisplaySnapshot_t *sna
                UI_LABEL_ROBOT_FONT, UI_LABEL_ROBOT_WIDTH, UI_LABEL_ROBOT_X, UI_LABEL_ROBOT_Y, "r");
     UICharDraw(&ui_strings[UI_STRING_CAP], "cap", operate_type, UI_LAYER_MAIN, UI_Color_Yellow,
                UI_LABEL_CAP_FONT, UI_LABEL_CAP_WIDTH, UI_LABEL_CAP_X, UI_LABEL_CAP_Y, "c");
+    // 这条状态字固定放在大号 `c` 右侧，只显示当前单一状态，目的是把 CAP 这一列收敛成单行信息，不再让第二行百分比持续打断视线。
+    UICharDraw(&ui_strings[UI_STRING_CAP_STATE], "cst", operate_type, UI_LAYER_MAIN, UI_Color_Yellow,
+               UI_LABEL_CAP_STATE_FONT, UI_LABEL_CAP_STATE_WIDTH, UI_LABEL_CAP_STATE_X, UI_LABEL_CAP_STATE_Y, (char *)cap_state_text);
 
     // What: 这里新增参考工程里的 `3m/5m` 标尺文字；Why: 它们必须和新增的 `meter_3/meter_5` 一起出现，操作者才能直接读懂横线含义。
     UICharDraw(&ui_strings[UI_STRING_TEXT_3], "t03", operate_type, UI_LAYER_MAIN, UI_Color_Orange,
@@ -872,6 +914,22 @@ static void UIRefreshFireSpeedString(const UIDisplaySnapshot_t *snapshot)
         ui_runtime.last_fire_speed_string = ui_strings[UI_STRING_FRIC_SPEED];
         ui_runtime.fire_speed_string_dirty = 1u;
         ui_runtime.fire_speed_string_retry_count = 2u;
+    }
+}
+
+static void UIRefreshCapStateString(const UIDisplaySnapshot_t *snapshot)
+{
+    if (snapshot == NULL) {
+        return;
+    }
+
+    // 每拍都先按当前快照重建一次超电状态字，目的是让后面的脏检查永远围绕最新的 OFF/STB/OUT/FLT/CUT 真值比较，而不是靠别处缓存推导。
+    UIBuildStrings(UI_Graph_Change, snapshot);
+    if (memcmp(&ui_runtime.last_cap_state_string, &ui_strings[UI_STRING_CAP_STATE], sizeof(String_Data_t)) != 0) {
+        // 一旦状态字发生变化，就把新字符串收成运行期基线并安排两次补发，目的是在状态切换时尽快落图，同时给偶发字符丢包留出自愈机会。
+        ui_runtime.last_cap_state_string = ui_strings[UI_STRING_CAP_STATE];
+        ui_runtime.cap_state_string_dirty = 1u;
+        ui_runtime.cap_state_string_retry_count = 2u;
     }
 }
 
@@ -953,6 +1011,11 @@ static void UIProcessRuntimeUpdate(uint32_t now_tick_ms)
         (void)UISendDirtyFireSpeedString(now_tick_ms);
         return;
     }
+    UIRefreshCapStateString(&snapshot);
+    if (ui_runtime.cap_state_string_dirty != 0u) {
+        (void)UISendDirtyCapStateString(now_tick_ms);
+        return;
+    }
 
     move_dirty = UIMovePacketIsDirty(&snapshot);
     data_dirty = UIDataPacketIsDirty(&snapshot);
@@ -1004,6 +1067,24 @@ static uint8_t UISendDirtyFireSpeedString(uint32_t now_tick_ms)
     }
     if (ui_runtime.fire_speed_string_retry_count == 0u) {
         ui_runtime.fire_speed_string_dirty = 0u;
+    }
+    ui_runtime.last_packet_tick_ms = now_tick_ms;
+    return 1u;
+}
+
+static uint8_t UISendDirtyCapStateString(uint32_t now_tick_ms)
+{
+    if (ui_runtime.cap_state_string_dirty == 0u) {
+        return 0u;
+    }
+
+    // 超电状态字单独走字符 change 包，目的是不改现有 Draw5 分包前提下，让 STB/OUT/FLT/CUT 这种关键状态切换尽快落到客户端。
+    UICharRefresh(&referee_recv_info->referee_id, ui_strings[UI_STRING_CAP_STATE]);
+    if (ui_runtime.cap_state_string_retry_count > 0u) {
+        ui_runtime.cap_state_string_retry_count--;
+    }
+    if (ui_runtime.cap_state_string_retry_count == 0u) {
+        ui_runtime.cap_state_string_dirty = 0u;
     }
     ui_runtime.last_packet_tick_ms = now_tick_ms;
     return 1u;

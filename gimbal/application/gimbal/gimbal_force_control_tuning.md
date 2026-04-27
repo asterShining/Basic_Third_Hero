@@ -16,6 +16,10 @@
 
 - **Pitch 轴**
   - 重力前馈
+  - 惯量前馈
+  - 黏性摩擦前馈
+  - 平滑静摩擦前馈
+  - 离心项前馈
 - **Yaw 轴**
   - 惯量前馈
   - 黏性摩擦前馈
@@ -43,9 +47,22 @@
 | `PITCH_GRAVITY_COEFFICIENT_K1` | Pitch 主重力项 | 大角度支撑更强 | 大角度更容易下坠 | 俯仰大角度时托不住或顶太狠 |
 | `PITCH_GRAVITY_COEFFICIENT_K2` | Pitch 非对称修正项 | 一侧姿态补偿更强 | 一侧姿态补偿更弱 | 抬头准但低头不准，或反过来 |
 | `PITCH_GRAVITY_OFFSET` | Pitch 整体偏置 | 所有姿态整体更抬 | 所有姿态整体更沉 | 所有角度都一起偏上或偏下 |
+| `PITCH_INERTIA_FEEDFORWARD_K` | Pitch 惯量前馈 | 起停更干脆 | 起停更依赖 PID 追赶 | 快速抬头/压头发肉或刹不住 |
+| `PITCH_VISCOUS_FEEDFORWARD_K` | Pitch 黏性摩擦前馈 | 连续运动更顺 | 中速段更依赖速度环硬顶 | 中段发肉、扫角不跟手 |
+| `PITCH_STATIC_FEEDFORWARD_K` | Pitch 静摩擦前馈幅值 | 低速起转更果断 | 微调更容易推不动 | 细微抬头/压头发涩 |
+| `PITCH_STATIC_SMOOTH_BAND_RAD_S` | Pitch 静摩擦过零平滑带宽 | 过零更柔、更不抖 | 更早逼近饱和值 | 目标点附近细碎抖动或过零太软 |
+| `PITCH_CENTRIFUGAL_FEEDFORWARD_K` | Pitch 离心抗扰项 | 小陀螺/高速 Yaw 时更不容易被甩偏 | 高速旋转时更依赖 PID 硬抗 | 开小陀螺后枪口上下发飘 |
 | `PITCH_FEEDFORWARD_LIMIT` | Pitch 前馈总限幅 | 补偿更敢给 | 更安全但可能感觉“没加进去” | 前馈效果弱或顶满过猛 |
 
-### 2.3 Yaw 力控参数
+### 2.3 Pitch 参考导数估计参数
+
+| 参数 | 作用 | 调大效果 | 调小效果 | 典型现象 |
+| --- | --- | --- | --- | --- |
+| `PITCH_REF_RATE_LPF_RC` | Pitch 参考速度低通 | 更稳、更不抖 | 更灵、更容易吃到目标噪声 | 起停细碎抖动或感觉慢半拍 |
+| `PITCH_REF_ACC_LPF_RC` | Pitch 参考加速度低通 | 惯量前馈更平滑 | 惯量前馈更激进 | 起停瞬间是否有尖峰感 |
+| `PITCH_REF_DERIV_RESET_THRESHOLD_DEG` | Pitch 跳变复位阈值 | 更容易识别大步跳目标并清零导数 | 连续性更强但更容易吃到假导数 | 切模式、贴目标后是否冲一下 |
+
+### 2.4 Yaw 力控参数
 
 | 参数 | 作用 | 调大效果 | 调小效果 | 典型现象 |
 | --- | --- | --- | --- | --- |
@@ -57,7 +74,7 @@
 | `YAW_CORIOLIS_FEEDFORWARD_K` | Yaw 科氏耦合项 | 复合动作更顺 | 复合动作更卡 | 甩头同时抬头/低头时掉速或顿挫 |
 | `YAW_FEEDFORWARD_LIMIT` | Yaw 前馈总限幅 | 力控效果更明显 | 更保守更安全 | 效果弱或一给就猛 |
 
-### 2.4 Yaw 参考导数估计参数
+### 2.5 Yaw 参考导数估计参数
 
 | 参数 | 作用 | 调大效果 | 调小效果 | 典型现象 |
 | --- | --- | --- | --- | --- |
@@ -65,7 +82,7 @@
 | `YAW_REF_ACC_LPF_RC` | Yaw 参考加速度低通 | 惯量前馈更平滑 | 惯量前馈更激进 | 起停瞬间是否有尖峰感 |
 | `YAW_REF_DERIV_RESET_THRESHOLD_DEG` | 跳变复位阈值 | 更容易识别大步跳目标并清零导数 | 更少复位、连续性更强 | 切模式、贴目标后是否冲一下 |
 
-### 2.5 PID 参数
+### 2.6 PID 参数
 
 | 参数 | 作用 | 调大效果 | 调小效果 |
 | --- | --- | --- | --- |
@@ -88,7 +105,39 @@
 - `PITCH_GRAVITY_COEFFICIENT_K2`
 - `PITCH_GRAVITY_OFFSET`
 
-### 步骤 2：调 Yaw 基础力控
+### 步骤 2：调 Pitch 基础动态项
+
+此阶段关闭小陀螺，只看普通抬头 / 压头动作。
+
+顺序：
+
+1. `PITCH_INERTIA_FEEDFORWARD_K`
+2. `PITCH_VISCOUS_FEEDFORWARD_K`
+3. `PITCH_STATIC_FEEDFORWARD_K`
+4. `PITCH_STATIC_SMOOTH_BAND_RAD_S`
+
+现象判断：
+
+- 启动和刹停发肉：加 `PITCH_INERTIA_FEEDFORWARD_K`
+- 中速扫角发肉：加 `PITCH_VISCOUS_FEEDFORWARD_K`
+- 低速微调推不动：加 `PITCH_STATIC_FEEDFORWARD_K`
+- 目标点附近来回轻点头：减 `PITCH_STATIC_FEEDFORWARD_K` 或增 `PITCH_STATIC_SMOOTH_BAND_RAD_S`
+
+### 步骤 3：调 Pitch 小陀螺抗扰项
+
+操作：
+
+- 固定一个非零 Pitch 角，建议 `10° ~ 25°`
+- 开 / 关小陀螺或做高速 Yaw 甩头
+- 观察枪口是否明显抬头或低头
+
+现象判断：
+
+- 开小陀螺后枪口仍明显被甩偏：加 `PITCH_CENTRIFUGAL_FEEDFORWARD_K`
+- 开小陀螺后偏得更厉害：先反号，再重新小步调
+- 起转 / 停转瞬间变抖：值过大，回退一点
+
+### 步骤 4：调 Yaw 基础力控
 
 此阶段先只看纯 Yaw 大动作，不同时做剧烈 Pitch。
 
@@ -105,7 +154,7 @@
 - 起转第一下不利索、换向卡：加 `YAW_STATIC_FEEDFORWARD_K`
 - 停稳附近来回拧：减 `YAW_STATIC_FEEDFORWARD_K` 或增大 `YAW_STATIC_FEEDFORWARD_DEADBAND_RAD_S`
 
-### 步骤 3：调 Yaw 复合运动力控
+### 步骤 5：调 Yaw 复合运动力控
 
 操作：
 
@@ -122,7 +171,7 @@
 - 复合动作掉速、顿一下：先调 `YAW_CORIOLIS_FEEDFORWARD_K`
 - 平视时效果好，抬头后 Yaw 手感明显变：再调 `YAW_INERTIA_PITCH_COS2_GAIN`
 
-### 步骤 4：最后减 PID
+### 步骤 6：最后减 PID
 
 只有当前馈已经明显有效后，才动 PID。
 
@@ -146,6 +195,31 @@
 - 降 `REMOTE_PITCH_SENSITIVITY`
 - 降 `MOUSE_PITCH_SENSITIVITY_DEG`
 - 如仍明显，轻降 `pitch angle_PID.Kp`
+
+### 症状：Pitch 快速起停还是有点肉
+
+优先调整：
+
+- `PITCH_INERTIA_FEEDFORWARD_K`
+
+### 症状：Pitch 中速连续扫角不够顺
+
+优先调整：
+
+- `PITCH_VISCOUS_FEEDFORWARD_K`
+
+### 症状：Pitch 极低速微调推不动，或者一过零就轻点头
+
+优先调整：
+
+- 先加 `PITCH_STATIC_FEEDFORWARD_K`
+- 如果已经能推动但过零抖，增 `PITCH_STATIC_SMOOTH_BAND_RAD_S`
+
+### 症状：Pitch 在小陀螺或高速甩头时被明显甩偏
+
+优先调整：
+
+- `PITCH_CENTRIFUGAL_FEEDFORWARD_K`
 
 ### 症状：Yaw 快速启动还是有点肉
 
@@ -214,6 +288,8 @@
 如果后续需要加低频日志，最值得观察的是：
 
 - `pitch_ff_storage`
+- `pitch_ref_rate_filtered`
+- `pitch_ref_acc_filtered`
 - `yaw_ff_storage`
 - `yaw_ref_rate_filtered`
 - `yaw_ref_acc_filtered`

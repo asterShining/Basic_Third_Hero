@@ -111,8 +111,12 @@ void MouseKeySet(void)
     float keyboard_target_vx = (float)keyboard_vx * KEYBOARD_CHASSIS_CMD_SCALE;
     float keyboard_target_vy = (float)keyboard_vy * KEYBOARD_CHASSIS_CMD_SCALE;
 
-    // 这里仅刷新图传在线记忆，作用是让后续周期继续识别新的离线边沿；
-    // 原因是主控切换时需要清掉哪些旧状态，已经在 `HandleControlSourceSwitch` 里按新源统一处理过，这里再重置会破坏刚同步好的按键边沿。
+    // 图传从在线掉到离线的这一拍立即清空键鼠锁存和斜坡尾巴，目的是恢复旧逻辑，防止旧链路的模式和速度残留到回退后的控制源里。
+    // 这样做会让 X 小陀螺在图传断链边沿直接退出，但符合之前“图传一掉就完全丢弃键鼠态”的处理方式。
+    if (last_video_link_online && !video_link_online) {
+        ResetMouseControlLatchState();
+        ResetKeyboardMotionState();
+    }
     last_video_link_online = video_link_online;
 
     if (keyboard_ramp_last_ms != 0u) {
