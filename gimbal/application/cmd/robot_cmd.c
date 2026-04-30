@@ -99,6 +99,10 @@ uint32_t keyboard_turnback_last_frame_serial = 0u;
 uint8_t keyboard_turnback_press_frame_count = 0u;
 // 保存 G 键上一拍电平，目的是UI 整页刷新是一次性请求，不能按住期间反复触发。
 uint8_t keyboard_ui_refresh_last = 0u;
+// 保存 C 键上一拍电平，目的是超电开关采用“按一次切一次”的上升沿语义，避免按住期间每拍翻转。
+uint8_t keyboard_super_cap_toggle_last = 0u;
+// 保存键鼠超电锁存状态，目的是上电、急停和断链后默认关闭，只有用户明确按 C 才允许底盘侧启用超电策略。
+uint8_t keyboard_super_cap_latched = 0u;
 // 保存键盘小陀螺锁存状态，目的是用户要求 X 键按一次切一次，而不是按住才进入。
 uint8_t keyboard_spin_mode_latched = 0u;
 // 保存键盘自由模式锁存状态，目的是用户要求 B 键按一下就持续保持自由模式。
@@ -179,6 +183,21 @@ void LimitGimbalPitchTarget(void)
 }
 
 /**
+ * @brief 将 pitch 速度目标统一限制到速度环可接受范围
+ *
+ */
+void LimitGimbalPitchSpeedRef(void)
+{
+    // pitch 速度目标是本轮新增的瞬态控制量，作用是让旧工程“软件限位 + 速度环”的控制意图进入 gimbal；
+    // 原因是输入源可能同时叠加遥控器和键鼠，必须在 cmd 汇总层先限幅一次，避免异常输入直接把速度环参考推到过大。
+    if (gimbal_cmd_send.pitch_speed_ref > PITCH_SPEED_REF_MAX_DPS) {
+        gimbal_cmd_send.pitch_speed_ref = PITCH_SPEED_REF_MAX_DPS;
+    } else if (gimbal_cmd_send.pitch_speed_ref < -PITCH_SPEED_REF_MAX_DPS) {
+        gimbal_cmd_send.pitch_speed_ref = -PITCH_SPEED_REF_MAX_DPS;
+    }
+}
+
+/**
  * @brief 每周期先把控制量恢复到安全基线
  *
  */
@@ -208,6 +227,8 @@ static void PrepareControlCommandBase(void)
 #endif
 
     gimbal_cmd_send.gimbal_mode = GIMBAL_ZERO_FORCE;
+    // pitch 速度参考只描述本拍操作者输入，不是跨拍目标；每周期先清零，目的是松开遥控器或鼠标后速度环立即回到零速保持。
+    gimbal_cmd_send.pitch_speed_ref = 0.0f;
 
     shoot_cmd_send.shoot_mode = SHOOT_OFF;
     shoot_cmd_send.load_mode = LOAD_STOP;
@@ -412,10 +433,6 @@ void RobotCMDTask(void)
     last_effective_chassis_mode = chassis_cmd_send.chassis_mode;
     last_effective_gimbal_mode = gimbal_cmd_send.gimbal_mode;
 
-    if (chassis_cmd_send.chassis_mode != CHASSIS_ZERO_FORCE) {
-        // 机器人处于有力模式时默认请求超电介入，目的是用户要求平时超电常开，且底盘侧额外功率策略依赖 cap_mode。
-        chassis_cmd_send.cap_mode = SUPER_CAP_ON;
-    }
     if (follow_transition_request_hold_ticks != 0u) {
         // 在请求后的若干拍持续下发底盘跟随接管位，目的是双板命令缓冲只保留最新帧，持续几拍才能避免边沿请求被覆盖丢失。
         chassis_cmd_send.follow_transition_request = 1u;
@@ -425,10 +442,13 @@ void RobotCMDTask(void)
         gimbal_cmd_send.gimbal_mode != GIMBAL_ZERO_FORCE) {
         // 在最终发包前连续几拍把 pitch 目标强制贴回恢复触发时的当前姿态，目的是只有放在所有输入源都处理完之后，才能确保旧锁存目标和本拍人工输入都压不过这次恢复同步。
         gimbal_cmd_send.pitch = pitch_recover_target_deg;
+        // 恢复同步窗口只负责把角度目标贴到当前姿态，不应该同时带入任何操作者速度命令，避免零力恢复或电机复活第一拍被速度环重新推走。
+        gimbal_cmd_send.pitch_speed_ref = 0.0f;
         LimitGimbalPitchTarget();
         // 这里只继续保持“贴当前姿态”覆盖，不再额外夹带 PID 状态清零，目的是把恢复链简化成单一的目标同步语义。
         pitch_target_sync_hold_ticks--;
     }
+    LimitGimbalPitchSpeedRef();
     if (GimbalPitchCalibrationActive() != 0u &&
         gimbal_cmd_send.gimbal_mode != GIMBAL_ZERO_FORCE) {
         // pitch 标定运行期间每拍都把 yaw 目标覆盖回进入标定时锁住的那一拍姿态，目的是即使遥控器摇杆、鼠标或键盘还在产生命令，yaw 轴也不能被带离当前朝向。

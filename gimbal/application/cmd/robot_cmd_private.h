@@ -42,8 +42,14 @@
 #define AUX_DIAL_INPUT_MAX 660.0f
 #define AUX_DIAL_INPUT_DEADZONE 50.0f
 #define MOUSE_YAW_SENSITIVITY_DEG (0.00012f * RAD_2_DEGREE)
-#define MOUSE_PITCH_SENSITIVITY_DEG (0.00002925f * RAD_2_DEGREE)
+#define MOUSE_PITCH_SPEED_PER_COUNT_DPS 200.0f // 鼠标 pitch 直接换算成速度环目标，目的是继续提高小幅鼠标输入对丝杠 pitch 的驱动力，让操作者不必大幅甩鼠标才能获得明显抬头低头速度。
+#define MOUSE_PITCH_SPEED_MAX_DPS 15000.0f // 鼠标 pitch 单独限幅到新的全局速度上限，目的是上一档 13000 仍会被全局 12000 截断，这里同步放开快速输入的有效速度参考。
+#define MOUSE_PITCH_SPEED_SIGN 1.0f // 鼠标 pitch 方向只在输入层配置，目的是方向反了时只改这里，不再改底层电机方向或 IMU 限位语义。
 #define REMOTE_PITCH_SENSITIVITY 0.000375f
+#define ROBOT_CMD_TASK_PERIOD_S 0.005f
+#define VT03_ROCKER_INPUT_MAX 660.0f
+#define VT03_PITCH_SPEED_MAX_DPS 15000.0f // VT03 pitch 满摇杆速度同步抬到全局上限，目的是鼠标已经放开到 15000 档后，图传遥控器抬头低头不再被旧 5500 手感拖慢。
+#define VT03_PITCH_SPEED_SIGN 1.0f
 #define KEYBOARD_CHASSIS_CMD_SCALE 6600.0f
 #define KEYBOARD_CHASSIS_RAMP_UP_PER_SEC 22000.0f
 #define KEYBOARD_CHASSIS_RAMP_DOWN_PER_SEC 30000.0f
@@ -122,6 +128,10 @@ extern uint8_t keyboard_turnback_toggle_last;
 extern uint32_t keyboard_turnback_last_frame_serial;
 extern uint8_t keyboard_turnback_press_frame_count;
 extern uint8_t keyboard_ui_refresh_last;
+// 保存 C 键上一拍电平，目的是超电开关必须只响应一次上升沿，不能在按住期间反复翻转导致 DCDC 请求抖动。
+extern uint8_t keyboard_super_cap_toggle_last;
+// 保存键鼠超电显式开关锁存，目的是超电默认关闭，只有操作者按 C 后才允许 cmd 层把 SUPER_CAP_ON 下发到底盘。
+extern uint8_t keyboard_super_cap_latched;
 extern uint8_t keyboard_spin_mode_latched;
 extern uint8_t keyboard_free_mode_latched;
 extern uint8_t keyboard_turnback_active;
@@ -152,6 +162,7 @@ extern float last_valid_follow_offset_angle;
 
 // 下面这些函数虽然只在 `robot_cmd` 内部使用，但拆分后要跨多个 `.c` 互相调用，目的是保持私有头集中声明，能避免把内部接口混到公共头里。
 void LimitGimbalPitchTarget(void);
+void LimitGimbalPitchSpeedRef(void);
 void ResetMouseFireState(void);
 void ClearKeyboardTurnbackState(void);
 uint32_t GetControlSourceKeyFrameSerial(ControlSource_e source);

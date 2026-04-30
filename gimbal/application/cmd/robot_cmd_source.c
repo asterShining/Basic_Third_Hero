@@ -68,6 +68,8 @@ void ResetMouseControlLatchState(void)
     keyboard_turnback_last_frame_serial = 0u;
     keyboard_turnback_press_frame_count = 0u;
     keyboard_ui_refresh_last = 0u;
+    keyboard_super_cap_toggle_last = 0u;
+    keyboard_super_cap_latched = 0u;
     keyboard_spin_mode_latched = 0u;
     keyboard_free_mode_latched = 0u;
     ClearKeyboardTurnbackState();
@@ -95,6 +97,8 @@ void SyncGimbalTargetToCurrentAttitude(void)
     // 在控制源切换或模式切换时把云台目标同步到当前反馈，目的是避免切源后继续追旧目标导致云台突然跳转。
     gimbal_cmd_send.yaw = gimbal_fetch_data.gimbal_imu_data.YawTotalAngle;
     gimbal_cmd_send.pitch = gimbal_fetch_data.gimbal_imu_data.Pitch;
+    // 姿态同步属于目标重建动作，不是操作者发出的 pitch 运动输入；同步时清零速度参考，目的是避免切源或校零后的第一拍仍把上一条速度命令送进速度环。
+    gimbal_cmd_send.pitch_speed_ref = 0.0f;
     LimitGimbalPitchTarget();
 }
 
@@ -216,6 +220,8 @@ static void SyncMouseKeyEdgeState(ControlSource_e source, const RC_ctrl_t *mouse
     keyboard_turnback_press_frame_count = (turnback_pressed != 0u) ? TURNBACK_TRIGGER_STABLE_FRAMES : 0u;
     // 同步对齐 G 键边沿历史，目的是主控切换时用户若正按着 G，不应该在切源首拍误触发一次 UI 全量刷新。
     keyboard_ui_refresh_last = (uint8_t)((key_bits >> Key_G) & 0x1u);
+    // 同步对齐 C 键边沿历史，目的是主控切换时如果 C 已经按住，不能在新输入源首拍误触发一次超电开关。
+    keyboard_super_cap_toggle_last = (uint8_t)((key_bits >> Key_C) & 0x1u);
     // 同步对齐 X 键边沿历史，目的是主控切换时若用户正按着 X，不应在切源首拍被误判成新的小陀螺切换。
     keyboard_spin_toggle_last = (uint8_t)((key_bits >> Key_X) & 0x1u);
 }

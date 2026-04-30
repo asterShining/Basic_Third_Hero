@@ -34,7 +34,7 @@ void GimbalCali_Start(GimbalCali_Handler_t *handler)
     }
 }
 
-void GimbalCali_Abort(GimbalCali_Handler_t *handler, DMMotorInstance *motor)
+void GimbalCali_Abort(GimbalCali_Handler_t *handler, DJIMotorInstance *motor)
 {
     if (handler == NULL || motor == NULL)
         return;
@@ -43,13 +43,13 @@ void GimbalCali_Abort(GimbalCali_Handler_t *handler, DMMotorInstance *motor)
         return;
 
     // 中止时先把输出力矩拉回零，目的是用户切回零力或链路故障后不能继续保留上一拍的开环力矩命令。
-    DMMotorSetRef(motor, 0.0f);
+    DJIMotorSetRef(motor, 0.0f);
     // 中止时恢复标定前的电机闭环配置，目的是后续重新进入正常云台控制时必须回到原来的角度/速度环语义。
     if (handler->config_backed_up != 0u) {
         // 只有确认已经备份过原配置，才能把闭环参数和参考值写回，目的是防止刚触发标定就被打断时把未初始化内存误写进电机配置。
         memcpy(&motor->motor_settings, &handler->original_setting, sizeof(Motor_Control_Setting_s));
         // 同步把参考值恢复成标定前那一拍的原始目标，目的是恢复有力后不能沿用中止前的标定力矩。
-        DMMotorSetRef(motor, handler->original_ref);
+        DJIMotorSetRef(motor, handler->original_ref);
     }
     if (handler->export_started != 0u) {
         // 只有导出会话真正开始过，才向 RTT 发出 abort 标记，目的是上位机脚本要据此丢弃 `.partial` 文件，但不能被孤立的中止日志误触发。
@@ -69,7 +69,7 @@ void GimbalCali_Abort(GimbalCali_Handler_t *handler, DMMotorInstance *motor)
     LOGWARNING("[PITCH_CALI] Calibration aborted.");
 }
 
-uint8_t GimbalCali_Update(GimbalCali_Handler_t *handler, DMMotorInstance *motor, float current_pitch_deg)
+uint8_t GimbalCali_Update(GimbalCali_Handler_t *handler, DJIMotorInstance *motor, float current_pitch_deg)
 {
     if (handler == NULL || motor == NULL)
         return 0;
@@ -82,7 +82,7 @@ uint8_t GimbalCali_Update(GimbalCali_Handler_t *handler, DMMotorInstance *motor,
     case CALI_STATE_INIT:
         // 1. 备份电机原有配置
         memcpy(&handler->original_setting, &motor->motor_settings, sizeof(Motor_Control_Setting_s));
-        handler->original_ref = motor->pid_ref;
+        handler->original_ref = motor->motor_controller.pid_ref;
         // 一旦备份完成就把标志位置 1，目的是后续无论正常结束还是异常中止，都可以安全地按这份快照恢复原控制配置。
         handler->config_backed_up = 1u;
 
@@ -92,7 +92,7 @@ uint8_t GimbalCali_Update(GimbalCali_Handler_t *handler, DMMotorInstance *motor,
         motor->motor_settings.close_loop_type = 0; // 无闭环 (直接透传Ref到Torque)
         motor->motor_settings.feedforward_flag = 0; // 关闭前馈叠加
 
-        DMMotorEnable(motor);
+        DJIMotorEnable(motor);
 
         // 3. 初始化变量
         handler->current_torque = CALI_TORQUE_START;
@@ -103,14 +103,15 @@ uint8_t GimbalCali_Update(GimbalCali_Handler_t *handler, DMMotorInstance *motor,
         // 4. 向 RTT 发出导出会话开始标记，目的是上位机脚本要据此创建 `.partial` 文件并把后续这一轮数据写进同一份 CSV。
         LOGINFO("PITCH_CALI_EXPORT_BEGIN|axis=pitch|format=csv|version=1");
         // 紧接着输出 CSV 表头协议行，目的是上位机不需要硬编码字段顺序，直接按固件当前导出的列定义落盘即可。
-        LOGINFO("PITCH_CALI_EXPORT_HEADER|Target_Torque(Nm),Angle_Pitch(Deg),Real_Torque(Nm)");
+        // 注意：电机从 DM J4310 切换到 DJI M3508 后，Real_Current 量纲从 Nm 变为电调 raw current
+        LOGINFO("PITCH_CALI_EXPORT_HEADER|Target_Current(raw),Angle_Pitch(Deg),Real_Current(raw)");
 
         handler->state = CALI_STATE_RAMP;
         break;
 
     case CALI_STATE_RAMP:
         // 设置电机目标力矩
-        DMMotorSetRef(motor, handler->current_torque);
+        DJIMotorSetRef(motor, handler->current_torque);
 
         // 进入稳定等待
         handler->timer_cnt = 0;
@@ -119,7 +120,7 @@ uint8_t GimbalCali_Update(GimbalCali_Handler_t *handler, DMMotorInstance *motor,
 
     case CALI_STATE_STABILIZE:
         // 维持力矩，等待云台物理晃动停止
-        DMMotorSetRef(motor, handler->current_torque); // 保持发送
+        DJIMotorSetRef(motor, handler->current_torque); // 保持发送
 
         handler->timer_cnt += CALI_TASK_PERIOD_MS;
         if (handler->timer_cnt >= CALI_STABLE_TIME_MS) {
@@ -131,7 +132,7 @@ uint8_t GimbalCali_Update(GimbalCali_Handler_t *handler, DMMotorInstance *motor,
         break;
 
     case CALI_STATE_RECORD:
-        DMMotorSetRef(motor, handler->current_torque);
+        DJIMotorSetRef(motor, handler->current_torque);
 
         // 采集数据并滤波 (利用 user_lib 中的 AverageFilter)
         // 注意：这里为了简单，每次都计算一次平均值，实际是取最后一次的窗口平均
@@ -146,7 +147,8 @@ uint8_t GimbalCali_Update(GimbalCali_Handler_t *handler, DMMotorInstance *motor,
 
             // 为了验证控制效果，也可以打印电机实际反馈的力矩(motor->measure.torque)
             char log_buff_real_t[20];
-            Float2Str(log_buff_real_t, motor->measure.torque);
+            // DJI 电机反馈的是 raw current (int16_t)，单位为电调原始电流，不再是 Nm
+            Float2Str(log_buff_real_t, (float)motor->measure.real_current);
 
             // 这里按“协议前缀 + 原始 CSV 行”输出当前样本，目的是上位机脚本既能稳定识别导出数据，又能把后半段内容原样写进 CSV 文件。
             LOGINFO("PITCH_CALI_EXPORT_ROW|%s,%s,%s", log_buff_t, log_buff_a, log_buff_real_t);
@@ -171,13 +173,13 @@ uint8_t GimbalCali_Update(GimbalCali_Handler_t *handler, DMMotorInstance *motor,
 
     case CALI_STATE_DONE:
         // 1. 力矩归零
-        DMMotorSetRef(motor, 0.0f);
+        DJIMotorSetRef(motor, 0.0f);
 
         // 2. 恢复电机原有配置
         if (handler->config_backed_up != 0u) {
             // 只有在本轮确实完成过配置备份时才恢复原闭环，目的是让“刚启动就被打断”的异常路径和正常结束路径共享同一份安全保护。
             memcpy(&motor->motor_settings, &handler->original_setting, sizeof(Motor_Control_Setting_s));
-            DMMotorSetRef(motor, handler->original_ref);
+            DJIMotorSetRef(motor, handler->original_ref);
         }
 
         if (handler->export_started != 0u) {

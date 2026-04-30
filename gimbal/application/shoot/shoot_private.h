@@ -23,7 +23,7 @@ typedef struct {
     loader_mode_e saved_mode;
 } ShootStallHandler_s;
 
-// 单发状态机运行时数据只在 shoot 模块内部共享，目的是首发、补发、回速和锁角都依赖同一份跨拍状态，拆文件后仍必须共用。
+// 单发状态机运行时数据只在 shoot 模块内部共享，目的是固定角度送弹、掉速计数和锁角保持都依赖同一份跨拍状态，拆文件后仍必须共用。
 typedef struct {
     SingleFireState_e state;
     float baseline_speed;
@@ -39,11 +39,12 @@ typedef struct {
     uint8_t retry_count;
     uint8_t inner_dip_stable_count;
     uint8_t recover_stable_count;
+    uint8_t shot_counted; // 本次固定 80 度送弹事务是否已经由摩擦轮掉速计入 fire_count，目的是把“计数”和“拨盘停止”彻底解耦并防止持续掉速重复计数。
     uint16_t fire_count;
     uint16_t feed_timeout_count;
 } SingleFireRuntime_s;
 
-// 单发控制的掉速基线由控制链单独维护，目的是真正的锁角逻辑不能依赖调试模块内部存储，而要有自己可控的一份数据。
+// 单发控制的掉速基线由控制链单独维护，目的是出弹计数不能依赖调试模块内部存储，而要有自己可控的一份同拍数据。
 typedef struct {
     float inner_left_baseline;
     float inner_right_baseline;
@@ -77,6 +78,7 @@ extern float ff_inner_down;
 extern float ff_outer_left;
 extern float ff_outer_right;
 extern float ff_outer_down;
+extern float ff_loader;
 extern DJIMotorInstance *loader;
 extern DJIMotorInstance *friction_inner_down;
 extern DJIMotorInstance *friction_inner_left;
@@ -108,6 +110,7 @@ void UpdateFrictionTargetAbs(float inner_left_ref, float inner_right_ref, float 
 void LoaderSetSpeedRef(float speed_ref);
 void LoaderSetAngleRef(float angle_ref);
 void SetFrictionFeedforward(float inner_ff, float outer_ff);
+void UpdateLoaderFeedforward(void);
 void SetMotorEnableIfReady(DJIMotorInstance *motor, uint8_t enable);
 uint8_t IsAllFrictionStableAgainstTarget(float threshold);
 float GetInnerFrictionAvgSpeed(void);

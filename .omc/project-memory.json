@@ -1,0 +1,374 @@
+{
+  "version": "1.0.0",
+  "lastScanned": 1777554786957,
+  "projectRoot": "/home/aster/Documents/robomaster/Basic_Third_Hero",
+  "techStack": {
+    "languages": [],
+    "frameworks": [],
+    "packageManager": null,
+    "runtime": null
+  },
+  "build": {
+    "buildCommand": null,
+    "testCommand": null,
+    "lintCommand": null,
+    "devCommand": null,
+    "scripts": {}
+  },
+  "conventions": {
+    "namingStyle": null,
+    "importStyle": null,
+    "testPattern": null,
+    "fileOrganization": null
+  },
+  "structure": {
+    "isMonorepo": false,
+    "workspaces": [],
+    "mainDirectories": [],
+    "gitBranches": {
+      "defaultBranch": "motor_1",
+      "branchingStrategy": null
+    }
+  },
+  "customNotes": [],
+  "directoryMap": {
+    "chassis": {
+      "path": "chassis",
+      "purpose": null,
+      "fileCount": 12,
+      "lastAccessed": 1777554786954,
+      "keyFiles": [
+        "CMakeLists.txt",
+        "CMakePresets.json",
+        "STM32F407XX_FLASH.ld",
+        "basic_framework.ioc",
+        "jlink.sh"
+      ]
+    },
+    "gimbal": {
+      "path": "gimbal",
+      "purpose": null,
+      "fileCount": 13,
+      "lastAccessed": 1777554786956,
+      "keyFiles": [
+        "CMakeLists.txt",
+        "CMakePresets.json",
+        "STM32F407XX_FLASH.ld",
+        "basic_framework.ioc",
+        "jlink.sh"
+      ]
+    },
+    "tools": {
+      "path": "tools",
+      "purpose": null,
+      "fileCount": 1,
+      "lastAccessed": 1777554786956,
+      "keyFiles": [
+        "export_pitch_cali_from_rtt.py"
+      ]
+    }
+  },
+  "hotPaths": [
+    {
+      "path": "gimbal",
+      "accessCount": 23,
+      "lastAccessed": 1777533001877,
+      "type": "directory"
+    },
+    {
+      "path": "",
+      "accessCount": 18,
+      "lastAccessed": 1777532126455,
+      "type": "directory"
+    },
+    {
+      "path": "gimbal/application/gimbal/gimbal_feedforward.c",
+      "accessCount": 7,
+      "lastAccessed": 1777452038677,
+      "type": "file"
+    },
+    {
+      "path": "gimbal/modules/motor/DJImotor/dji_motor.c",
+      "accessCount": 7,
+      "lastAccessed": 1777533405568,
+      "type": "file"
+    },
+    {
+      "path": "gimbal/application/gimbal/gimbal.c",
+      "accessCount": 6,
+      "lastAccessed": 1777450501148,
+      "type": "file"
+    },
+    {
+      "path": "gimbal/modules/motor/motor_def.h",
+      "accessCount": 6,
+      "lastAccessed": 1777533405607,
+      "type": "file"
+    },
+    {
+      "path": "gimbal/application/gimbal/gimbal_private.h",
+      "accessCount": 5,
+      "lastAccessed": 1777451963312,
+      "type": "file"
+    },
+    {
+      "path": "gimbal/application/robot_def.h",
+      "accessCount": 5,
+      "lastAccessed": 1777531728633,
+      "type": "file"
+    },
+    {
+      "path": "gimbal/modules/motor/DJImotor/dji_motor.h",
+      "accessCount": 4,
+      "lastAccessed": 1777531728727,
+      "type": "file"
+    },
+    {
+      "path": "gimbal/modules/motor/DMmotor/dmmotor.h",
+      "accessCount": 4,
+      "lastAccessed": 1777531728789,
+      "type": "file"
+    },
+    {
+      "path": "gimbal/modules/motor/motor_task.c",
+      "accessCount": 4,
+      "lastAccessed": 1777531735127,
+      "type": "file"
+    },
+    {
+      "path": "gimbal/modules/motor/DMmotor/dmmotor.c",
+      "accessCount": 4,
+      "lastAccessed": 1777531748659,
+      "type": "file"
+    },
+    {
+      "path": "chassis/application",
+      "accessCount": 3,
+      "lastAccessed": 1777445872813,
+      "type": "directory"
+    },
+    {
+      "path": "gimbal/application/gimbal/gimbal.h",
+      "accessCount": 3,
+      "lastAccessed": 1777446308045,
+      "type": "file"
+    },
+    {
+      "path": "gimbal/modules/motor/motor_task.h",
+      "accessCount": 3,
+      "lastAccessed": 1777531728848,
+      "type": "file"
+    },
+    {
+      "path": "gimbal/application/robot.c",
+      "accessCount": 3,
+      "lastAccessed": 1777531752887,
+      "type": "file"
+    },
+    {
+      "path": "chassis/application/robot_def.h",
+      "accessCount": 2,
+      "lastAccessed": 1777445860977,
+      "type": "file"
+    },
+    {
+      "path": "chassis/modules/motor/DJImotor/dji_motor.h",
+      "accessCount": 2,
+      "lastAccessed": 1777445884640,
+      "type": "file"
+    },
+    {
+      "path": "chassis/modules/motor/DJImotor/dji_motor.c",
+      "accessCount": 2,
+      "lastAccessed": 1777445884748,
+      "type": "file"
+    },
+    {
+      "path": "chassis/modules/motor/motor_task.c",
+      "accessCount": 2,
+      "lastAccessed": 1777445928708,
+      "type": "file"
+    },
+    {
+      "path": "gimbal/bsp",
+      "accessCount": 2,
+      "lastAccessed": 1777445941146,
+      "type": "directory"
+    },
+    {
+      "path": "chassis",
+      "accessCount": 2,
+      "lastAccessed": 1777445965946,
+      "type": "directory"
+    },
+    {
+      "path": "gimbal/application/gimbal/gimbal_runtime.c",
+      "accessCount": 2,
+      "lastAccessed": 1777446146974,
+      "type": "file"
+    },
+    {
+      "path": "gimbal/modules/algorithm/controller.h",
+      "accessCount": 2,
+      "lastAccessed": 1777446265795,
+      "type": "file"
+    },
+    {
+      "path": "chassis/application/chassis/chassis.c",
+      "accessCount": 2,
+      "lastAccessed": 1777555204852,
+      "type": "file"
+    },
+    {
+      "path": "CLAUDE.md",
+      "accessCount": 2,
+      "lastAccessed": 1777531728572,
+      "type": "file"
+    },
+    {
+      "path": "GEMINI.md",
+      "accessCount": 1,
+      "lastAccessed": 1777445390602,
+      "type": "file"
+    },
+    {
+      "path": ".clang-format",
+      "accessCount": 1,
+      "lastAccessed": 1777445390647,
+      "type": "file"
+    },
+    {
+      "path": "AGENTS.md",
+      "accessCount": 1,
+      "lastAccessed": 1777445390728,
+      "type": "file"
+    },
+    {
+      "path": "chassis/CMakeLists.txt",
+      "accessCount": 1,
+      "lastAccessed": 1777445419255,
+      "type": "file"
+    },
+    {
+      "path": "chassis/CMakePresets.json",
+      "accessCount": 1,
+      "lastAccessed": 1777445419306,
+      "type": "file"
+    },
+    {
+      "path": "gimbal/CMakePresets.json",
+      "accessCount": 1,
+      "lastAccessed": 1777445419332,
+      "type": "file"
+    },
+    {
+      "path": "gimbal/CMakeLists.txt",
+      "accessCount": 1,
+      "lastAccessed": 1777445419377,
+      "type": "file"
+    },
+    {
+      "path": "chassis/cmake/gcc-arm-none-eabi.cmake",
+      "accessCount": 1,
+      "lastAccessed": 1777445443474,
+      "type": "file"
+    },
+    {
+      "path": "chassis/application/robot.h",
+      "accessCount": 1,
+      "lastAccessed": 1777445458362,
+      "type": "file"
+    },
+    {
+      "path": "chassis/application/robot.c",
+      "accessCount": 1,
+      "lastAccessed": 1777445458495,
+      "type": "file"
+    },
+    {
+      "path": "chassis/run.sh",
+      "accessCount": 1,
+      "lastAccessed": 1777445474489,
+      "type": "file"
+    },
+    {
+      "path": "chassis/jlink.sh",
+      "accessCount": 1,
+      "lastAccessed": 1777445474578,
+      "type": "file"
+    },
+    {
+      "path": "chassis/application/APP层应用编写指引.md",
+      "accessCount": 1,
+      "lastAccessed": 1777445491913,
+      "type": "file"
+    },
+    {
+      "path": "chassis/application/robot_task.h",
+      "accessCount": 1,
+      "lastAccessed": 1777445861195,
+      "type": "file"
+    },
+    {
+      "path": "gimbal/modules/motor/HTmotor/HT04.h",
+      "accessCount": 1,
+      "lastAccessed": 1777445879871,
+      "type": "file"
+    },
+    {
+      "path": "chassis/modules/motor/motor_def.h",
+      "accessCount": 1,
+      "lastAccessed": 1777445884701,
+      "type": "file"
+    },
+    {
+      "path": "chassis/bsp/can/bsp_can.c",
+      "accessCount": 1,
+      "lastAccessed": 1777445884866,
+      "type": "file"
+    },
+    {
+      "path": "chassis/application/chassis/chassis_private.h",
+      "accessCount": 1,
+      "lastAccessed": 1777445908094,
+      "type": "file"
+    },
+    {
+      "path": "chassis/bsp/can/bsp_can.h",
+      "accessCount": 1,
+      "lastAccessed": 1777445908187,
+      "type": "file"
+    },
+    {
+      "path": "chassis/application/chassis/island_action.c",
+      "accessCount": 1,
+      "lastAccessed": 1777445919375,
+      "type": "file"
+    },
+    {
+      "path": "chassis/application/chassis/chassis.h",
+      "accessCount": 1,
+      "lastAccessed": 1777445919458,
+      "type": "file"
+    },
+    {
+      "path": "gimbal/bsp/can/bsp_can.h",
+      "accessCount": 1,
+      "lastAccessed": 1777445953169,
+      "type": "file"
+    },
+    {
+      "path": "chassis/application/chassis/chassis_motion.c",
+      "accessCount": 1,
+      "lastAccessed": 1777445953229,
+      "type": "file"
+    },
+    {
+      "path": "gimbal/modules/daemon/daemon.h",
+      "accessCount": 1,
+      "lastAccessed": 1777445965794,
+      "type": "file"
+    }
+  ],
+  "userDirectives": []
+}

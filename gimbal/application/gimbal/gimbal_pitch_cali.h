@@ -1,7 +1,7 @@
 #ifndef GIMBAL_PITCH_CALI_H
 #define GIMBAL_PITCH_CALI_H
 
-#include "dmmotor.h"
+#include "dji_motor.h"
 #include "user_lib.h"
 #include "bsp_log.h"
 
@@ -68,7 +68,7 @@ void GimbalCali_Start(GimbalCali_Handler_t *handler);
  * @param handler 句柄指针
  * @param motor Pitch电机实例
  */
-void GimbalCali_Abort(GimbalCali_Handler_t *handler, DMMotorInstance *motor);
+void GimbalCali_Abort(GimbalCali_Handler_t *handler, DJIMotorInstance *motor);
 
 /**
  * @brief 标定状态机更新函数 (需在GimbalTask循环中持续调用)
@@ -77,6 +77,6 @@ void GimbalCali_Abort(GimbalCali_Handler_t *handler, DMMotorInstance *motor);
  * @param current_pitch_deg 当前IMU的物理 Pitch 角度(单位:度)
  * @return uint8_t 1: 正在标定中(屏蔽原控制逻辑) 0: 未标定(正常运行)
  */
-uint8_t GimbalCali_Update(GimbalCali_Handler_t *handler, DMMotorInstance *motor, float current_pitch_deg);
+uint8_t GimbalCali_Update(GimbalCali_Handler_t *handler, DJIMotorInstance *motor, float current_pitch_deg);
 
 #endif // GIMBAL_PITCH_CALI_H

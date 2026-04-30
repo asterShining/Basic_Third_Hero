@@ -89,7 +89,7 @@
 // 云台 IMU、电机与命令反馈缓存会在初始化、主任务和拆分 helper 之间共同读写，目的是拆成多个编译单元后必须继续共用同一份运行时状态。
 extern attitude_t *gimba_IMU_data;
 extern DMMotorInstance *yaw_motor;
-extern DMMotorInstance *pitch_motor;
+extern DJIMotorInstance *pitch_motor;
 extern Gimbal_Upload_Data_s gimbal_feedback_data;
 extern Gimbal_Ctrl_Cmd_s gimbal_cmd_recv;
 

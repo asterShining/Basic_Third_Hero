@@ -45,6 +45,7 @@ static void ApplyRemoteGimbalStickControl(float rocker_lx, float rocker_ly, int1
     float yaw_sensitivity = 0.001f;
     float pitch_sensitivity = REMOTE_PITCH_SENSITIVITY;
     float yaw_gyro_dps = gimbal_fetch_data.gimbal_imu_data.Gyro[2] * RAD_2_DEGREE;
+    float pitch_delta_deg;
 
     if (dial_input > 100) {
         yaw_sensitivity *= 0.3f;
@@ -53,7 +54,10 @@ static void ApplyRemoteGimbalStickControl(float rocker_lx, float rocker_ly, int1
 
     // 统一复用当前积分式云台手感，目的是本轮只恢复 VT03 主控，不应该顺带重调云台控制参数。
     gimbal_cmd_send.yaw -= yaw_sensitivity * rocker_lx;
-    gimbal_cmd_send.pitch += pitch_sensitivity * rocker_ly;
+    // pitch 角度目标继续累计，目的是恢复同步、UI 和上层目标语义都仍然依赖这条绝对角链路；同时把同一份增量换算成速度目标，供 gimbal 侧速度环直接执行。
+    pitch_delta_deg = pitch_sensitivity * rocker_ly;
+    gimbal_cmd_send.pitch += pitch_delta_deg;
+    gimbal_cmd_send.pitch_speed_ref += pitch_delta_deg / ROBOT_CMD_TASK_PERIOD_S;
 
     // 仅在低角速度且非小陀螺工况下，才把 yaw 目标缓慢拉向当前反馈，目的是原逻辑在小陀螺时会把真实扰动当成“新目标”写回去，表现成云台越转越歪。
     if (rocker_lx == 0.0f &&
@@ -66,6 +70,48 @@ static void ApplyRemoteGimbalStickControl(float rocker_lx, float rocker_ly, int1
     }
 
     LimitGimbalPitchTarget();
+    LimitGimbalPitchSpeedRef();
+}
+
+/**
+ * @brief 按 VT03 摇杆直接生成 pitch 速度环目标
+ *
+ */
+static void ApplyVT03GimbalStickControl(float rocker_lx, float rocker_ly)
+{
+    float yaw_sensitivity = 0.001f;
+    float yaw_gyro_dps = gimbal_fetch_data.gimbal_imu_data.Gyro[2] * RAD_2_DEGREE;
+    float pitch_speed_ref;
+    float pitch_delta_deg;
+
+    // VT03 的 yaw 仍沿用当前积分式角度目标，目的是本次只修正 pitch 速度环手感，不额外改变 yaw 的跟随和小陀螺行为。
+    gimbal_cmd_send.yaw -= yaw_sensitivity * rocker_lx;
+
+    // VT03 的 pitch 摇杆直接映射成速度环目标，目的是避免旧的“极小角度增量再除周期”导致满摇杆速度只有几十 deg/s，实车表现像没有响应。
+    pitch_speed_ref = VT03_PITCH_SPEED_SIGN * rocker_ly * VT03_PITCH_SPEED_MAX_DPS / VT03_ROCKER_INPUT_MAX;
+    if (pitch_speed_ref > VT03_PITCH_SPEED_MAX_DPS) {
+        pitch_speed_ref = VT03_PITCH_SPEED_MAX_DPS;
+    } else if (pitch_speed_ref < -VT03_PITCH_SPEED_MAX_DPS) {
+        pitch_speed_ref = -VT03_PITCH_SPEED_MAX_DPS;
+    }
+
+    // 角度目标在速度环模式下不再参与 pitch 电机 PID，但仍要按同一份速度输入滚动更新，目的是恢复同步和调试观察继续拥有一个连贯的上层 pitch 目标。
+    pitch_delta_deg = pitch_speed_ref * ROBOT_CMD_TASK_PERIOD_S;
+    gimbal_cmd_send.pitch += pitch_delta_deg;
+    gimbal_cmd_send.pitch_speed_ref += pitch_speed_ref;
+
+    // yaw 静止锁定策略继续复用遥控器分支，目的是 VT03 只改变 pitch 的速度目标生成方式，不把 yaw 零漂处理分叉成第二套逻辑。
+    if (rocker_lx == 0.0f &&
+        chassis_cmd_send.chassis_mode != CHASSIS_ROTATE &&
+        chassis_cmd_send.chassis_mode != CHASSIS_FOLLOW_GIMBAL_YAW &&
+        yaw_gyro_dps < YAW_DRIFT_LOCK_GYRO_TH_DPS &&
+        yaw_gyro_dps > -YAW_DRIFT_LOCK_GYRO_TH_DPS) {
+        gimbal_cmd_send.yaw = YAW_DRIFT_LOCK_COEF * gimbal_cmd_send.yaw +
+                              (1.0f - YAW_DRIFT_LOCK_COEF) * gimbal_fetch_data.gimbal_imu_data.YawTotalAngle;
+    }
+
+    LimitGimbalPitchTarget();
+    LimitGimbalPitchSpeedRef();
 }
 
 /**
@@ -429,8 +475,8 @@ static void RemoteControlSetVT03(void)
     vt03_fn_right_last = video_link_remote_state->fn_right_button_down;
     pitch_cali_active = GimbalPitchCalibrationActive();
     if (pitch_cali_active == 0u) {
-        // 只有 pitch 标定空闲时才允许遥控器继续改写云台目标，目的是标定运行期间要把 pitch 控制权完整交给云台内部状态机。
-        ApplyRemoteGimbalStickControl(rocker_lx, rocker_ly, video_link_data[TEMP].rc.dial);
+        // VT03 pitch 摇杆直接下发速度环目标，目的是让抬头/低头手感与“IMU 软件限位 + DJI 速度环”的底层控制方式一致。
+        ApplyVT03GimbalStickControl(rocker_lx, rocker_ly);
     } else {
         // 标定期间把 yaw 目标即时拉回进入标定时锁住的姿态，目的是这一层先拦住 VT03 摇杆输入，避免同拍里先被改走再等主循环末尾纠正。
         gimbal_cmd_send.yaw = pitch_cali_yaw_lock_target_deg;

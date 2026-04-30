@@ -379,3 +379,36 @@ void ValidateAndSaveDipSnapshot(void)
 {
     ShootDebug_ValidateAndSave();
 }
+
+/**
+ * @brief 根据拨弹盘位置误差计算线性速度前馈
+ *        只在 SF_FEEDING 状态（固定 80 度位置环送弹）期间输出有效前馈，
+ *        其余状态清零以避免锁角保持时前馈干扰 PID 稳态。
+ *        前馈注入速度环参考值入口（SPEED_FEEDFORWARD），速度环能感知
+ *        这个额外速度需求并配合输出电流，不会出现与 PID 对抗的问题。
+ */
+void UpdateLoaderFeedforward(void)
+{
+    float angle_error;
+
+    // 非送弹状态下前馈清零，避免锁角或空闲时前馈干扰 PID 稳态保持
+    if (single_fire.state != SF_FEEDING) {
+        ff_loader = 0.0f;
+        return;
+    }
+
+    // 位置误差 = 目标角度 - 当前角度，正值代表拨盘还需要正向推进
+    angle_error = single_fire.rush_target_angle - loader->measure.total_angle;
+
+    // 负误差表示已经超调到位，不应反向施加前馈，直接清零
+    if (angle_error < 0.0f)
+        angle_error = 0.0f;
+
+    // 线性映射：前馈速度 (deg/s) = 增益 (1/s) × 位置误差 (deg)，
+    // 误差越大速度补偿越大，到位时自然衰减为零
+    ff_loader = LOADER_FF_GAIN * angle_error;
+
+    // 限幅保护：防止冲刺起步时大误差导致速度参考值跳变过猛
+    if (ff_loader > LOADER_FF_MAX_SPEED)
+        ff_loader = LOADER_FF_MAX_SPEED;
+}

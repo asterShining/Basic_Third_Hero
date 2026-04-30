@@ -1,15 +1,14 @@
 #include "gimbal_private.h"
+#include "motor_def.h"
 
 // 云台 IMU、电机和命令反馈缓存会在初始化、主任务和拆分 helper 间共同使用，目的是拆成多个编译单元后仍必须围绕同一份状态协同工作。
 attitude_t *gimba_IMU_data = NULL;
 DMMotorInstance *yaw_motor = NULL;
-DMMotorInstance *pitch_motor = NULL;
+DJIMotorInstance *pitch_motor = NULL;
 static Publisher_t *gimbal_pub = NULL; // 云台应用消息发布者，目的是反馈只在入口文件统一推送，不需要对外暴露。
 static Subscriber_t *gimbal_sub = NULL; // cmd 控制消息订阅者，目的是主任务入口负责消费，不需要跨文件共享。
 Gimbal_Upload_Data_s gimbal_feedback_data; // 回传给 cmd 的云台状态，目的是主任务末尾统一打包和发送反馈。
-Gimbal_Ctrl_Cmd_s gimbal_cmd_recv; // 来自 cmd 的控制信息，目的是主任务和前馈 helper 都要读取同一拍控制目标。
-static GimbalCali_Handler_t pitch_cali_handler; // 标定句柄暂时继续保留原位置，目的是这轮只做文件拆分，不顺手改动历史标定链路。
-static BMI088Instance *bmi088; // 云台 IMU 调试句柄继续保留原位置，目的是不扩散未使用调试接口，避免超出本轮拆分范围。
+Gimbal_Ctrl_Cmd_s gimbal_cmd_recv; // 来自 cmd 的控制信息，目的是主任务和前馈 helper 都要读取同一拍控制目
 
 /**
  * @brief 初始化云台
@@ -68,52 +67,37 @@ void GimbalInit(void)
         .motor_type = J8006,
     };
 
-    // 配置 pitch 电机的角度环和速度环，目的是pitch 同样走 IMU 外环控制，并保留当前已经验证过的负向速度环参数。
     pitch_config = (Motor_Init_Config_s){
         .can_init_config = {
             .can_handle = &hcan1,
-            .tx_id = 0x14,
-            .rx_id = 0x15,
+            .tx_id = 6,
         },
         .controller_param_init_config = {
-            .angle_PID = {
-                .Kp = 1.32,
-                .Ki = 0.0,
-                .Kd = 0.03,
-                .DeadBand = 0.0,
-                .Improve = PID_Trapezoid_Intergral | PID_Integral_Limit | PID_Derivative_On_Measurement,
-                .IntegralLimit = 100,
-                .MaxOut = 19,
-            },
             .speed_PID = {
-                .Kp = 2.7,
-                .Ki = 1.81,
+                // pitch 只保留速度环，目的是复刻旧工程“输入直接生成速度目标，速度 PID 输出 C620 电流”的链路；角度安全边界放到 GimbalTask 里用 IMU 实际角兜底处理。
+                .Kp = 5.2,
+                .Ki = 1.2,
                 .Kd = 0,
                 .Improve = PID_Trapezoid_Intergral | PID_Integral_Limit | PID_Derivative_On_Measurement,
-                .IntegralLimit = 5,
-                .MaxOut = 19,
+                .IntegralLimit = 6000,
+                .MaxOut = 16000,
             },
-            .other_angle_feedback_ptr = &gimba_IMU_data->Pitch,
-            .other_speed_feedback_ptr = &gimba_IMU_data->Gyro[1],
         },
         .controller_setting_init_config = {
-            .angle_feedback_source = OTHER_FEED,
-            .speed_feedback_source = OTHER_FEED,
-            .outer_loop_type = ANGLE_LOOP,
-            .close_loop_type = SPEED_LOOP | ANGLE_LOOP,
-            .motor_reverse_flag = MOTOR_DIRECTION_NORMAL,
+            .angle_feedback_source = MOTOR_FEED,
+            // 速度环使用电机自身 speed_aps 反馈，目的是保持控制量和反馈量都在 degree/s 量纲内，避免把 IMU Gyro 的 rad/s 与 DJI 速度环混用。
+            .speed_feedback_source = MOTOR_FEED,
+            .outer_loop_type = SPEED_LOOP,
+            .close_loop_type = SPEED_LOOP,
+            .motor_reverse_flag = MOTOR_DIRECTION_REVERSE,
+            .feedforward_flag = FEEDFORWARD_NONE,
         },
-        .motor_type = J4310,
+        .motor_type = M3508,
     };
 
-    // 初始化 yaw 和 pitch 电机实例，目的是云台当前所有控制逻辑最终都围绕这两个 DM 电机展开。
+    // 初始化 yaw 和 pitch 电机实例，目的是 yaw 继续使用 DM 电机链路，pitch 切换到 DJI 3508 链路但上层目标仍由同一套云台任务下发。
     yaw_motor = DMMotorInit(&yaw_config);
-    pitch_motor = DMMotorInit(&pitch_config);
-    // if (pitch_motor != NULL) {
-    //     // 给 pitch 电机立即配置机械限位，目的是防止后续任何模式下目标角异常时直接撞限位。
-    //     pitch_motor->pos_limit_max = PITCH_MECH_LIMIT_MAX;
-    //     pitch_motor->pos_limit_min = PITCH_MECH_LIMIT_MIN;
-    // }
+    pitch_motor = DJIMotorInit(&pitch_config);
 
     // 注册云台反馈发布者和命令订阅者，目的是当前 cmd 与 gimbal 仍通过消息中心通信，拆文件不改变数据流入口。
     gimbal_pub = PubRegister("gimbal_feed", sizeof(Gimbal_Upload_Data_s));
@@ -121,9 +105,6 @@ void GimbalInit(void)
 
     // 在云台初始化阶段统一拉起图传固定电机，目的是该电机生命周期从属于云台模块，且必须在 CAN 就绪后初始化。
     VideoLinkMotorInit();
-
-    // 在云台初始化时同步把 pitch 标定状态机归零，目的是 VT03 新入口会直接复用这份句柄，不能继续保留“声明了但未初始化”的历史状态。
-    GimbalCali_Init(&pitch_cali_handler);
 }
 
 /**
@@ -132,13 +113,8 @@ void GimbalInit(void)
  */
 void GimbalStartPitchCalibration(void)
 {
-    // 只有在 pitch 电机实例已经就绪时才允许启动标定，目的是状态机第一步就要接管该电机，空指针场景下不能假装启动成功。
-    if (pitch_motor == NULL) {
-        return;
-    }
-
-    // 这里统一由云台模块内部转发启动请求，目的是外部模块不需要知道标定句柄放在哪里，也不应该直接改它的状态。
-    GimbalCali_Start(&pitch_cali_handler);
+    // Pitch 已经临时切换为 DJI 3508，旧标定状态机依赖 DM MIT 开环力矩与 DM 扭矩反馈，继续启动会把 3508 误当成 DM 力矩源使用，因此在 3508 迁移阶段先保持入口无动作。
+    return;
 }
 
 /**
@@ -148,8 +124,8 @@ void GimbalStartPitchCalibration(void)
  */
 uint8_t GimbalPitchCalibrationActive(void)
 {
-    // 只要状态机不在空闲态，就视为 pitch 标定仍在占用控制权，目的是 `robot_cmd` 需要用这一位统一屏蔽重复触发和摇杆覆写。
-    return (uint8_t)(pitch_cali_handler.state != CALI_STATE_IDLE);
+    // Pitch 3508 当前没有接入新的 DJI 标定流程，旧 DM 标定链被暂停后应始终向上层报告空闲，避免 cmd 层误以为 pitch 控制权被占用。
+    return 0u;
 }
 
 /* 机器人云台控制核心任务,后续考虑只保留 IMU 控制,不再需要电机的反馈 */
@@ -164,9 +140,9 @@ void GimbalTask(void)
     uint8_t yaw_motor_online_changed = 0u;
     uint8_t pitch_motor_online_changed = 0u;
     uint8_t gimbal_mode_changed = 0u;
-    uint8_t pitch_cali_active = 0u;
-    float pitch_ref;
+    float pitch_speed_ref;
     float current_pitch_deg;
+    float pitch_limit_distance_deg;
 
     // 先获取本拍最新云台控制命令，目的是后续在线状态边沿处理、模式切换和前馈计算都必须基于同一拍目标执行。
     if (gimbal_sub != NULL) {
@@ -180,7 +156,7 @@ void GimbalTask(void)
     if (yaw_motor != NULL && DMMotorIsOnline(yaw_motor) != 0u) {
         yaw_motor_online = 1u;
     }
-    if (pitch_motor != NULL && DMMotorIsOnline(pitch_motor) != 0u) {
+    if (pitch_motor != NULL && pitch_motor->daemon != NULL && DaemonIsOnline(pitch_motor->daemon) != 0u) {
         pitch_motor_online = 1u;
     }
 
@@ -195,10 +171,37 @@ void GimbalTask(void)
         last_pitch_motor_online = pitch_motor_online;
     }
 
-    // 先锁存本拍最终要给 pitch 的参考角，目的是当前恢复链已经简化成单纯的目标同步，这里不再额外夹带任何 PID 状态操作。
-    pitch_ref = gimbal_cmd_recv.pitch;
-    // 在模式切换前先读取一次标定占用位，目的是本拍若已经进入 pitch 标定，后面的模式 switch 就必须跳过常规 pitch 目标下发，避免两条控制链互相覆盖。
-    pitch_cali_active = GimbalPitchCalibrationActive();
+    // 速度环模式下 pitch 的安全边界必须看 IMU 实际角，而不是只看 cmd 的角度目标；这样即使上层目标或输入源异常，也不能在撞限位方向继续给速度。
+    current_pitch_deg = (gimba_IMU_data != NULL) ? gimba_IMU_data->Pitch : 0.0f;
+    pitch_speed_ref = gimbal_cmd_recv.pitch_speed_ref;
+    if (pitch_speed_ref > PITCH_SPEED_REF_MAX_DPS) {
+        // cmd 层已经做过速度限幅，但 gimbal 是离电机最近的最后一道保护；这里再次夹紧上限，避免异常发布者把速度参考直接推满。
+        pitch_speed_ref = PITCH_SPEED_REF_MAX_DPS;
+    } else if (pitch_speed_ref < -PITCH_SPEED_REF_MAX_DPS) {
+        // 下压方向同样在底层兜底，目的是无论上层来源如何变化，最终进入 C620 的速度参考都不能越过统一配置。
+        pitch_speed_ref = -PITCH_SPEED_REF_MAX_DPS;
+    }
+    if (pitch_speed_ref > 0.0f) {
+        // 上抬方向只根据距离上限的剩余角度做处理，目的是接近上限时提前把高速命令平滑收下来，同时不影响操作者反向下压退出限位。
+        pitch_limit_distance_deg = PITCH_MAX_ANGLE - current_pitch_deg;
+        if (pitch_limit_distance_deg <= 0.0f) {
+            // 实际 pitch 已到或越过上抬软件限位时，只禁止继续往上抬的速度命令，反向速度仍放行，目的是不会把机构卡死在限位边界。
+            pitch_speed_ref = 0.0f;
+        } else if (pitch_limit_distance_deg < PITCH_LIMIT_RAMP_ZONE_DEG) {
+            // 距离上限不足 3 度时按剩余距离线性缩小速度参考，目的是让速度环越接近边界越慢，降低高速撞限位和突兀切零的风险。
+            pitch_speed_ref *= pitch_limit_distance_deg / PITCH_LIMIT_RAMP_ZONE_DEG;
+        }
+    } else if (pitch_speed_ref < 0.0f) {
+        // 下压方向使用同一套剩余角度斜坡，目的是上下限手感一致，并且只削减继续压向下限的速度。
+        pitch_limit_distance_deg = current_pitch_deg - PITCH_MIN_ANGLE;
+        if (pitch_limit_distance_deg <= 0.0f) {
+            // 实际 pitch 已到或越过下压软件限位时，只禁止继续下压的速度命令，反向脱离限位必须保留，避免操作者无法把枪管拉回安全区。
+            pitch_speed_ref = 0.0f;
+        } else if (pitch_limit_distance_deg < PITCH_LIMIT_RAMP_ZONE_DEG) {
+            // 距离下限不足 3 度时保留负号只缩小幅值，目的是让下压接近边界时同样线性减速，而不是在限位点才硬切为零。
+            pitch_speed_ref *= pitch_limit_distance_deg / PITCH_LIMIT_RAMP_ZONE_DEG;
+        }
+    }
 
     if (gimbal_cmd_recv.gimbal_mode != last_gimbal_mode) {
         // 模式切换时只保留边沿标记，目的是前馈和其余运行时逻辑仍需要知道模式发生了变化，但不再借这个边沿去强行清空 PID 内部状态。
@@ -213,7 +216,7 @@ void GimbalTask(void)
             DMMotorStop(yaw_motor);
         }
         if (pitch_motor != NULL) {
-            DMMotorStop(pitch_motor);
+            DJIMotorStop(pitch_motor);
         }
         // 零力模式下同步停掉图传固定电机，目的是云台主执行器已经失能时，图传电机也不应继续运动。
         VideoLinkMotorDisable();
@@ -224,15 +227,15 @@ void GimbalTask(void)
             DMMotorEnable(yaw_motor);
         }
         if (pitch_motor != NULL) {
-            DMMotorEnable(pitch_motor);
+            DJIMotorEnable(pitch_motor);
         }
         if (yaw_motor != NULL) {
             // yaw 目标角继续直接采用 cmd 侧整理后的多圈目标，目的是本轮拆分只调整文件结构，不改原有多圈控制语义。
             DMMotorSetRef(yaw_motor, gimbal_cmd_recv.yaw);
         }
-        if (pitch_motor != NULL && pitch_cali_active == 0u) {
-            // 只有在 pitch 标定空闲时才允许常规控制链写入 pitch 参考角，目的是标定状态机运行期间必须独占 `pitch_motor` 的开环力矩输出。
-            DMMotorSetRef(pitch_motor, pitch_ref);
+        if (pitch_motor != NULL) {
+            // pitch 已切成速度环，输入参考直接来自 cmd 汇总出的瞬态角速度；方向统一交给 DJI 电机配置里的 MOTOR_DIRECTION_REVERSE 处理，避免应用层再取反导致速度语义和 IMU 限位方向互相打架。
+            DJIMotorSetRef(pitch_motor, pitch_speed_ref);
         }
         // 陀螺仪模式下使能图传固定电机，目的是云台正常工作时图传随动机构也应保持工作。
         VideoLinkMotorEnable();
@@ -245,14 +248,14 @@ void GimbalTask(void)
             yaw_motor->motor_settings.feedforward_flag &= ~SPEED_FEEDFORWARD;
         }
         if (pitch_motor != NULL) {
-            DMMotorEnable(pitch_motor);
+            DJIMotorEnable(pitch_motor);
         }
         if (yaw_motor != NULL) {
             DMMotorSetRef(yaw_motor, gimbal_cmd_recv.yaw);
         }
-        if (pitch_motor != NULL && pitch_cali_active == 0u) {
-            // 自由模式同样要让位给标定状态机，目的是这轮新增的是“pitch 标定独占控制权”，不能只在陀螺仪模式里屏蔽。
-            DMMotorSetRef(pitch_motor, pitch_ref);
+        if (pitch_motor != NULL) {
+            // 自由模式仍然沿用同一条 pitch 速度环，目的是只改变底盘/云台模式语义，不再为 pitch 额外分叉一套角度控制。
+            DJIMotorSetRef(pitch_motor, pitch_speed_ref);
         }
         // 自由模式下也保持图传固定电机工作，目的是该机构从属于“云台有力”状态，而不是某一种具体姿态模式。
         VideoLinkMotorEnable();
@@ -270,17 +273,8 @@ void GimbalTask(void)
                                    pitch_motor_online_changed);
 
     // 每周期执行图传电机状态机，目的是该状态机需要持续检测堵转并切换状态，必须跟随云台任务周期运行。
-    current_pitch_deg = (gimba_IMU_data != NULL) ? gimba_IMU_data->Pitch : 0.0f;
     VideoLinkMotorTask(current_pitch_deg);
-    if (pitch_cali_active != 0u) {
-        if (gimbal_cmd_recv.gimbal_mode == GIMBAL_ZERO_FORCE) {
-            // 一旦用户主动切回零力或安全链把云台打进零力，就立即中止本次标定并恢复原配置，目的是零力优先级必须高于标定流程。
-            GimbalCali_Abort(&pitch_cali_handler, pitch_motor);
-        } else {
-            // 只有云台仍处于有力模式时才推进标定状态机，目的是让标定流程在安全前提下独占 `pitch_motor`，同时不影响 yaw 的正常闭环。
-            (void)GimbalCali_Update(&pitch_cali_handler, pitch_motor, current_pitch_deg);
-        }
-    }
+    // Pitch 3508 迁移阶段暂停旧 DM 力矩标定状态机，目的是常规 pitch 控制只保留“IMU 软件限位 + DJI 速度环”，不再让 DM 专用开环力矩流程接管新电机。
 
     // 只有 yaw 电机当前在线时才刷新单圈机械角缓存，目的是掉线后继续沿用最近一次可信值，底盘跟随不会被脏反馈带偏。
     if (yaw_motor_online != 0u && yaw_motor != NULL) {

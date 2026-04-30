@@ -29,11 +29,13 @@
 // 云台参数
 #define YAW_CHASSIS_ALIGN_DEG 0.0f // 将 yaw 对正基准统一成 DM 硬件零点 0 度，目的是cmd 初始化与 offset 计算都已围绕 0 度闭环，继续保留旧机械角只会让双板调试语义分叉。
 #define PITCH_HORIZON_ECD 0 // 云台处于水平位置时编码器值,若对云台有机械改动需要修改
-#define PITCH_MAX_ANGLE 41 // 将云台上抬软件限位收紧到 25 度，目的是用户反馈 45 度抬头过高，降低上限同时保留足够仰角空间。
-#define PITCH_MIN_ANGLE -10 // 云台陀螺仪竖直方向最小角度
+#define PITCH_MAX_ANGLE 40 // 将云台上抬软件限位收紧到 25 度，目的是用户反馈 45 度抬头过高，降低上限同时保留足够仰角空间。
+#define PITCH_MIN_ANGLE -6 // 云台陀螺仪竖直方向最小角度
+#define PITCH_SPEED_REF_MAX_DPS 15000.0f // 限制 cmd 层能下发给 pitch 速度环的最大角速度，目的是鼠标 pitch 已继续提高到 15000 档后不能被旧上限截断，同时仍保留统一速度安全边界。
+#define PITCH_LIMIT_RAMP_ZONE_DEG 7.0f // pitch 距离 IMU 软件限位 7 度内开始线性减速，目的是在当前高速速度环命令下更早收速，降低丝杠机构接近边界时仍然撞得过猛的风险。
 // 发射参数
 #define ONE_BULLET_DELTA_ANGLE 80 // 发射一发弹丸拨盘转动的距离,由机械设计图纸给出
-#define REDUCTION_RATIO_LOADER 16.0f // 英雄需要修改为3508的15.7f
+#define REDUCTION_RATIO_LOADER (268.0f / 17.0f) // 拨弹盘减速箱实测减速比为 268:17，使用分数表达式避免把 15.7647... 手写截断导致 80 度输出端行程换算出现系统误差。
 #define NUM_PER_CIRCLE 9 // 拨盘一圈的装载量
 // 机器人底盘修改的参数,单位为mm(毫米)
 #define WHEEL_BASE 450 // 纵向轴距(前进后退方向)
@@ -234,6 +236,7 @@ typedef struct
 { // 这里刻意只保留云台目标角与模式，目的是把双板协议收口成“目标是什么”而不是“底层 PID 该怎么清”，避免上层消息继续渗透到底层运行时细节。
     float yaw; // 下发给 gimbal 的 yaw 累计角目标，目的是上层只表达云台最终要转到哪里，不再通过协议夹带任何 PID 内部状态操作。
     float pitch; // 下发给 gimbal 的 pitch 目标角，目的是失能恢复和模式切换都统一通过目标同步完成，不再依赖额外的 reset 标志位。
+    float pitch_speed_ref; // 下发给 pitch 速度环的瞬态角速度目标，目的是仿照旧工程“输入直接变速度、IMU 只负责软件限位”的控制链，同时保留 pitch 角度目标给恢复同步使用。
     gimbal_mode_e gimbal_mode; // 下发给 gimbal 的工作模式，目的是底层仍按零力、陀螺仪和自由模式做主状态分发，但模式之外不再附带控制器内部清理语义。
 } Gimbal_Ctrl_Cmd_s;
 

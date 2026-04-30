@@ -5,7 +5,7 @@
  */
 static void RecordControlDipBaseline(void)
 {
-    // 控制链单独维护一份掉速基线，目的是真正的锁角逻辑不能依赖调试模块内部状态，而要有自己可控的一份峰值基线。
+    // 控制链单独维护一份掉速基线，目的是出弹计数不能依赖调试模块内部状态，而要有自己可控的一份峰值基线。
     dip_control.inner_left_baseline = fabsf(GetMotorSpeedAps(friction_inner_left));
     dip_control.inner_right_baseline = fabsf(GetMotorSpeedAps(friction_inner_right));
     dip_control.inner_down_baseline = fabsf(GetMotorSpeedAps(friction_inner_down));
@@ -121,10 +121,10 @@ static uint8_t GetOuterDipMetrics(float *out_avg_dip)
 }
 
 /**
- * @brief 判断当前是否应该以内圈掉速立即锁角
- * @return 1 表示应该锁角，0 表示继续喂弹
+ * @brief 判断当前掉速是否足以计为一发弹丸
+ * @return 1 表示可以累计一次发射计数，0 表示当前掉速仍应视为扰动或尚未咬弹
  */
-static uint8_t ShouldLockByInnerDip(void)
+static uint8_t ShouldCountByFrictionDip(void)
 {
     float inner_avg_dip = 0.0f;
     float outer_avg_dip = 0.0f;
@@ -155,12 +155,30 @@ static uint8_t ShouldLockByInnerDip(void)
         return 0;
 
     if (!HasOuterFrictionWheel()) {
-        // 外圈不存在时保留原有平均掉速确认链路，目的是当前工程允许裁剪外圈配置，辅助确认不能让无外圈平台完全失去单发能力。
+        // 外圈不存在时保留平均掉速确认链路，目的是当前工程允许裁剪外圈配置，辅助确认不能让无外圈平台完全失去出弹计数能力。
         return 1;
     }
 
-    // 对“弱但连续”的内圈平均掉速增加外圈辅助确认，目的是这样可以保留早期锁角优势，同时减少半咬弹或扰动被误判成成功带来的空发。
+    // 对“弱但连续”的内圈平均掉速增加外圈辅助确认，目的是减少半咬弹或随机扰动被误记为真实出弹。
     return (outer_dip_count >= 1u) || (outer_avg_dip > OUTER_DIP_CONFIRM_THRESHOLD);
+}
+
+/**
+ * @brief 在检测到有效掉速时只累计发射数，不改变拨盘目标角度
+ */
+static void CountFiredBulletByDipIfNeeded(void)
+{
+    if (single_fire.shot_counted != 0u)
+        return;
+
+    if (!ShouldCountByFrictionDip())
+        return;
+
+    // 掉速抓拍仍然绑定到首次有效掉速，目的是调试数据和 fire_count 对应同一颗弹丸，但这里不再调用收口逻辑，避免摩擦轮掉速提前停止拨弹盘。
+    TakeDipSnapshot();
+    ValidateAndSaveDipSnapshot();
+    single_fire.fire_count++;
+    single_fire.shot_counted = 1u;
 }
 
 /**
@@ -177,6 +195,7 @@ static void AcceptPendingSingleFireRequest(float current_time)
     single_fire.retry_start_time = 0.0f;
     single_fire.inner_dip_stable_count = 0;
     single_fire.recover_stable_count = 0;
+    single_fire.shot_counted = 0u;
     single_fire.lock_target_angle = loader->measure.total_angle;
     single_fire.brake_start_time = current_time;
     LoaderSetAngleRef(single_fire.lock_target_angle);
@@ -194,13 +213,15 @@ void AbortSingleFire(void)
     single_fire.retry_start_time = 0.0f;
     single_fire.inner_dip_stable_count = 0;
     single_fire.recover_stable_count = 0;
+    single_fire.shot_counted = 0u;
     fire_trigger.pending_fire = 0;
     SetFrictionFeedforward(0.0f, 0.0f);
+    ff_loader = 0.0f;
 }
 
 /**
- * @brief 判断单发事务是否处于“可被 STOP 打断”的补发阶段
- * @return 1 表示当前已经进入补发等待或补发送弹，0 表示仍处于首发自保持阶段
+ * @brief 判断单发事务是否处于历史补发兼容状态
+ * @return 1 表示当前停留在旧补发状态或旧补发推进中，0 表示仍按固定 80 度事务自保持处理
  */
 uint8_t SingleFireIsRetryActive(void)
 {
@@ -233,6 +254,10 @@ static void BeginSingleFireFeedAttempt(float current_time, float feed_bullet_cou
     single_fire.baseline_speed = GetInnerFrictionAvgSpeed();
     single_fire.outer_baseline_speed = GetOuterFrictionAvgSpeed();
     single_fire.inner_dip_stable_count = 0;
+    if (reset_transaction_timer) {
+        // 只有一轮全新的单发事务才清掉计数锁存，目的是同一发在固定 80 度行程内可能持续掉速多拍，但只能贡献一次 fire_count。
+        single_fire.shot_counted = 0u;
+    }
 
     RecordDipBaseline();
     RecordControlDipBaseline();
@@ -257,40 +282,31 @@ static uint8_t ShootIsSpeedRecovered(void)
 }
 
 /**
- * @brief 进入单发有限重试等待态
- * @param current_time 当前系统时间 (ms)
- */
-static void EnterSingleFireRetryWait(float current_time)
-{
-    single_fire.state = SF_RETRYING;
-    single_fire.lock_target_angle = loader->measure.total_angle;
-    single_fire.retry_start_time = current_time;
-    single_fire.inner_dip_stable_count = 0;
-    SetFrictionFeedforward(0.0f, 0.0f);
-    LoaderSetAngleRef(single_fire.lock_target_angle);
-}
-
-/**
  * @brief 结束本次单发事务并锁住当前位置
  * @param current_time 当前系统时间 (ms)
- * @param shot_success 1 表示确认出弹, 0 表示未确认出弹
  */
-static void FinishSingleFire(float current_time, uint8_t shot_success)
+static void FinishSingleFire(float current_time)
 {
     single_fire.brake_start_time = current_time;
-    single_fire.lock_target_angle = loader->measure.total_angle;
+    if (fabsf(single_fire.rush_target_angle - loader->measure.total_angle) < SF_RUSH_REACHED_TOLERANCE) {
+        // 正常到位收口时继续锁住固定 80 度目标，目的是状态切到等待回速或锁角后仍让位置环补完整个机械行程，而不是把当前测量值当成新的提前停止点。
+        single_fire.lock_target_angle = single_fire.rush_target_angle;
+    } else {
+        // 超时或历史兼容状态收口时锁住当前位置，目的是拨盘异常不到位时优先停止继续追目标，避免卡滞状态下长时间输出。
+        single_fire.lock_target_angle = loader->measure.total_angle;
+    }
     single_fire.inner_dip_stable_count = 0;
     single_fire.recover_stable_count = 0;
     // 单发事务结束时主动清空挂起请求，目的是当前策略明确禁止“上一发执行过程中顺延排队下一发”，否则一次点击仍可能被拆成连续两发。
     fire_trigger.pending_fire = 0;
     SetFrictionFeedforward(0.0f, 0.0f);
+    ff_loader = 0.0f;
 
-    if (shot_success) {
-        // 发射成功后先进入回速等待，目的是新一发必须建立在摩擦轮已经恢复稳态的前提上，不能刚咬完一颗又立刻继续推。
+    if (single_fire.shot_counted != 0u) {
+        // 已经由掉速确认过真实出弹时，事务结束后先进入回速等待；这里不再增加 fire_count，目的是计数只发生在掉速首次确认那一拍。
         single_fire.state = SF_WAIT_RECOVER;
-        single_fire.fire_count++;
     } else {
-        // 发射失败后直接回到锁角保持，目的是空仓或未确认出弹时不应继续自动卷弹，只等待下一次明确触发。
+        // 固定 80 度行程结束仍未出现有效掉速时，按未确认出弹处理，目的是真正做到掉速只负责计数，而不是为了寻找掉速继续补发推进。
         single_fire.state = SF_LOCKING;
         single_fire.feed_timeout_count++;
     }
@@ -331,7 +347,7 @@ static uint8_t IsFrictionDipping(void)
 }
 
 /**
- * @brief 单发处理逻辑 (基于摩擦轮掉速的“位置环冲刺 + 掉速锁角”)
+ * @brief 单发处理逻辑 (固定 80 度位置环送弹 + 掉速计数)
  * @param trigger_active 是否触发 (边沿信号)
  */
 void HandleSingleFire(uint8_t trigger_active)
@@ -354,7 +370,7 @@ void HandleSingleFire(uint8_t trigger_active)
 
     case SF_WAIT_SPEED:
         if (ShootIsSpeedReady()) {
-            // 只有最终目标速度 ready 后才允许首发冲刺，目的是直接去掉旧版“500ms 没到速也硬发”的行为，避免半热态送弹带来的多发和首发无力。
+            // 只有最终目标速度 ready 后才允许固定 80 度送弹，目的是保持发射能量稳定，同时确保拨盘目标只由机械行程决定。
             BeginSingleFireFeedAttempt(current_time, SF_RUSH_BULLET_COUNT, 1u);
         } else {
             // 待速期间只锁当前位置不再前推，目的是用户反馈“点一下先动一下”就是旧前推逻辑带来的预拨感。
@@ -369,6 +385,10 @@ void HandleSingleFire(uint8_t trigger_active)
         } else {
             SetFrictionFeedforward(0.0f, 0.0f);
         }
+
+        // 拨弹盘线性电流前馈：根据当前位置误差动态计算，
+        // 误差大时提供更强推力以减轻 PID 负担，到位时自然衰减为零
+        UpdateLoaderFeedforward();
 
         // 基准线随峰值更新，目的是掉速检测依赖“基准 - 当前”，若基线不跟峰值走就会把正常升速误判成掉速不足。
         if (inner_speed > single_fire.baseline_speed) {
@@ -387,43 +407,23 @@ void HandleSingleFire(uint8_t trigger_active)
             GetMotorSpeedAps(friction_outer_right),
             GetMotorSpeedAps(friction_outer_down));
 
-        if (ShouldLockByInnerDip()) {
-            // 一旦内圈确认咬弹就立即锁角，目的是内圈是弹丸最早通过的位置，用它刹车比等外圈确认更能压住多发。
-            TakeDipSnapshot();
-            ValidateAndSaveDipSnapshot();
-            FinishSingleFire(current_time, 1);
-        } else if ((single_fire.shot_start_time > 0.0f) &&
-                   ((current_time - single_fire.shot_start_time) > SF_TRANSACTION_TIMEOUT)) {
-            // 整次单发事务超过总时限后直接判失败，目的是首发加补发都必须在短时间内收口，不能拖成持续卷弹。
-            FinishSingleFire(current_time, 0);
+        CountFiredBulletByDipIfNeeded();
+
+        if ((single_fire.shot_start_time > 0.0f) &&
+            ((current_time - single_fire.shot_start_time) > SF_TRANSACTION_TIMEOUT)) {
+            // 固定 80 度事务超过总时限后直接收口，目的是拨盘异常不到位时不能为了等待掉速继续输出。
+            FinishSingleFire(current_time);
         } else if (fabsf(single_fire.rush_target_angle - loader->measure.total_angle) < SF_RUSH_REACHED_TOLERANCE) {
-            // 当前一步走到位但仍未确认出弹时进入等待补发，目的是用户希望优先“这次打出去”，但也只接受有限次中等补步。
-            if (single_fire.retry_count < SF_RETRY_MAX_COUNT) {
-                EnterSingleFireRetryWait(current_time);
-            } else {
-                FinishSingleFire(current_time, 0);
-            }
+            // 只要固定 80 度机械行程已经到位就结束本次拨弹，目的是摩擦轮掉速不再拥有停止或补发拨弹盘的控制权。
+            FinishSingleFire(current_time);
         } else {
             LoaderSetAngleRef(single_fire.rush_target_angle);
         }
         break;
 
     case SF_RETRYING:
-        if (ShouldLockByInnerDip()) {
-            // 补发等待期间若晚到掉速也按成功收口，目的是掉速与机械到位并不同相，不能因为进入等待态就丢弃这次有效发射。
-            TakeDipSnapshot();
-            ValidateAndSaveDipSnapshot();
-            FinishSingleFire(current_time, 1);
-        } else if ((single_fire.shot_start_time > 0.0f) &&
-                   ((current_time - single_fire.shot_start_time) > SF_TRANSACTION_TIMEOUT)) {
-            FinishSingleFire(current_time, 0);
-        } else if ((current_time - single_fire.retry_start_time) >= SF_RETRY_INTERVAL_MS) {
-            single_fire.retry_count++;
-            // 补发按固定节拍给一个中等步距，目的是对鹅颈弹链要保留足够推进行程，但又不能重新回到一次冲很多发的旧策略。
-            BeginSingleFireFeedAttempt(current_time, SF_RETRY_STEP_BULLET_COUNT, 0u);
-        } else {
-            LoaderSetAngleRef(single_fire.lock_target_angle);
-        }
+        // 新策略不再补发推进；保留这个兜底分支是为了旧状态残留时也能立即收口，而不是继续执行历史补发路径。
+        FinishSingleFire(current_time);
         break;
 
     case SF_WAIT_RECOVER:

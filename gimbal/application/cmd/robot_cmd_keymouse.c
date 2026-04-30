@@ -101,6 +101,7 @@ void MouseKeySet(void)
     uint8_t turnback_toggle_raw_pressed = (uint8_t)((key_bits >> Key_V) & 0x1u);
     uint8_t turnback_sample_updated = 0u;
     uint8_t ui_refresh_pressed = (uint8_t)((key_bits >> Key_G) & 0x1u);
+    uint8_t super_cap_toggle_pressed = (uint8_t)((key_bits >> Key_C) & 0x1u);
     uint8_t spin_toggle_pressed = (uint8_t)((key_bits >> Key_X) & 0x1u);
     int8_t keyboard_vx = (int8_t)((key_bits >> Key_W) & 0x1u) - (int8_t)((key_bits >> Key_S) & 0x1u);
     int8_t keyboard_vy = (int8_t)((key_bits >> Key_D) & 0x1u) - (int8_t)((key_bits >> Key_A) & 0x1u);
@@ -110,6 +111,8 @@ void MouseKeySet(void)
     float dt_s = 0.005f;
     float keyboard_target_vx = (float)keyboard_vx * KEYBOARD_CHASSIS_CMD_SCALE;
     float keyboard_target_vy = (float)keyboard_vy * KEYBOARD_CHASSIS_CMD_SCALE;
+    float mouse_pitch_speed_ref;
+    float mouse_pitch_delta_deg;
 
     // 图传从在线掉到离线的这一拍立即清空键鼠锁存和斜坡尾巴，目的是恢复旧逻辑，防止旧链路的模式和速度残留到回退后的控制源里。
     // 这样做会让 X 小陀螺在图传断链边沿直接退出，但符合之前“图传一掉就完全丢弃键鼠态”的处理方式。
@@ -152,8 +155,21 @@ void MouseKeySet(void)
     // 鼠标在遥控器目标上继续叠加云台增量，作用是保留遥控微调同时给电脑端快速修正；
     // 原因是旧工程的键鼠本来就是通过 DBUS 叠加进来，本轮需要恢复这种混控手感。
     gimbal_cmd_send.yaw -= (float)mouse_key_source->mouse.x * MOUSE_YAW_SENSITIVITY_DEG;
-    gimbal_cmd_send.pitch += (float)mouse_key_source->mouse.y * MOUSE_PITCH_SENSITIVITY_DEG;
+    // 鼠标 pitch 输入直接生成速度环目标，目的是丝杠结构低速静摩擦较大，旧的微小角度增量换算后速度太低，实车会表现成鼠标上下几乎推不动。
+    mouse_pitch_speed_ref = MOUSE_PITCH_SPEED_SIGN * (float)mouse_key_source->mouse.y * MOUSE_PITCH_SPEED_PER_COUNT_DPS;
+    if (mouse_pitch_speed_ref > MOUSE_PITCH_SPEED_MAX_DPS) {
+        // 鼠标输入可能在快速甩动时出现较大的单帧计数，这里先按鼠标专用上限钳住，避免瞬态速度参考把后级速度环直接推满。
+        mouse_pitch_speed_ref = MOUSE_PITCH_SPEED_MAX_DPS;
+    } else if (mouse_pitch_speed_ref < -MOUSE_PITCH_SPEED_MAX_DPS) {
+        // 负方向同样独立限幅，目的是抬头和低头都保持对称手感，并把最终安全边界继续交给统一速度限幅和 IMU 软件限位兜底。
+        mouse_pitch_speed_ref = -MOUSE_PITCH_SPEED_MAX_DPS;
+    }
+    // cmd 层的 pitch 角目标仍随速度参考滚动更新，目的是速度环实际吃 `pitch_speed_ref`，但恢复同步、限位观察和状态发布仍需要一份连续的上层 pitch 目标。
+    mouse_pitch_delta_deg = mouse_pitch_speed_ref * ROBOT_CMD_TASK_PERIOD_S;
+    gimbal_cmd_send.pitch += mouse_pitch_delta_deg;
+    gimbal_cmd_send.pitch_speed_ref += mouse_pitch_speed_ref;
     LimitGimbalPitchTarget();
+    LimitGimbalPitchSpeedRef();
 
     // F 键现在只负责摩擦轮的显式开关，目的是把“预热”和“拨弹”彻底拆开，确保鼠标左键不会再隐式带起摩擦轮。
     if (friction_toggle_pressed && !keyboard_friction_toggle_last) {
@@ -199,6 +215,17 @@ void MouseKeySet(void)
         chassis_cmd_send.ui_refresh_request = 1u;
     }
     keyboard_ui_refresh_last = ui_refresh_pressed;
+
+    if (super_cap_toggle_pressed && !keyboard_super_cap_toggle_last) {
+        // C 键只负责翻转超电显式许可，目的是把超电从“有力模式自动开启”改成用户主动开关，避免平时默认带起 DCDC。
+        keyboard_super_cap_latched = (uint8_t)!keyboard_super_cap_latched;
+    }
+    keyboard_super_cap_toggle_last = super_cap_toggle_pressed;
+
+    if (keyboard_super_cap_latched != 0u) {
+        // `PrepareControlCommandBase` 每拍都会把 cap_mode 复位为 OFF；只有 C 键锁存仍为开启时才重新拉高，确保默认关闭语义不会被旧帧残留破坏。
+        chassis_cmd_send.cap_mode = SUPER_CAP_ON;
+    }
 
     if (spin_toggle_pressed && !keyboard_spin_toggle_last) {
         // X 键显式切模式前先取消一键掉头状态；用户已经要求转入小陀螺，旧掉头任务和强制跟随锁存必须立刻失效，避免两个模式同时抢控制权。

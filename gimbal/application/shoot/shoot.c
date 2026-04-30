@@ -27,6 +27,10 @@ float ff_inner_down = 0.0f;
 float ff_outer_left = 0.0f;
 float ff_outer_right = 0.0f;
 float ff_outer_down = 0.0f;
+// 拨弹盘线性速度前馈变量 (单位: deg/s)，由 shoot 逻辑每拍根据位置误差计算后写入，
+// 电机控制器通过 speed_feedforward_ptr 读取并叠加到速度环参考值入口，
+// 速度环能感知这个前馈并配合加速，避免电流前馈注入时速度环与前馈对抗的问题。
+float ff_loader = 0.0f;
 
 // 拨盘电机句柄是 shoot 应用的核心执行器，目的是初始化、单发、堵转和主任务都围绕同一实例工作。
 DJIMotorInstance *loader = NULL;
@@ -52,11 +56,11 @@ Shoot_Upload_Data_s shoot_feedback_data = { 0 };
 float hibernate_time = 0.0f;
 float dead_time = 0.0f;
 
-// 单发控制的掉速基线必须跨拍保存，目的是送弹过程中的峰值更新和后续锁角判定都基于同一份控制基线。
+// 单发控制的掉速基线必须跨拍保存，目的是送弹过程中的峰值更新和后续出弹计数都基于同一份控制基线。
 DipControlRuntime_s dip_control = { 0 };
 // 堵转状态机必须跨拍保存当前阶段与时间戳，目的是自动解卡由“检测 -> 反转 -> 恢复”三段时序构成。
 ShootStallHandler_s stall_handler = { 0 };
-// 单发状态机必须跨拍保存事务状态，目的是待速、送弹、补发、回速和锁角都不是单拍逻辑。
+// 单发状态机必须跨拍保存事务状态，目的是待速、固定 80 度送弹、回速和锁角都不是单拍逻辑。
 SingleFireRuntime_s single_fire = { 0 };
 // 单发触发边沿缓存必须跨拍保存，目的是用户边沿请求要先缓存住，再由状态机在合适时机消费。
 FireTrigger_s fire_trigger = { .last_mode = LOAD_STOP, .trigger_consumed = 0u, .pending_fire = 0u, .last_accept_time_ms = 0.0f };
@@ -141,6 +145,8 @@ void ShootInit(void)
                 .IntegralLimit = 5000,
                 .MaxOut = 16100,
             },
+            // 绑定拨弹盘速度前馈变量，电机控制器每拍通过此指针读取前馈速度并叠加到速度环参考值入口
+            .speed_feedforward_ptr = &ff_loader,
         },
         .controller_setting_init_config = {
             .angle_feedback_source = MOTOR_FEED,
@@ -148,6 +154,8 @@ void ShootInit(void)
             .outer_loop_type = SPEED_LOOP,
             .close_loop_type = SPEED_LOOP | ANGLE_LOOP,
             .motor_reverse_flag = MOTOR_DIRECTION_NORMAL,
+            // 启用速度前馈标志，让 DJIMotorControl 在速度环计算前叠加 ff_loader 到速度参考值上
+            .feedforward_flag = SPEED_FEEDFORWARD,
         },
         .motor_type = M3508
     };
@@ -215,7 +223,7 @@ void ShootTask(void)
     // 从 cmd 获取控制数据；原因是 shoot 应用本拍的全部动作都必须围绕最新一帧的发射命令展开。
     SubGetMessage(shoot_sub, &shoot_cmd_recv);
 
-    // 先对单发触发做边沿锁存，目的是单发改成位置环冲刺后必须执行到“掉速锁角”收口，不能依赖 `LOAD_1_BULLET` 电平持续存在。
+    // 先对单发触发做边沿锁存，目的是单发要完整执行固定 80 度位置目标，不能依赖 `LOAD_1_BULLET` 电平持续存在。
     if (shoot_cmd_recv.load_mode != LOAD_1_BULLET) {
         fire_trigger.trigger_consumed = 0;
     } else if (fire_trigger.last_mode != LOAD_1_BULLET && !fire_trigger.trigger_consumed) {
@@ -224,7 +232,7 @@ void ShootTask(void)
         uint8_t trigger_guard_elapsed =
             (uint8_t)((current_time_ms - fire_trigger.last_accept_time_ms) >= SF_TRIGGER_REARM_GUARD_MS);
 
-        // 只允许在单发状态机已经完全收口时接收新的单发请求，目的是若上一发还在待速、送弹、补发或回速阶段就继续收边沿，会把一次点击排成两发。
+        // 只允许在单发状态机已经完全收口时接收新的单发请求，目的是若上一发还在待速、送弹或回速阶段就继续收边沿，会把一次点击排成两发。
         if (single_fire_can_accept_request != 0u && trigger_guard_elapsed != 0u) {
             fire_trigger.pending_fire = 1u;
             // 只有真正接受这次请求时才刷新最近接受时间，目的是防抖窗口应该围绕“有效触发”建立，不能被被拒绝的伪边沿不断往后推迟。
@@ -264,7 +272,7 @@ void ShootTask(void)
         SetMotorEnableIfReady(loader, 1u);
     }
 
-    // 首发待速和首发冲刺期间即使上层已经回到 STOP，也仍把请求送进堵转状态机，目的是首发事务尚未收口时自动解卡仍然有意义，而补发阶段则必须允许用户立刻停拨。
+    // 固定 80 度事务待速和送弹期间即使上层已经回到 STOP，也仍把请求送进堵转状态机，目的是单发事务尚未收口时自动解卡仍然有意义。
     stall_input_mode = requested_load_mode;
     if ((requested_load_mode == LOAD_STOP) &&
         !SingleFireIsRetryActive() &&
@@ -276,7 +284,7 @@ void ShootTask(void)
 
     switch (actual_load_mode) {
     case LOAD_STOP:
-        // 补发期间收到 STOP 时直接中止状态机，目的是安全停拨要优先于“补发补到底”。
+        // 非自保持阶段收到 STOP 时直接中止状态机，目的是安全停拨优先于继续维持历史残留状态。
         if (!SingleFireIsRetryActive() &&
             (single_fire.state != SF_IDLE || fire_trigger.pending_fire) &&
             stall_handler.state == STALL_NORMAL) {

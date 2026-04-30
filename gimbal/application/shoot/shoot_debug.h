@@ -48,14 +48,14 @@ typedef struct {
 } StallDebug_s;
 
 // ==================== 单发调试结构体 ====================
-// 简化的单发状态枚举 (基于机械限位 + 掉速检测)
+// 简化的单发状态枚举 (固定机械行程 + 掉速计数)
 typedef enum {
     SF_IDLE = 0, // 空闲, 等待触发
     SF_WAIT_SPEED, // 等待摩擦轮转速稳定
-    SF_FEEDING, // 位置环冲刺中, 持续监测摩擦轮掉速, 因为需要用大角度误差换取瞬时满力矩
-    SF_RETRYING, // 有限重试等待/补发中, 因为未检测到掉速时需要按节拍继续推进直到找到弹丸
+    SF_FEEDING, // 位置环固定 80 度送弹中, 持续监测摩擦轮掉速只用于累计出弹数
+    SF_RETRYING, // 历史补发状态的兼容兜底, 新策略不再主动进入该状态继续推进拨盘
     SF_WAIT_RECOVER, // 发射成功后等待摩擦轮回速稳定，目的是下一发必须建立在摩擦轮已恢复稳态的前提上，才能压住连续点击时的多发。
-    SF_LOCKING, // 检测到掉速后位置锁止中, 因为要立即冻结当前位置防止惯性多送弹
+    SF_LOCKING, // 固定行程完成或未确认出弹后的锁止保持, 目的是等待下一次明确触发
 } SingleFireState_e;
 
 // 单发调试信息结构体 (全局可观测, 用于调试器实时监控)
@@ -68,11 +68,11 @@ typedef struct {
     float speed_diff; // 速度差 (baseline - current), 正值表示掉速
     float loader_speed; // 拨盘当前速度 (deg/s)
     float feed_start_time; // 送弹开始时间 (ms)
-    float retry_start_time; // 上一次开始补发等待的时间 (ms), 用于观察有限重试节拍是否正确
+    float retry_start_time; // 历史补发等待时间戳, 保留字段是为了兼容已有调试观察脚本
     float brake_start_time; // 锁止开始时间 (ms), 保留原字段名以兼容现有调试观察脚本
     uint8_t is_dipping; // 是否检测到掉速 (1=掉速中)
     uint8_t trigger_edge; // 是否检测到触发边沿 (1=边沿触发)
-    uint8_t retry_count; // 当前已执行的补发次数, 用于确认有限重试是否按预期停止
+    uint8_t retry_count; // 历史补发次数观测值, 新固定 80 度策略下应保持为 0
     uint16_t fire_count; // 累计发射弹丸计数
     uint16_t feed_timeout_count; // 送弹超时计数 (可能缺弹)
 } SingleFireDebug_s;
