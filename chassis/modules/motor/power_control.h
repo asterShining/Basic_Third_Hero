@@ -54,6 +54,28 @@ float PowerControlGetPowerLimit(void);
 void PowerControl_UpdateIMU(float pitch_rad, float roll_rad);
 
 /**
+ * @brief 更新底盘力控前馈使用的速度参考
+ *
+ * @param vx_ref 底盘坐标系前后速度参考，沿用当前底盘任务的速度指令量纲
+ * @param vy_ref 底盘坐标系横移速度参考，沿用当前底盘任务的速度指令量纲
+ * @param wz_ref 底盘旋转速度参考，单位为 deg/s
+ * @param active 非零时根据参考变化计算前馈，零力或停机时传 0 清空前馈历史
+ */
+void PowerControl_UpdateForceFeedforward(float vx_ref, float vy_ref, float wz_ref, uint8_t active);
+
+/**
+ * @brief 使能或失能力控前馈
+ *
+ * @param enable 1:开启, 0:关闭
+ */
+void PowerControl_EnableForceFeedforward(uint8_t enable);
+
+/**
+ * @brief 清空力控前馈内部状态
+ */
+void PowerControl_ResetForceFeedforward(void);
+
+/**
  * @brief 使能/失能 坡道力矩补偿
  * @param enable 1:开启, 0:关闭
  */

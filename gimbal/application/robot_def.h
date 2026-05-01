@@ -30,7 +30,7 @@
 #define YAW_CHASSIS_ALIGN_DEG 0.0f // 将 yaw 对正基准统一成 DM 硬件零点 0 度，目的是cmd 初始化与 offset 计算都已围绕 0 度闭环，继续保留旧机械角只会让双板调试语义分叉。
 #define PITCH_HORIZON_ECD 0 // 云台处于水平位置时编码器值,若对云台有机械改动需要修改
 #define PITCH_MAX_ANGLE 40 // 将云台上抬软件限位收紧到 25 度，目的是用户反馈 45 度抬头过高，降低上限同时保留足够仰角空间。
-#define PITCH_MIN_ANGLE -6 // 云台陀螺仪竖直方向最小角度
+#define PITCH_MIN_ANGLE -7.0f // 云台陀螺仪竖直方向最小角度
 #define PITCH_SPEED_REF_MAX_DPS 15000.0f // 限制 cmd 层能下发给 pitch 速度环的最大角速度，目的是鼠标 pitch 已继续提高到 15000 档后不能被旧上限截断，同时仍保留统一速度安全边界。
 #define PITCH_LIMIT_RAMP_ZONE_DEG 7.0f // pitch 距离 IMU 软件限位 7 度内开始线性减速，目的是在当前高速速度环命令下更早收速，降低丝杠机构接近边界时仍然撞得过猛的风险。
 // 发射参数

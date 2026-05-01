@@ -113,6 +113,7 @@ void ChassisInit(void)
     referee_data = UITaskInit(&huart6, &ui_data);
     // 默认开启坡度补偿，目的是当前功率控制策略已经显式依赖 pitch 角，初始化时直接打开可避免运行初期策略分叉。
     PowerControl_EnableSlopeComp(1);
+    PowerControl_EnableForceFeedforward(1); // 默认开启速度 PID 的力控前馈，目的是让底盘起步、急停和换向先获得模型补偿，再由现有功率限制兜底。
 
 #ifdef USE_SUPER_CAP
     {
@@ -268,6 +269,7 @@ void ChassisTask(void)
 
     if (chassis_cmd_recv.chassis_mode == CHASSIS_ZERO_FORCE) {
         // 急停或关键模块离线时立即停掉四轮，目的是零力模式的优先级最高，任何剩余控制输出都必须被彻底切断。
+        PowerControl_ResetForceFeedforward(); // 零力同时清空前馈历史，目的是恢复使能时不会把停机前后的速度参考差分成一次异常冲击。
         DJIMotorStop(motor_lf);
         DJIMotorStop(motor_rf);
         DJIMotorStop(motor_lb);
@@ -397,6 +399,10 @@ void ChassisTask(void)
         chassis_vy = -chassis_cmd_recv.vx * sin_theta + chassis_cmd_recv.vy * cos_theta;
     }
 
+    PowerControl_UpdateForceFeedforward(chassis_vx,
+                                        chassis_vy,
+                                        chassis_cmd_recv.wz,
+                                        (uint8_t)(chassis_cmd_recv.chassis_mode != CHASSIS_ZERO_FORCE));
     if (chassis_cmd_recv.chassis_mode == CHASSIS_NO_FOLLOW) {
         // ChassisHeadLock();
     }

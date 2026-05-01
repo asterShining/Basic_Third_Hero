@@ -54,6 +54,7 @@
 // ==========================================
 #define ROBOT_MASS 22.4f // 机器人质量 (kg) [需根据实际称重修改]
 #define ROBOT_COG_H 0.31f // 重心高度 (m) [需根据CAD或实测修改]
+#define ROBOT_YAW_INERTIA 0.75f // 底盘绕竖直轴的转动惯量估计值，先按矩形车体量级给保守初值，后续可通过小陀螺角加速度实测再标定。
 #define GRAVITY_ACC 9.8f // 重力加速度 (m/s^2)
 
 // 几何参数单位转换 (mm -> m), 供力学解算使用
@@ -67,6 +68,7 @@
 // M3508/M2006: 电流Raw(0-16384) -> 扭矩(Nm) 的系数约为 0.0003662
 // 补偿算法需要反向: 目标扭矩(Nm) -> 目标电流Raw
 #define TORQUE_2_CURRENT_COEF (1.0f / 0.0003662109375f)
+#define CHASSIS_DRIVETRAIN_EFF 0.82f // 轮端力换算到电机电流时预留传动效率，避免把理想模型算出的扭矩当成实车必然可达的扭矩。
 
 #define GYRO2GIMBAL_DIR_YAW 1 // 陀螺仪数据相较于云台的yaw的方向,1为相同,-1为相反
 #define GYRO2GIMBAL_DIR_PITCH -1 // 陀螺仪数据相较于云台的pitch的方向,1为相同,-1为相反
@@ -88,6 +90,15 @@
 // [新增] 底盘平移合速度上限 (m/s)
 // 限制 sqrt(vx^2 + vy^2) <= 3.0f, 防止功率满载
 #define MAX_CHASSIS_TRANSLATIONAL_SPEED 3.0f
+
+// 力控前馈先按“速度指令微分”生成辅助电流，目的是只补偿起步、急停和换向瞬间的 PID 滞后，不改变现有速度闭环主导地位。
+#define CHASSIS_FORCE_FF_LINEAR_REF_TO_MPS (MAX_CHASSIS_TRANSLATIONAL_SPEED / 6600.0f)
+#define CHASSIS_FORCE_FF_GAIN 0.25f // 前馈整体增益必须从小值开始实车标定，避免模型误差直接变成轮组冲击。
+#define CHASSIS_FORCE_FF_MAX_CURRENT 1800.0f // 单轮前馈电流上限只占 3508 可用输出的一小段，保证前馈不会绕过速度 PID 和功率限制主导控制。
+#define CHASSIS_FORCE_FF_ACCEL_LIMIT 8.0f // 平移指令微分限幅用于过滤键鼠/遥控阶跃，防止一步满指令被解释成不现实的超大加速度。
+#define CHASSIS_FORCE_FF_ALPHA_LIMIT 25.0f // 角加速度限幅用于约束小陀螺和跟随切换瞬间的力矩前馈，避免旋转分量把四轮同时顶饱和。
+#define CHASSIS_FORCE_FF_FILTER_ALPHA 0.35f // 对指令加速度做一阶滤波，目的是保留响应提升同时压掉控制周期抖动带来的电流噪声。
+#define CHASSIS_FORCE_FF_DT_FALLBACK 0.005f // DWT 首拍或异常周期时按底盘任务标称 200Hz 处理，避免前馈因异常 dt 放大。
 
 // [新增] 坡道判定阈值 (度)
 // 当 Pitch 轴角度绝对值 > 20.0f 时，认为是坡道，自动解除限速并开启超电爆发

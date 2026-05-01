@@ -58,13 +58,11 @@ typedef struct
     float *speed_feedforward_ptr;
     float *current_feedforward_ptr;
     float pid_ref;
-    float pos_limit_min; // 最小机械角度 (如 -0.6)
-    float pos_limit_max; // 最大机械角度 (如 0.75)
     Motor_Working_Type_e stop_flag;
     CANInstance *motor_can_instace;
     DaemonInstance *motor_daemon;
     uint32_t lost_cnt;
-    uint8_t enable_cmd_cnt; // What: 记录低扭矩保活计数；Why: 低载时按更低频率补发使能帧，避免DM软失能又不把总线打满
+    uint8_t enable_cmd_cnt; // 记录低扭矩保活计数，低载时按更低频率补发使能帧，避免DM软失能又不把总线打满
 } DMMotorInstance;
 
 typedef enum {
