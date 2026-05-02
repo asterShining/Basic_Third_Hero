@@ -382,7 +382,7 @@ void ValidateAndSaveDipSnapshot(void)
 
 /**
  * @brief 根据拨弹盘位置误差计算线性速度前馈
- *        只在 SF_FEEDING 状态（固定 80 度位置环送弹）期间输出有效前馈，
+ *        只在 SF_FEEDING 状态（固定 90 度位置环送弹）期间输出有效前馈，
  *        其余状态清零以避免锁角保持时前馈干扰 PID 稳态。
  *        前馈注入速度环参考值入口（SPEED_FEEDFORWARD），速度环能感知
  *        这个额外速度需求并配合输出电流，不会出现与 PID 对抗的问题。

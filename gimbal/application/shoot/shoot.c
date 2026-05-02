@@ -60,10 +60,19 @@ float dead_time = 0.0f;
 DipControlRuntime_s dip_control = { 0 };
 // 堵转状态机必须跨拍保存当前阶段与时间戳，目的是自动解卡由“检测 -> 反转 -> 恢复”三段时序构成。
 ShootStallHandler_s stall_handler = { 0 };
-// 单发状态机必须跨拍保存事务状态，目的是待速、固定 80 度送弹、回速和锁角都不是单拍逻辑。
+// 单发状态机必须跨拍保存事务状态，目的是待速、固定 90 度送弹、回速和锁角都不是单拍逻辑。
 SingleFireRuntime_s single_fire = { 0 };
 // 单发触发边沿缓存必须跨拍保存，目的是用户边沿请求要先缓存住，再由状态机在合适时机消费。
 FireTrigger_s fire_trigger = { .last_mode = LOAD_STOP, .trigger_consumed = 0u, .pending_fire = 0u, .last_accept_time_ms = 0.0f };
+
+// 上电软件初始位锁存延时给 DJI 电机留出反馈刷新窗口，目的是不能在反馈还停留在零初始化值时就把 0 度误当成拨弹盘真实初始位。
+#define LOADER_INITIAL_LOCK_DELAY_MS 100.0f
+// 初始位锁存要求拨弹盘反馈速度已经接近静止，目的是避免机器人上电瞬间外力拨动或反馈滤波过渡时锁到中间态。
+#define LOADER_INITIAL_LOCK_SPEED_THRESHOLD 50.0f
+
+static uint8_t loader_initial_position_locked = 0u;
+static float loader_initial_position_angle = 0.0f;
+static float loader_initial_position_start_time = 0.0f;
 
 // 这些调试结构体指针仅用于在初始化时把调试视图固定到真实状态区，目的是Ozone 直接看指针时需要拿到一份稳定地址。
 static FrictionWheelDebug_s *p_friction_debug = NULL;
@@ -194,6 +203,8 @@ void ShootInit(void)
 
     // 拨盘电机仍按原来的串级配置初始化，目的是这次拆分不改变拨盘控制律和 CAN 接线。
     loader = DJIMotorInit(&loader_config);
+    // 从拨盘电机注册完成后开始计时，目的是后续软件初始位锁存只依赖本模块自己的启动窗口，而不是全局上电时间。
+    loader_initial_position_start_time = DWT_GetTimeline_ms();
 
     shoot_pub = PubRegister("shoot_feed", sizeof(Shoot_Upload_Data_s));
     shoot_sub = SubRegister("shoot_cmd", sizeof(Shoot_Ctrl_Cmd_s));
@@ -210,11 +221,71 @@ void ShootInit(void)
     VofaDebugInit();
 }
 
+/**
+ * @brief 锁存拨弹盘上电软件初始位
+ * @param current_time_ms 当前系统时间，单位为 ms
+ */
+static void UpdateLoaderInitialPosition(float current_time_ms)
+{
+    if (loader_initial_position_locked != 0u || loader == NULL)
+        return;
+
+    if ((current_time_ms - loader_initial_position_start_time) < LOADER_INITIAL_LOCK_DELAY_MS) {
+        // 启动保护窗口内只保持速度为零，目的是等待第一批 CAN 反馈和速度滤波稳定，避免位置环抢先拉动拨弹盘。
+        LoaderSetSpeedRef(0.0f);
+        return;
+    }
+
+    if (loader->dt <= 0.0f) {
+        // 至少收到过一次 DJI 电机反馈后 dt 才会被刷新，目的是不能只凭结构体默认值或 daemon 初始计数就锁软件初始位。
+        LoaderSetSpeedRef(0.0f);
+        return;
+    }
+
+    if (loader->daemon == NULL || DaemonIsOnline(loader->daemon) == 0u) {
+        // 拨盘电机尚未确认在线时不能锁初始位，目的是离线状态下 total_angle 可能已经不再代表真实当前位置。
+        LoaderSetSpeedRef(0.0f);
+        return;
+    }
+
+    if (fabsf(loader->measure.speed_aps) > LOADER_INITIAL_LOCK_SPEED_THRESHOLD) {
+        // 反馈速度未稳定时继续等待，目的是把“上电当前位置”定义成静止弹位，而不是运动过程中的瞬时角度。
+        LoaderSetSpeedRef(0.0f);
+        return;
+    }
+
+    loader_initial_position_angle = loader->measure.total_angle;
+    loader_initial_position_locked = 1u;
+    // 单发状态机的锁角目标也从同一个初始位开始，目的是后续空闲保持、正常单发和堵转回退都围绕同一套弹位坐标工作。
+    single_fire.lock_target_angle = loader_initial_position_angle;
+    single_fire.rush_start_angle = loader_initial_position_angle;
+    single_fire.rush_target_angle = loader_initial_position_angle;
+    LoaderSetAngleRef(loader_initial_position_angle);
+}
+
+/**
+ * @brief 空闲时保持拨弹盘在已知弹位
+ */
+void HoldLoaderIdlePosition(void)
+{
+    if (loader == NULL)
+        return;
+
+    if (loader_initial_position_locked == 0u) {
+        // 尚未锁定软件初始位前不能使用位置环追目标，目的是避免把未知反馈当成绝对弹位导致上电误动作。
+        LoaderSetSpeedRef(0.0f);
+        return;
+    }
+
+    LoaderSetAngleRef(single_fire.lock_target_angle);
+}
+
 /* 机器人发射机构控制核心任务 */
 void ShootTask(void)
 {
     static uint16_t last_report_fire_count = 0;
     float current_time_ms = DWT_GetTimeline_ms();
+    loader_mode_e raw_load_mode;
     loader_mode_e requested_load_mode;
     loader_mode_e stall_input_mode;
     loader_mode_e actual_load_mode;
@@ -222,9 +293,14 @@ void ShootTask(void)
 
     // 从 cmd 获取控制数据；原因是 shoot 应用本拍的全部动作都必须围绕最新一帧的发射命令展开。
     SubGetMessage(shoot_sub, &shoot_cmd_recv);
+    raw_load_mode = shoot_cmd_recv.load_mode;
+    UpdateLoaderInitialPosition(current_time_ms);
 
-    // 先对单发触发做边沿锁存，目的是单发要完整执行固定 80 度位置目标，不能依赖 `LOAD_1_BULLET` 电平持续存在。
-    if (shoot_cmd_recv.load_mode != LOAD_1_BULLET) {
+    // 先对单发触发做边沿锁存，目的是单发要完整执行固定 90 度位置目标，不能依赖 `LOAD_1_BULLET` 电平持续存在。
+    if (loader_initial_position_locked == 0u) {
+        fire_trigger.pending_fire = 0u;
+        fire_trigger.trigger_consumed = (uint8_t)(raw_load_mode == LOAD_1_BULLET);
+    } else if (raw_load_mode != LOAD_1_BULLET) {
         fire_trigger.trigger_consumed = 0;
     } else if (fire_trigger.last_mode != LOAD_1_BULLET && !fire_trigger.trigger_consumed) {
         uint8_t single_fire_can_accept_request =
@@ -243,7 +319,11 @@ void ShootTask(void)
         fire_trigger.trigger_consumed = 1u;
     }
 
-    requested_load_mode = shoot_cmd_recv.load_mode;
+    requested_load_mode = raw_load_mode;
+    if (loader_initial_position_locked == 0u) {
+        // 软件初始位未锁定前统一禁止拨弹盘执行发射模式，目的是所有相对 90 度送弹都必须建立在明确的弹位坐标上。
+        requested_load_mode = LOAD_STOP;
+    }
 
     if (shoot_cmd_recv.shoot_mode == SHOOT_OFF) {
         current_inner_deg = 0.0f;
@@ -272,7 +352,7 @@ void ShootTask(void)
         SetMotorEnableIfReady(loader, 1u);
     }
 
-    // 固定 80 度事务待速和送弹期间即使上层已经回到 STOP，也仍把请求送进堵转状态机，目的是单发事务尚未收口时自动解卡仍然有意义。
+    // 固定 90 度事务待速和送弹期间即使上层已经回到 STOP，也仍把请求送进堵转状态机，目的是单发事务尚未收口时自动解卡仍然有意义。
     stall_input_mode = requested_load_mode;
     if ((requested_load_mode == LOAD_STOP) &&
         !SingleFireIsRetryActive() &&
@@ -282,63 +362,75 @@ void ShootTask(void)
 
     actual_load_mode = HandleLoaderStall(stall_input_mode);
 
-    switch (actual_load_mode) {
-    case LOAD_STOP:
-        // 非自保持阶段收到 STOP 时直接中止状态机，目的是安全停拨优先于继续维持历史残留状态。
-        if (!SingleFireIsRetryActive() &&
-            (single_fire.state != SF_IDLE || fire_trigger.pending_fire) &&
-            stall_handler.state == STALL_NORMAL) {
+    if (stall_handler.state == STALL_REVERSING || stall_handler.state == STALL_RECOVERY) {
+        // 堵转反转和恢复窗口内由堵转状态机独占拨弹盘目标，目的是防止主发射 switch 再把目标覆盖成速度 0 或继续送弹。
+        AbortSingleFire();
+        single_fire.lock_target_angle = stall_handler.reverse_target_angle;
+        LoaderSetAngleRef(stall_handler.reverse_target_angle);
+    } else {
+        switch (actual_load_mode) {
+        case LOAD_STOP:
+            // 非自保持阶段收到 STOP 时直接中止状态机，目的是安全停拨优先于继续维持历史残留状态。
+            if (!SingleFireIsRetryActive() &&
+                (single_fire.state != SF_IDLE || fire_trigger.pending_fire) &&
+                stall_handler.state == STALL_NORMAL) {
+                HandleSingleFire(fire_trigger.pending_fire);
+            } else {
+                AbortSingleFire();
+                HoldLoaderIdlePosition();
+            }
+            break;
+
+        case LOAD_1_BULLET:
             HandleSingleFire(fire_trigger.pending_fire);
-        } else {
+            break;
+
+        case LOAD_3_BULLET:
             AbortSingleFire();
-            LoaderSetSpeedRef(0.0f);
+            if (hibernate_time + dead_time > DWT_GetTimeline_ms())
+                break;
+            single_fire.lock_target_angle = loader->measure.total_angle + LoaderBulletCountToMotorAngle(3.0f);
+            LoaderSetAngleRef(single_fire.lock_target_angle);
+            hibernate_time = DWT_GetTimeline_ms();
+            dead_time = 300.0f;
+            break;
+
+        case LOAD_2_BULLET:
+            AbortSingleFire();
+            if (hibernate_time + dead_time > DWT_GetTimeline_ms())
+                break;
+            single_fire.lock_target_angle = loader->measure.total_angle + LoaderBulletCountToMotorAngle(2.0f);
+            LoaderSetAngleRef(single_fire.lock_target_angle);
+            hibernate_time = DWT_GetTimeline_ms();
+            dead_time = 200.0f;
+            break;
+
+        case LOAD_BURSTFIRE:
+            // 连发模式切入时复位单发消费标志，目的是后续切回单发时应该能立即重新接受一次新的边沿请求。
+            AbortSingleFire();
+            single_fire.lock_target_angle = loader->measure.total_angle;
+            fire_trigger.trigger_consumed = 0u;
+            // 连发速度统一按单发机械节距换算，目的是不能再保留与单发位置目标冲突的历史常量。
+            LoaderSetSpeedRef(LoaderBulletRateToMotorSpeed(shoot_cmd_recv.shoot_rate));
+            break;
+
+        case LOAD_REVERSE:
+            AbortSingleFire();
+            // 手动反转同样按完整一发弹位执行，目的是用户触发反转时能明确回到上一个 90 度弹位，而不是停在半发中间位置。
+            single_fire.lock_target_angle = loader->measure.total_angle - LoaderBulletCountToMotorAngle(1.0f);
+            LoaderSetAngleRef(single_fire.lock_target_angle);
+            hibernate_time = DWT_GetTimeline_ms();
+            dead_time = 150.0f;
+            break;
+
+        default:
+            while (1)
+                ;
         }
-        break;
-
-    case LOAD_1_BULLET:
-        HandleSingleFire(fire_trigger.pending_fire);
-        break;
-
-    case LOAD_3_BULLET:
-        AbortSingleFire();
-        if (hibernate_time + dead_time > DWT_GetTimeline_ms())
-            break;
-        LoaderSetAngleRef(loader->measure.total_angle + LoaderBulletCountToMotorAngle(3.0f));
-        hibernate_time = DWT_GetTimeline_ms();
-        dead_time = 300.0f;
-        break;
-
-    case LOAD_2_BULLET:
-        AbortSingleFire();
-        if (hibernate_time + dead_time > DWT_GetTimeline_ms())
-            break;
-        LoaderSetAngleRef(loader->measure.total_angle + LoaderBulletCountToMotorAngle(2.0f));
-        hibernate_time = DWT_GetTimeline_ms();
-        dead_time = 200.0f;
-        break;
-
-    case LOAD_BURSTFIRE:
-        // 连发模式切入时复位单发消费标志，目的是后续切回单发时应该能立即重新接受一次新的边沿请求。
-        AbortSingleFire();
-        fire_trigger.trigger_consumed = 0u;
-        // 连发速度统一按单发机械节距换算，目的是不能再保留与单发位置目标冲突的历史常量。
-        LoaderSetSpeedRef(LoaderBulletRateToMotorSpeed(shoot_cmd_recv.shoot_rate));
-        break;
-
-    case LOAD_REVERSE:
-        AbortSingleFire();
-        LoaderSetAngleRef(loader->measure.total_angle - LoaderBulletCountToMotorAngle(0.5f));
-        hibernate_time = DWT_GetTimeline_ms();
-        dead_time = 150.0f;
-        break;
-
-    default:
-        while (1)
-            ;
     }
 
     // 保存原始遥控指令而不是实际执行模式，目的是堵转状态机会临时把模式改成 STOP，边沿检测只能对用户原始动作敏感。
-    fire_trigger.last_mode = requested_load_mode;
+    fire_trigger.last_mode = raw_load_mode;
 
     p_fric = ShootDebug_GetFrictionPtr();
     if (p_fric->override_enable) {

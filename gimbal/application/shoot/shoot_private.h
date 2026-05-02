@@ -39,7 +39,7 @@ typedef struct {
     uint8_t retry_count;
     uint8_t inner_dip_stable_count;
     uint8_t recover_stable_count;
-    uint8_t shot_counted; // 本次固定 80 度送弹事务是否已经由摩擦轮掉速计入 fire_count，目的是把“计数”和“拨盘停止”彻底解耦并防止持续掉速重复计数。
+    uint8_t shot_counted; // 本次固定 90 度送弹事务是否已经由摩擦轮掉速计入 fire_count，目的是把“计数”和“拨盘停止”彻底解耦并防止持续掉速重复计数。
     uint16_t fire_count;
     uint16_t feed_timeout_count;
 } SingleFireRuntime_s;
@@ -112,6 +112,7 @@ void LoaderSetAngleRef(float angle_ref);
 void SetFrictionFeedforward(float inner_ff, float outer_ff);
 void UpdateLoaderFeedforward(void);
 void SetMotorEnableIfReady(DJIMotorInstance *motor, uint8_t enable);
+void HoldLoaderIdlePosition(void);
 uint8_t IsAllFrictionStableAgainstTarget(float threshold);
 float GetInnerFrictionAvgSpeed(void);
 float GetOuterFrictionAvgSpeed(void);

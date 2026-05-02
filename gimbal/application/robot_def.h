@@ -34,8 +34,8 @@
 #define PITCH_SPEED_REF_MAX_DPS 15000.0f // 限制 cmd 层能下发给 pitch 速度环的最大角速度，目的是鼠标 pitch 已继续提高到 15000 档后不能被旧上限截断，同时仍保留统一速度安全边界。
 #define PITCH_LIMIT_RAMP_ZONE_DEG 7.0f // pitch 距离 IMU 软件限位 7 度内开始线性减速，目的是在当前高速速度环命令下更早收速，降低丝杠机构接近边界时仍然撞得过猛的风险。
 // 发射参数
-#define ONE_BULLET_DELTA_ANGLE 80 // 发射一发弹丸拨盘转动的距离,由机械设计图纸给出
-#define REDUCTION_RATIO_LOADER (268.0f / 17.0f) // 拨弹盘减速箱实测减速比为 268:17，使用分数表达式避免把 15.7647... 手写截断导致 80 度输出端行程换算出现系统误差。
+#define ONE_BULLET_DELTA_ANGLE 70.0f // 发射一发弹丸拨盘输出端固定转动 90 度，目的是每次有效单发指令都推进一个完整弹位。
+#define REDUCTION_RATIO_LOADER (268.0f / 17.0f) // 拨弹盘减速箱实测减速比为 268:17，使用分数表达式避免把 15.7647... 手写截断导致 90 度输出端行程换算出现系统误差。
 #define NUM_PER_CIRCLE 9 // 拨盘一圈的装载量
 // 机器人底盘修改的参数,单位为mm(毫米)
 #define WHEEL_BASE 450 // 纵向轴距(前进后退方向)

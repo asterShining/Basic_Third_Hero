@@ -1,6 +1,6 @@
 {
   "version": "1.0.0",
-  "lastScanned": 1777554786957,
+  "lastScanned": 1777664403815,
   "projectRoot": "/home/aster/Documents/robomaster/Basic_Third_Hero",
   "techStack": {
     "languages": [],
@@ -36,7 +36,7 @@
       "path": "chassis",
       "purpose": null,
       "fileCount": 12,
-      "lastAccessed": 1777554786954,
+      "lastAccessed": 1777664403814,
       "keyFiles": [
         "CMakeLists.txt",
         "CMakePresets.json",
@@ -49,7 +49,7 @@
       "path": "gimbal",
       "purpose": null,
       "fileCount": 13,
-      "lastAccessed": 1777554786956,
+      "lastAccessed": 1777664403815,
       "keyFiles": [
         "CMakeLists.txt",
         "CMakePresets.json",
@@ -62,7 +62,7 @@
       "path": "tools",
       "purpose": null,
       "fileCount": 1,
-      "lastAccessed": 1777554786956,
+      "lastAccessed": 1777664403815,
       "keyFiles": [
         "export_pitch_cali_from_rtt.py"
       ]
@@ -70,16 +70,28 @@
   },
   "hotPaths": [
     {
+      "path": "",
+      "accessCount": 24,
+      "lastAccessed": 1777664451794,
+      "type": "directory"
+    },
+    {
       "path": "gimbal",
       "accessCount": 23,
       "lastAccessed": 1777533001877,
       "type": "directory"
     },
     {
-      "path": "",
-      "accessCount": 18,
-      "lastAccessed": 1777532126455,
-      "type": "directory"
+      "path": "gimbal/modules/motor/DJImotor/dji_motor.c",
+      "accessCount": 8,
+      "lastAccessed": 1777664443970,
+      "type": "file"
+    },
+    {
+      "path": "gimbal/application/robot_def.h",
+      "accessCount": 8,
+      "lastAccessed": 1777664523470,
+      "type": "file"
     },
     {
       "path": "gimbal/application/gimbal/gimbal_feedforward.c",
@@ -88,9 +100,9 @@
       "type": "file"
     },
     {
-      "path": "gimbal/modules/motor/DJImotor/dji_motor.c",
+      "path": "gimbal/modules/motor/motor_def.h",
       "accessCount": 7,
-      "lastAccessed": 1777533405568,
+      "lastAccessed": 1777664443891,
       "type": "file"
     },
     {
@@ -100,27 +112,15 @@
       "type": "file"
     },
     {
-      "path": "gimbal/modules/motor/motor_def.h",
-      "accessCount": 6,
-      "lastAccessed": 1777533405607,
-      "type": "file"
-    },
-    {
       "path": "gimbal/application/gimbal/gimbal_private.h",
       "accessCount": 5,
       "lastAccessed": 1777451963312,
       "type": "file"
     },
     {
-      "path": "gimbal/application/robot_def.h",
-      "accessCount": 5,
-      "lastAccessed": 1777531728633,
-      "type": "file"
-    },
-    {
       "path": "gimbal/modules/motor/DJImotor/dji_motor.h",
-      "accessCount": 4,
-      "lastAccessed": 1777531728727,
+      "accessCount": 5,
+      "lastAccessed": 1777664443946,
       "type": "file"
     },
     {
@@ -167,8 +167,8 @@
     },
     {
       "path": "chassis/application/robot_def.h",
-      "accessCount": 2,
-      "lastAccessed": 1777445860977,
+      "accessCount": 3,
+      "lastAccessed": 1777664443998,
       "type": "file"
     },
     {
@@ -223,6 +223,12 @@
       "path": "CLAUDE.md",
       "accessCount": 2,
       "lastAccessed": 1777531728572,
+      "type": "file"
+    },
+    {
+      "path": "chassis/modules/motor/motor_def.h",
+      "accessCount": 2,
+      "lastAccessed": 1777664444010,
       "type": "file"
     },
     {
@@ -313,12 +319,6 @@
       "path": "gimbal/modules/motor/HTmotor/HT04.h",
       "accessCount": 1,
       "lastAccessed": 1777445879871,
-      "type": "file"
-    },
-    {
-      "path": "chassis/modules/motor/motor_def.h",
-      "accessCount": 1,
-      "lastAccessed": 1777445884701,
       "type": "file"
     },
     {

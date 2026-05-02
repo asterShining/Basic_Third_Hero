@@ -32,7 +32,9 @@ static uint8_t IsLoaderStalled(void)
 loader_mode_e HandleLoaderStall(loader_mode_e current_mode)
 {
     float current_time = DWT_GetTimeline_ms();
-    uint8_t is_shooting = (current_mode == LOAD_1_BULLET) ||
+    uint8_t single_fire_is_feeding = (current_mode == LOAD_1_BULLET) &&
+                                     (single_fire.state == SF_FEEDING);
+    uint8_t is_shooting = (single_fire_is_feeding != 0u) ||
                           (current_mode == LOAD_2_BULLET) ||
                           (current_mode == LOAD_3_BULLET) ||
                           (current_mode == LOAD_BURSTFIRE);
@@ -51,6 +53,10 @@ loader_mode_e HandleLoaderStall(loader_mode_e current_mode)
             stall_handler.state = STALL_DETECTING;
             stall_handler.detect_start_time = current_time;
             stall_handler.saved_mode = current_mode;
+            if (single_fire_is_feeding != 0u) {
+                // 进入堵转消抖的瞬间先记住本次单发起点，目的是后续即使普通单发状态发生变化，也仍能退回触发前的上一个弹位。
+                stall_handler.reverse_target_angle = single_fire.rush_start_angle;
+            }
         }
         if (current_mode == LOAD_REVERSE || current_mode == LOAD_STOP) {
             // 主动反转或停止时清空连续反转计数，目的是这两种模式不应继续沿用上一轮自动解卡的失败累计。
@@ -67,11 +73,16 @@ loader_mode_e HandleLoaderStall(loader_mode_e current_mode)
         if ((current_time - stall_handler.detect_start_time) >= STALL_DETECT_TIME) {
             StallDebug_s *p_stall = ShootDebug_GetStallPtr();
 
-            // 持续堵转超过门槛后进入反转阶段，目的是只有确认卡死时才值得让拨盘主动回退半发节距。
+            // 持续堵转超过门槛后进入反转阶段，目的是只有确认卡死时才让拨盘主动退回，避免瞬时电流尖峰打断正常送弹。
             stall_handler.state = STALL_REVERSING;
             stall_handler.reverse_start_time = current_time;
-            stall_handler.reverse_target_angle = loader->measure.total_angle -
-                                                 LoaderOutputAngleToMotorAngle(REVERSE_ANGLE);
+            if (stall_handler.saved_mode != LOAD_1_BULLET) {
+                // 非单发模式没有可靠的上一弹位缓存，暂时沿用短反转兜底，避免本轮修改把 2/3 发和连发的行为一起扩大。
+                stall_handler.reverse_target_angle = loader->measure.total_angle -
+                                                     LoaderOutputAngleToMotorAngle(REVERSE_ANGLE);
+            }
+            // 单发堵转时使用进入消抖时锁存的起点，目的是把“反转”定义成回到上一个弹位，而不是按固定小角度盲退。
+            single_fire.lock_target_angle = stall_handler.reverse_target_angle;
             stall_handler.reverse_count++;
             p_stall->reverse_count = stall_handler.reverse_count;
             p_stall->reverse_target_angle = stall_handler.reverse_target_angle;
@@ -96,9 +107,9 @@ loader_mode_e HandleLoaderStall(loader_mode_e current_mode)
                 stall_handler.reverse_count = 0;
                 RETURN_WITH_DEBUG(LOAD_STOP);
             }
-            // 恢复等待结束后回到原来的发射模式，目的是用户原始意图仍应继续生效，除非已经超过自动解卡上限。
+            // 恢复等待结束后停在回退位置等待下一次明确指令，目的是堵转后的自动动作只负责解压，不再继续重试卷弹。
             stall_handler.state = STALL_NORMAL;
-            RETURN_WITH_DEBUG(stall_handler.saved_mode);
+            RETURN_WITH_DEBUG(LOAD_STOP);
         }
         RETURN_WITH_DEBUG(LOAD_STOP);
 
