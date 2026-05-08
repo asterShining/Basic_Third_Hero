@@ -19,6 +19,7 @@
 #define CUSTOM_IMAGE_BRIDGE_LOG_INTERVAL_MS 1000u
 #define CUSTOM_IMAGE_BRIDGE_UART_BUSY_RECOVER_MS 120u
 #define CUSTOM_IMAGE_BRIDGE_USB_SILENCE_RESET_MS 1000u
+#define CUSTOM_IMAGE_BRIDGE_RESET_COOLDOWN_MS 500u
 #define CUSTOM_IMAGE_BRIDGE_H264_TAIL_KEEP_BYTES 5u
 #define CUSTOM_IMAGE_BRIDGE_H264_NAL_IDR 5u
 #define CUSTOM_IMAGE_BRIDGE_H264_NAL_SPS 7u
@@ -96,6 +97,7 @@ static volatile uint8_t custom_image_bridge_requested_reset_reason;
 static uint8_t custom_image_bridge_wait_key_boundary;
 static uint32_t custom_image_bridge_uart_busy_start_tick_ms;
 static uint32_t custom_image_bridge_last_silence_reset_rx_tick_ms;
+static uint32_t custom_image_bridge_last_reset_tick_ms;
 
 static uint32_t CustomImageBridgeEnterCritical(void)
 {
@@ -131,16 +133,16 @@ static const char *CustomImageBridgeResetReasonName(uint8_t reason)
     }
 }
 
-static void CustomImageBridgeRequestResetFromCallback(CustomImageBridgeResetReason_e reason)
-{
-    // USB CDC 回调运行在中断相关路径，不能在这里搬移大块内存或重置整条桥接状态；
-    // 因此只留下一个复位请求，由 20ms 图像桥接任务在普通任务上下文里执行真正的清队列和重同步。
-    custom_image_bridge_requested_reset_reason = (uint8_t)reason;
-    custom_image_bridge_reset_requested = 1u;
-}
 
 static void CustomImageBridgeResetStreamState(CustomImageBridgeResetReason_e reason)
 {
+    uint32_t now_tick = HAL_GetTick();
+    if (custom_image_bridge_last_reset_tick_ms != 0u &&
+        (now_tick - custom_image_bridge_last_reset_tick_ms) < CUSTOM_IMAGE_BRIDGE_RESET_COOLDOWN_MS) {
+        return;
+    }
+    custom_image_bridge_last_reset_tick_ms = now_tick;
+
     uint32_t primask = 0u;
     uint8_t usb_queue_dropped = 0u;
     uint8_t packet_queue_dropped = custom_image_bridge_packet_queue_count;
@@ -233,7 +235,6 @@ static void CustomImageBridgeUSBRxCallback(uint16_t recv_len)
             (uint8_t)((custom_image_bridge_usb_queue_read_index + 1u) % CUSTOM_IMAGE_BRIDGE_USB_PACKET_SLOT_COUNT);
         custom_image_bridge_usb_queue_count--;
         custom_image_bridge_diag.usb_queue_drop_count++;
-        CustomImageBridgeRequestResetFromCallback(CUSTOM_IMAGE_BRIDGE_RESET_USB_QUEUE_FULL);
     }
     CustomImageBridgeExitCritical(primask);
 
@@ -422,8 +423,12 @@ static void CustomImageBridgeDrainUSBQueue(void)
 
     while (custom_image_bridge_wait_key_boundary == 0u &&
            custom_image_bridge_pending_len >= CUSTOM_IMAGE_BRIDGE_CHUNK_BYTES) {
-        if (custom_image_bridge_packet_queue_count >= CUSTOM_IMAGE_BRIDGE_PACKET_QUEUE_HIGH_WATERMARK) {
-            CustomImageBridgeResetStreamState(CUSTOM_IMAGE_BRIDGE_RESET_PACKET_BACKLOG);
+        if (custom_image_bridge_packet_queue_count >= CUSTOM_IMAGE_BRIDGE_PACKET_QUEUE_SLOT_COUNT) {
+            // 仅丢弃 pending 中最旧的一个 300B 块，不清空流状态；
+            // 直接全量复位会切断连续 H.264 流，客户端会看到断线重连。
+            CustomImageBridgeConsumePendingPrefix(CUSTOM_IMAGE_BRIDGE_CHUNK_BYTES);
+            custom_image_bridge_diag.pending_trim_count++;
+            custom_image_bridge_diag.pending_drop_bytes += CUSTOM_IMAGE_BRIDGE_CHUNK_BYTES;
             break;
         }
         if (CustomImageBridgeEnqueuePacket(custom_image_bridge_pending_bytes) == 0u) {
