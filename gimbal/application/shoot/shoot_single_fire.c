@@ -221,7 +221,7 @@ void AbortSingleFire(void)
 
 /**
  * @brief 判断单发事务是否处于历史补发兼容状态
- * @return 1 表示当前停留在旧补发状态或旧补发推进中，0 表示仍按固定 90 度事务自保持处理
+ * @return 1 表示当前停留在旧补发状态或旧补发推进中，0 表示仍按固定一发事务自保持处理
  */
 uint8_t SingleFireIsRetryActive(void)
 {
@@ -255,7 +255,7 @@ static void BeginSingleFireFeedAttempt(float current_time, float feed_bullet_cou
     single_fire.outer_baseline_speed = GetOuterFrictionAvgSpeed();
     single_fire.inner_dip_stable_count = 0;
     if (reset_transaction_timer) {
-        // 只有一轮全新的单发事务才清掉计数锁存，目的是同一发在固定 90 度行程内可能持续掉速多拍，但只能贡献一次 fire_count。
+        // 只有一轮全新的单发事务才清掉计数锁存，目的是同一发在固定一发行程内可能持续掉速多拍，但只能贡献一次 fire_count。
         single_fire.shot_counted = 0u;
     }
 
@@ -289,7 +289,7 @@ static void FinishSingleFire(float current_time)
 {
     single_fire.brake_start_time = current_time;
     if (fabsf(single_fire.rush_target_angle - loader->measure.total_angle) < SF_RUSH_REACHED_TOLERANCE) {
-        // 正常到位收口时继续锁住固定 90 度目标，目的是状态切到等待回速或锁角后仍让位置环补完整个机械行程，而不是把当前测量值当成新的提前停止点。
+        // 正常到位收口时继续锁住固定一发目标，目的是状态切到等待回速或锁角后仍让位置环补完整个机械行程，而不是把当前测量值当成新的提前停止点。
         single_fire.lock_target_angle = single_fire.rush_target_angle;
     } else {
         // 超时或历史兼容状态收口时锁住当前位置，目的是拨盘异常不到位时优先停止继续追目标，避免卡滞状态下长时间输出。
@@ -306,7 +306,7 @@ static void FinishSingleFire(float current_time)
         // 已经由掉速确认过真实出弹时，事务结束后先进入回速等待；这里不再增加 fire_count，目的是计数只发生在掉速首次确认那一拍。
         single_fire.state = SF_WAIT_RECOVER;
     } else {
-        // 固定 90 度行程结束仍未出现有效掉速时，按未确认出弹处理，目的是真正做到掉速只负责计数，而不是为了寻找掉速继续补发推进。
+        // 固定一发行程结束仍未出现有效掉速时，按未确认出弹处理，目的是真正做到掉速只负责计数，而不是为了寻找掉速继续补发推进。
         single_fire.state = SF_LOCKING;
         single_fire.feed_timeout_count++;
     }
@@ -347,7 +347,7 @@ static uint8_t IsFrictionDipping(void)
 }
 
 /**
- * @brief 单发处理逻辑 (固定 90 度位置环送弹 + 掉速计数)
+ * @brief 单发处理逻辑 (固定一发位置环送弹 + 掉速计数)
  * @param trigger_active 是否触发 (边沿信号)
  */
 void HandleSingleFire(uint8_t trigger_active)
@@ -370,7 +370,7 @@ void HandleSingleFire(uint8_t trigger_active)
 
     case SF_WAIT_SPEED:
         if (ShootIsSpeedReady()) {
-            // 只有最终目标速度 ready 后才允许固定 90 度送弹，目的是保持发射能量稳定，同时确保拨盘目标只由机械行程决定。
+            // 只有最终目标速度 ready 后才允许固定一发送弹，目的是保持发射能量稳定，同时确保拨盘目标只由机械行程决定。
             BeginSingleFireFeedAttempt(current_time, SF_RUSH_BULLET_COUNT, 1u);
         } else {
             // 待速期间只锁当前位置不再前推，目的是用户反馈“点一下先动一下”就是旧前推逻辑带来的预拨感。
@@ -410,12 +410,11 @@ void HandleSingleFire(uint8_t trigger_active)
         CountFiredBulletByDipIfNeeded();
 
         if ((single_fire.shot_start_time > 0.0f) &&
-            ((current_time - single_fire.shot_start_time) > SF_TRANSACTION_TIMEOUT) &&
-            (stall_handler.state != STALL_DETECTING)) {
-            // 固定 90 度事务超过总时限后直接收口；若已经进入堵转消抖则暂时交给堵转状态机，目的是避免 400ms 普通超时抢在堵转确认前清掉回退上下文。
+            ((current_time - single_fire.shot_start_time) > SF_TRANSACTION_TIMEOUT)) {
+            // 固定一发事务超过总时限后直接收口，目的是堵转强推策略只允许在短窗口内持续顶推，避免限制位紧张时长期追目标导致机构过载。
             FinishSingleFire(current_time);
         } else if (fabsf(single_fire.rush_target_angle - loader->measure.total_angle) < SF_RUSH_REACHED_TOLERANCE) {
-            // 只要固定 90 度机械行程已经到位就结束本次拨弹，目的是摩擦轮掉速不再拥有停止或补发拨弹盘的控制权。
+            // 只要固定一发机械行程已经到位就结束本次拨弹，目的是摩擦轮掉速不再拥有停止或补发拨弹盘的控制权。
             FinishSingleFire(current_time);
         } else {
             LoaderSetAngleRef(single_fire.rush_target_angle);

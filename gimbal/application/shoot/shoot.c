@@ -58,9 +58,9 @@ float dead_time = 0.0f;
 
 // 单发控制的掉速基线必须跨拍保存，目的是送弹过程中的峰值更新和后续出弹计数都基于同一份控制基线。
 DipControlRuntime_s dip_control = { 0 };
-// 堵转状态机必须跨拍保存当前阶段与时间戳，目的是自动解卡由“检测 -> 反转 -> 恢复”三段时序构成。
+// 堵转状态机必须跨拍保存当前阶段与时间戳，目的是单发只保留观测，非单发仍沿用“检测 -> 反转 -> 恢复”的解卡时序。
 ShootStallHandler_s stall_handler = { 0 };
-// 单发状态机必须跨拍保存事务状态，目的是待速、固定 90 度送弹、回速和锁角都不是单拍逻辑。
+// 单发状态机必须跨拍保存事务状态，目的是待速、固定一发送弹、回速和锁角都不是单拍逻辑。
 SingleFireRuntime_s single_fire = { 0 };
 // 单发触发边沿缓存必须跨拍保存，目的是用户边沿请求要先缓存住，再由状态机在合适时机消费。
 FireTrigger_s fire_trigger = { .last_mode = LOAD_STOP, .trigger_consumed = 0u, .pending_fire = 0u, .last_accept_time_ms = 0.0f };
@@ -148,11 +148,11 @@ void ShootInit(void)
             },
             .speed_PID = {
                 .Kp = 3.1,
-                .Ki = 0.0,
+                .Ki = 1.0,
                 .Kd = 0.0,
                 .Improve = PID_Integral_Limit,
                 .IntegralLimit = 5000,
-                .MaxOut = 16100,
+                .MaxOut = 16384,
             },
             // 绑定拨弹盘速度前馈变量，电机控制器每拍通过此指针读取前馈速度并叠加到速度环参考值入口
             .speed_feedforward_ptr = &ff_loader,
@@ -296,7 +296,7 @@ void ShootTask(void)
     raw_load_mode = shoot_cmd_recv.load_mode;
     UpdateLoaderInitialPosition(current_time_ms);
 
-    // 先对单发触发做边沿锁存，目的是单发要完整执行固定 90 度位置目标，不能依赖 `LOAD_1_BULLET` 电平持续存在。
+    // 先对单发触发做边沿锁存，目的是单发要完整执行固定一发位置目标，不能依赖 `LOAD_1_BULLET` 电平持续存在。
     if (loader_initial_position_locked == 0u) {
         fire_trigger.pending_fire = 0u;
         fire_trigger.trigger_consumed = (uint8_t)(raw_load_mode == LOAD_1_BULLET);
@@ -321,7 +321,7 @@ void ShootTask(void)
 
     requested_load_mode = raw_load_mode;
     if (loader_initial_position_locked == 0u) {
-        // 软件初始位未锁定前统一禁止拨弹盘执行发射模式，目的是所有相对 90 度送弹都必须建立在明确的弹位坐标上。
+        // 软件初始位未锁定前统一禁止拨弹盘执行发射模式，目的是所有相对一发的送弹动作都必须建立在明确的弹位坐标上。
         requested_load_mode = LOAD_STOP;
     }
 
@@ -352,7 +352,7 @@ void ShootTask(void)
         SetMotorEnableIfReady(loader, 1u);
     }
 
-    // 固定 90 度事务待速和送弹期间即使上层已经回到 STOP，也仍把请求送进堵转状态机，目的是单发事务尚未收口时自动解卡仍然有意义。
+    // 固定一发事务待速和送弹期间即使上层已经回到 STOP，也仍把请求送进堵转状态机，目的是单发强推窗口内仍要保留堵转观测数据。
     stall_input_mode = requested_load_mode;
     if ((requested_load_mode == LOAD_STOP) &&
         !SingleFireIsRetryActive() &&
@@ -416,7 +416,7 @@ void ShootTask(void)
 
         case LOAD_REVERSE:
             AbortSingleFire();
-            // 手动反转同样按完整一发弹位执行，目的是用户触发反转时能明确回到上一个 90 度弹位，而不是停在半发中间位置。
+            // 手动反转同样按完整一发弹位执行，目的是用户触发反转时能明确回到上一个弹位，而不是停在半发中间位置。
             single_fire.lock_target_angle = loader->measure.total_angle - LoaderBulletCountToMotorAngle(1.0f);
             LoaderSetAngleRef(single_fire.lock_target_angle);
             hibernate_time = DWT_GetTimeline_ms();
@@ -440,13 +440,13 @@ void ShootTask(void)
         // 正常模式: 根据不同的弹速等级设置不同的分级速度；原因是当前双级摩擦轮靠“内圈先加速、外圈后稳速”来匹配目标弹速。
         switch (shoot_cmd_recv.bullet_speed) {
         case BIG_AMU_12:
-            ShootSetSpeedDual(11.0f, 11.7f);
+            ShootSetSpeedDual(11.0f, 11.5f);
             break;
         case BIG_AMU_16:
-            ShootSetSpeedDual(16.2f, 16.2f);
+            ShootSetSpeedDual(15.5f, 16.2f);
             break;
         default:
-            ShootSetSpeedDual(15.2f, 16.3f);
+            ShootSetSpeedDual(15.5f, 16.2f);
             break;
         }
     } else {

@@ -25,7 +25,7 @@ static uint8_t IsLoaderStalled(void)
 }
 
 /**
- * @brief 堵转检测与自动反转处理状态机
+ * @brief 堵转检测与非单发自动反转处理状态机
  * @param current_mode 当前的发射模式
  * @return 经过堵转处理后的发射模式
  */
@@ -48,15 +48,16 @@ loader_mode_e HandleLoaderStall(loader_mode_e current_mode)
 
     switch (stall_handler.state) {
     case STALL_NORMAL:
+        if (single_fire_is_feeding != 0u) {
+            // 单发送弹阶段改为强推到目标位，堵转判据只写入调试观测；这里不能进入自动反转消抖，否则限制位变紧后一次正常顶弹就会被状态机提前退回。
+            (void)IsLoaderStalled();
+            RETURN_WITH_DEBUG(current_mode);
+        }
         if (is_shooting && IsLoaderStalled()) {
             // 先进入消抖阶段而不是立即反转，目的是单拍卡顿或瞬时电流尖峰不应直接触发反转动作。
             stall_handler.state = STALL_DETECTING;
             stall_handler.detect_start_time = current_time;
             stall_handler.saved_mode = current_mode;
-            if (single_fire_is_feeding != 0u) {
-                // 进入堵转消抖的瞬间先记住本次单发起点，目的是后续即使普通单发状态发生变化，也仍能退回触发前的上一个弹位。
-                stall_handler.reverse_target_angle = single_fire.rush_start_angle;
-            }
         }
         if (current_mode == LOAD_REVERSE || current_mode == LOAD_STOP) {
             // 主动反转或停止时清空连续反转计数，目的是这两种模式不应继续沿用上一轮自动解卡的失败累计。
@@ -65,6 +66,12 @@ loader_mode_e HandleLoaderStall(loader_mode_e current_mode)
         RETURN_WITH_DEBUG(current_mode);
 
     case STALL_DETECTING:
+        if (single_fire_is_feeding != 0u) {
+            // 兼容旧状态残留：若单发已经进入强推策略，就清掉上一拍的堵转消抖上下文，避免旧状态继续走向反转阶段覆盖本次强推目标。
+            stall_handler.state = STALL_NORMAL;
+            (void)IsLoaderStalled();
+            RETURN_WITH_DEBUG(current_mode);
+        }
         if (!IsLoaderStalled()) {
             // 消抖期间若堵转特征消失就直接恢复正常，目的是这说明刚才只是短暂扰动，不应进入自动反转。
             stall_handler.state = STALL_NORMAL;
@@ -81,7 +88,7 @@ loader_mode_e HandleLoaderStall(loader_mode_e current_mode)
                 stall_handler.reverse_target_angle = loader->measure.total_angle -
                                                      LoaderOutputAngleToMotorAngle(REVERSE_ANGLE);
             }
-            // 单发堵转时使用进入消抖时锁存的起点，目的是把“反转”定义成回到上一个弹位，而不是按固定小角度盲退。
+            // 非单发以外的历史状态只保留兜底目标写入，目的是防止异常状态进入反转时没有明确角度参考。
             single_fire.lock_target_angle = stall_handler.reverse_target_angle;
             stall_handler.reverse_count++;
             p_stall->reverse_count = stall_handler.reverse_count;

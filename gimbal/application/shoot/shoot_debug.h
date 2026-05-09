@@ -52,7 +52,7 @@ typedef struct {
 typedef enum {
     SF_IDLE = 0, // 空闲, 等待触发
     SF_WAIT_SPEED, // 等待摩擦轮转速稳定
-    SF_FEEDING, // 位置环固定 90 度送弹中, 持续监测摩擦轮掉速只用于累计出弹数
+    SF_FEEDING, // 位置环固定一发送弹中, 持续监测摩擦轮掉速只用于累计出弹数
     SF_RETRYING, // 历史补发状态的兼容兜底, 新策略不再主动进入该状态继续推进拨盘
     SF_WAIT_RECOVER, // 发射成功后等待摩擦轮回速稳定，目的是下一发必须建立在摩擦轮已恢复稳态的前提上，才能压住连续点击时的多发。
     SF_LOCKING, // 固定行程完成或未确认出弹后的锁止保持, 目的是等待下一次明确触发
@@ -72,7 +72,7 @@ typedef struct {
     float brake_start_time; // 锁止开始时间 (ms), 保留原字段名以兼容现有调试观察脚本
     uint8_t is_dipping; // 是否检测到掉速 (1=掉速中)
     uint8_t trigger_edge; // 是否检测到触发边沿 (1=边沿触发)
-    uint8_t retry_count; // 历史补发次数观测值, 新固定 90 度策略下应保持为 0
+    uint8_t retry_count; // 历史补发次数观测值, 新固定一发策略下应保持为 0
     uint16_t fire_count; // 累计发射弹丸计数
     uint16_t feed_timeout_count; // 送弹超时计数 (可能缺弹)
 } SingleFireDebug_s;

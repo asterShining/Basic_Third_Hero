@@ -100,9 +100,14 @@
 #define CHASSIS_FORCE_FF_FILTER_ALPHA 0.35f // 对指令加速度做一阶滤波，目的是保留响应提升同时压掉控制周期抖动带来的电流噪声。
 #define CHASSIS_FORCE_FF_DT_FALLBACK 0.005f // DWT 首拍或异常周期时按底盘任务标称 200Hz 处理，避免前馈因异常 dt 放大。
 
-// [新增] 坡道判定阈值 (度)
-// 当 Pitch 轴角度绝对值 > 20.0f 时，认为是坡道，自动解除限速并开启超电爆发
-#define CHASSIS_SLOPE_THRESHOLD 20.0f
+// 坡道前馈从底盘 pitch 小于 -9 度时开始介入，目的是只在明确上坡时提前补足重力沿坡分量，避免下坡或小姿态噪声也主动推车。
+#define CHASSIS_SLOPE_THRESHOLD 9.0f
+// 坡道前馈整体增益保守小于 1，目的是先按 PPT 的重力分量模型给 PID 提前量，同时给实车摩擦、坡面材质和质量误差留标定空间。
+#define CHASSIS_SLOPE_FF_GAIN 0.65f
+// 单轮坡道前馈电流上限单独限制，目的是前馈只负责减轻上坡掉速，不能绕过速度环和功率控制直接主导轮组输出。
+#define CHASSIS_SLOPE_FF_MAX_CURRENT 2500.0f
+// 原有前后轮 PID 载荷分配仍只在大坡度时启用，目的是 9 度前馈验证阶段不改变四轮闭环比例，降低打滑和调参变量耦合。
+#define CHASSIS_SLOPE_PID_DISTRIBUTION_THRESHOLD 30.0f
 
 // 自动计算单位转换系数 (m/s -> deg/s)
 // 公式推导: 线速度 v = 角速度(rad/s) * r -> 角速度 = v/r

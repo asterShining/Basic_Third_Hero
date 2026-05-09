@@ -5,8 +5,6 @@
 #include "bsp_log.h"
 #include <math.h> // 需要用到 sin, cos, tan, sqrt
 
-#define MAX_SLOPE_FEEDFORWARD 8000.0f
-
 #define TORQUE_COEF 0.0003662109375f // (20/16384)*(0.3), 电机转矩系数，与电流和转矩相关
 #define POWER_COEF 187.0f / 3591.0f / 9.55f // 电机机械功率系数，与力矩和转速相关，注意框架中速度单位为aps
 const float K1[4] = { 1.23e-07, 1.23e-07, 1.23e-07, 1.23e-07 };
@@ -204,22 +202,53 @@ float PowerControlGetChassisPower(void)
 }
 
 /**
- * @brief [内部函数] PID 动态分配策略 (无前馈版)
- * @note  策略：根据重心位置，动态调整前后轮的 PID 输出比例。
- * 上坡时：前轮 PID 缩水(防打滑)，后轮 PID 放大(主出力)。
+ * @brief 计算坡道补偿前馈和大坡度 PID 载荷分配
+ *
  */
-static void CalculatePIDDistribution(void)
+static void CalculateSlopeCompensation(void)
 {
-    // 默认恢复 1.0 (平地模式)
-    for (int i = 0; i < 4; i++)
+    float slope_threshold_rad = CHASSIS_SLOPE_THRESHOLD * DEGREE_2_RAD;
+    float uphill_angle_rad = 0.0f;
+    float drive_eff = CHASSIS_DRIVETRAIN_EFF;
+
+    // 每拍先恢复平地默认值，目的是坡道条件退出后前馈和 PID 缩放必须立即回到零/一，不能沿用上一拍坡道状态。
+    for (int i = 0; i < 4; i++) {
         pid_gain_scale[i] = 1.0f;
+        slope_feedforward_current[i] = 0.0f;
+    }
 
     if (idx < 4)
         return;
 
+    if (drive_eff < 0.2f) {
+        // 传动效率被误配得过低会把理论扭矩放大成危险电流，这里给硬下限，保证参数异常时前馈仍处在可控范围。
+        drive_eff = 0.2f;
+    }
+
+    if (chassis_pitch < -slope_threshold_rad) {
+        float slope_force_x;
+        float wheel_force_x;
+        float wheel_torque;
+        float motor_current;
+
+        // 当前项目注释约定 pitch 为负表示上坡，因此 9 度只作为启用门槛，实际前馈仍按当前真实坡度代入 PPT 低配版公式 f=m*g*sin(beta_s)。
+        uphill_angle_rad = -chassis_pitch;
+        // PPT 低配版只补偿重力沿坡分量；这里把该牵引力当作底盘 x 正方向目标力，再平均分到四个麦轮。
+        slope_force_x = ROBOT_MASS * GRAVITY_ACC * sinf(uphill_angle_rad) * CHASSIS_SLOPE_FF_GAIN;
+        wheel_force_x = slope_force_x * 0.25f;
+        wheel_torque = wheel_force_x * RADIUS_WHEEL_M;
+        motor_current = wheel_torque * TORQUE_2_CURRENT_COEF / drive_eff;
+        motor_current = PowerControlLimitFloat(motor_current, 0.0f, CHASSIS_SLOPE_FF_MAX_CURRENT);
+
+        for (int i = 0; i < 4; i++) {
+            // 低配版暂不做重力投影点权重分配，四轮使用同一份上坡牵引前馈，后续若前轮打滑再升级到 PPT 高配版。
+            slope_feedforward_current[i] = motor_current;
+        }
+    }
+
     // 0. 阈值判断 (例如 25度 ~ 30度)
     // 小于此角度不进行干预，使用默认 PID
-    if (fabsf(chassis_pitch) < 0.5236f) { // 30度
+    if (fabsf(chassis_pitch) < CHASSIS_SLOPE_PID_DISTRIBUTION_THRESHOLD * DEGREE_2_RAD) {
         return;
     }
 
@@ -481,12 +510,15 @@ void PowerControl()
     DJI_Motor_Measure_s *measure; // 电机测量值
     float pid_measure, pid_ref; // 电机PID测量值和设定值
     initial_total_power = 0.0f;
-    // 1. 计算 PID 分配系数
+    // 1. 计算坡道前馈和 PID 分配系数
     if (slope_comp_enable) {
-        CalculatePIDDistribution(); // <--- 改名后的函数
+        CalculateSlopeCompensation();
     } else {
-        for (int i = 0; i < 4; i++)
+        for (int i = 0; i < 4; i++) {
+            // 关闭坡道补偿时同步清空前馈，目的是调参或故障回退时不会继续输出上一拍坡道电流。
             pid_gain_scale[i] = 1.0f;
+            slope_feedforward_current[i] = 0.0f;
+        }
     }
     // 遍历所有电机实例,进行串级PID的计算并设置发送报文的值
     for (size_t i = 0; i < idx; ++i) // idx实际上是4个
@@ -516,6 +548,15 @@ void PowerControl()
 
             // 速度 PID 仍然是主闭环，坡道载荷分配只缩放 PID 主输出，目的是先保持原有稳定性和防打滑策略。
             pid_ref *= pid_gain_scale[i];
+            if (slope_feedforward_current[i] > 0.0f) {
+                float slope_current_ref = slope_feedforward_current[i];
+                if (motor_setting->motor_reverse_flag == MOTOR_DIRECTION_REVERSE) {
+                    // 反装电机的速度参考已经在进入速度环前翻向，坡道前馈也必须同步翻向，才能保证四个轮子都在补偿底盘 x 正方向牵引力。
+                    slope_current_ref *= -1.0f;
+                }
+                // 坡道前馈按 PPT 低配版补偿重力沿坡分量，并在功率估算前叠加，目的是让上坡提前给力但仍受后级总功率限制统一裁剪。
+                pid_ref += slope_current_ref;
+            }
             if (force_ff_active != 0u) {
                 float force_current_ref = force_ff_current[i];
                 if (motor_setting->motor_reverse_flag == MOTOR_DIRECTION_REVERSE) {

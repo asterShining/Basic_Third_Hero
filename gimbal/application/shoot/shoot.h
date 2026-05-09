@@ -40,9 +40,9 @@
 // 起步估算：希望满行程时前馈贡献角度环输出的 20%，
 // 角度环输出 ≈ Kp × error = 14 × 1260 ≈ 17640，20% ≈ 3530，
 // K = 3530 / 1260 ≈ 2.8，建议从 2.0 开始逐步增大
-#define LOADER_FF_GAIN           2.5f
+#define LOADER_FF_GAIN 5.0f
 // 前馈速度输出上限 (deg/s)，防止大误差时前馈过大导致速度环参考值跳变过猛
-#define LOADER_FF_MAX_SPEED      5000.0f
+#define LOADER_FF_MAX_SPEED 10000.0f
 
 // ==================== 堵转检测参数 ====================
 // 堵转检测电流阈值 (raw值, M3508满量程16384, 设为 ~80% 高阈值使堵转处理更激烈)
@@ -51,7 +51,7 @@
 #define STALL_SPEED_THRESHOLD 400.0f
 // 堵转检测消抖时间 (ms), 持续满足条件才确认堵转
 #define STALL_DETECT_TIME 1500
-// 自动解卡兜底反转使用完整一发弹位，目的是没有单发起点缓存的模式也按 90 度退回一个明确弹位，而不是只短退 9 度导致解卡不足。
+// 自动解卡兜底反转使用完整一发弹位，目的是没有单发起点缓存的模式也按当前机械弹位退回一个明确位置，而不是只短退导致解卡不足。
 #define REVERSE_ANGLE ONE_BULLET_DELTA_ANGLE
 // 反转持续时间 (ms)
 #define REVERSE_TIME 500
@@ -61,16 +61,16 @@
 #define MAX_REVERSE_COUNT 5
 
 // ==================== 单发控制参数 ====================
-// 定义单发固定送弹步距 (单位: 发)，目的是每次触发只让拨弹盘输出端走完 ONE_BULLET_DELTA_ANGLE 对应的 90 度机械行程，掉速只参与出弹计数，不再提前截断拨盘目标。
+// 定义单发固定送弹步距 (单位: 发)，目的是每次触发只让拨弹盘输出端走完 ONE_BULLET_DELTA_ANGLE 对应的一发机械行程，掉速只参与出弹计数，不再提前截断拨盘目标。
 #define SF_RUSH_BULLET_COUNT 1.0f
 // 拨盘电机总角度对应的一发角度 (deg), 需要乘减速比, 因为 total_angle 是电机转子多圈角度
 #define LOADER_MOTOR_ANGLE_PER_BULLET (ONE_BULLET_DELTA_ANGLE * REDUCTION_RATIO_LOADER)
 // 单发目标总角度 (deg)，用于位置环按固定一发机械行程推弹，实际输出端角度由 ONE_BULLET_DELTA_ANGLE 决定。
 #define SF_RUSH_ANGLE (SF_RUSH_BULLET_COUNT * LOADER_MOTOR_ANGLE_PER_BULLET)
-// 单发到位容差 (deg)，用于判断固定 90 度机械行程已经基本完成；这里收紧到 0.03 发是为了避免过早收口导致拨盘输出端明显少走角度。
+// 单发到位容差 (deg)，用于判断固定一发机械行程已经基本完成；这里收紧到 0.03 发是为了避免过早收口导致拨盘输出端明显少走角度。
 #define SF_RUSH_REACHED_TOLERANCE (0.03f * LOADER_MOTOR_ANGLE_PER_BULLET)
-// 定义整次单发事务的总超时 (ms)，目的是固定 90 度行程如果因为堵转或反馈异常迟迟不到位，也必须按安全边界收口，不能让拨盘持续追目标。
-#define SF_TRANSACTION_TIMEOUT 400.0f
+// 定义整次单发事务的总超时 (ms)，目的是单发限制位变紧后仍快速收口，即使强推不到位也不能让拨盘长时间顶住机构。
+#define SF_TRANSACTION_TIMEOUT 300.0f
 // 定义最小有效掉速行程 (单位: 发)，目的是忽略刚起步阶段的摩擦轮扰动，只有拨盘确实推进到可能咬弹的位置后才允许把掉速记为一发。
 #define SF_MIN_VALID_DIP_PROGRESS_BULLET 0.30f
 // 定义平均掉速连续稳定拍数，目的是单电机噪声和瞬时扰动较多，平均掉速需要跨两个控制周期确认后再累计发射计数。
@@ -80,7 +80,7 @@
 
 // ==================== 发射确认检测参数 ====================
 // 掉速检测阈值 (deg/s), 内圈摩擦轮速度下降超过此值认为有弹丸通过
-// 掉速门槛只服务发射计数，目的是保留弹丸数统计能力，同时避免阈值变化再次影响拨盘固定 90 度送弹行程。
+// 掉速门槛只服务发射计数，目的是保留弹丸数统计能力，同时避免阈值变化再次影响拨盘固定一发送弹行程。
 #define FRICTION_SPEED_DIP_THRESHOLD 900.0f
 // 定义外圈辅助确认阈值 (deg/s)，目的是当内圈只出现“较弱但连续”的平均掉速时，必须让外圈也给出一定幅度的掉速佐证，减少把半咬弹误记为真实出弹。
 #define OUTER_DIP_CONFIRM_THRESHOLD 650.0f
