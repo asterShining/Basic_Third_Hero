@@ -69,7 +69,7 @@ void ResetMouseControlLatchState(void)
     keyboard_turnback_press_frame_count = 0u;
     keyboard_ui_refresh_last = 0u;
     keyboard_super_cap_toggle_last = 0u;
-    keyboard_super_cap_latched = 0u;
+    keyboard_super_cap_latched = 1u;
     keyboard_spin_mode_latched = 0u;
     keyboard_free_mode_latched = 0u;
     ClearKeyboardTurnbackState();

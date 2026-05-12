@@ -397,8 +397,8 @@ void UpdateLoaderFeedforward(void)
         return;
     }
 
-    // 位置误差 = 目标角度 - 当前角度，正值代表拨盘还需要正向推进
-    angle_error = single_fire.rush_target_angle - loader->measure.total_angle;
+    // 改用增量目标而非总行程目标，前馈力度与当前10度步进匹配而非远端目标
+    angle_error = single_fire.increment_target_angle - loader->measure.total_angle;
 
     // 负误差表示已经超调到位，不应反向施加前馈，直接清零
     if (angle_error < 0.0f)

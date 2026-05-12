@@ -75,6 +75,14 @@ float GetAggressiveSuperCapBonus(float referee_power_limit, float buffer_energy_
         return 0.0f;
     }
 
+    // 用户通过C键显式关闭超电时强制退出辅助，目的是把用户主动关闭作为软退出条件，优先级低于硬件离线但高于能量策略。
+    if (chassis_cmd_recv.cap_mode == SUPER_CAP_OFF) {
+        super_cap_policy_state.assist_enabled = 0u;
+        super_cap_policy_state.assist_target_w = 0.0f;
+        super_cap_policy_state.assist_applied_w = 0.0f;
+        return 0.0f;
+    }
+
     // 一旦超电板报告真实硬错误或当前输出被禁用，就直接回到无辅助状态，目的是此时继续给底盘追加预算只会制造“功率指令很猛但电源不给”的假象。
     if (SuperCapHasHardFault(cap) != 0u || SuperCapIsOutputDisabled(cap) != 0u) {
         super_cap_policy_state.assist_enabled = 0u;

@@ -63,6 +63,15 @@
 // ==================== 单发控制参数 ====================
 // 定义单发固定送弹步距 (单位: 发)，目的是每次触发只让拨弹盘输出端走完 ONE_BULLET_DELTA_ANGLE 对应的一发机械行程，掉速只参与出弹计数，不再提前截断拨盘目标。
 #define SF_RUSH_BULLET_COUNT 1.0f
+// 增量步进角度为 1/8 弹位的电机角度 (deg)，目的是将一次大步进拆为多个小步进，每个步进完成后检查摩擦轮掉速，掉速则立即停止形成物理事件闭环
+#define SF_INCREMENT_MOTOR_ANGLE (LOADER_MOTOR_ANGLE_PER_BULLET / 8.0f)
+// 增量到位容差 - 电机端 (deg)，增量5%容差保证快速响应下一增量
+#define SF_INCREMENT_REACHED_TOLERANCE (0.05f * SF_INCREMENT_MOTOR_ANGLE)
+// 单发最大总行程 (发)，掉速漏检安全上限，防止空拨无限步进
+#define SF_MAX_TOTAL_FEED_BULLET 2.5f
+// 增量期间最低前馈速度 (deg/s)，保证每个10度增量快速推进达到速度环效果，
+// 位置环PID在小误差时输出不足，通过前馈地板维持高速，到位时容差内自动切换下一增量
+#define LOADER_FF_INCREMENT_FLOOR 5000.0f
 // 拨盘电机总角度对应的一发角度 (deg), 需要乘减速比, 因为 total_angle 是电机转子多圈角度
 #define LOADER_MOTOR_ANGLE_PER_BULLET (ONE_BULLET_DELTA_ANGLE * REDUCTION_RATIO_LOADER)
 // 单发目标总角度 (deg)，用于位置环按固定一发机械行程推弹，实际输出端角度由 ONE_BULLET_DELTA_ANGLE 决定。

@@ -86,11 +86,17 @@
 #define UI_BODY_HALF_SIZE 35.5f
 #define UI_BODY_FILL_WIDTH 12u
 
-// What: 4 条填充线横向分布在 body 矩形内部；Why: 裁判 UI 不支持旋转实心矩形，只能用多条粗线逼近“代码中的车体块”。
+// What: 4 条填充线横向分布在 body 矩形内部；Why: 裁判 UI 不支持旋转实心矩形，只能用多条粗线逼近"代码中的车体块"。
 #define UI_BODY_FILL_CENTER_0_X -24.0f
 #define UI_BODY_FILL_CENTER_1_X -8.0f
 #define UI_BODY_FILL_CENTER_2_X 8.0f
 #define UI_BODY_FILL_CENTER_3_X 24.0f
+
+// What: 车体前后方向标识；Why: 在body前方画红色横杠、后方画灰色短线，一键掉头时操作者能立刻分辨原始前方和新前方，不再靠猜body竖条方向。
+#define UI_BODY_FRONT_BAR_HALF_LEN 24.0f  // 前方红色横杠半长，覆盖body横向宽度
+#define UI_BODY_REAR_BAR_HALF_LEN 12.0f   // 后方灰色短线半长，比前方短一半形成不对称视觉
+#define UI_BODY_FRONT_BAR_WIDTH 6u        // 前方横杠线宽，比填充线细但比刻度线粗，保证一眼可见
+#define UI_BODY_REAR_BAR_WIDTH 4u         // 后方短线更细，进一步加强前后不对称辨识度
 
 // What: 这条线直接继承新布局里的 `shooter`；Why: 你已经确认 shooter 作为参考方向保持静止，不能再跟 body 一起旋转。
 #define UI_SHOOTER_START_X 1583u
@@ -165,11 +171,11 @@
 #define UI_LABEL_CAP_Y 661u
 #define UI_LABEL_CAP_FONT 31u
 #define UI_LABEL_CAP_WIDTH 3u
-// 超电状态字和 F 旁的档位数字共用同一套横向间距规则，目的是让左侧三组状态列的文本节奏保持一致，不再让 CAP 这一列显得特别散。
-#define UI_LABEL_CAP_STATE_X (UI_LABEL_CAP_X + (UI_LABEL_FRIC_SPEED_X - UI_LABEL_FRIC_X))
-#define UI_LABEL_CAP_STATE_Y UI_LABEL_CAP_Y
-#define UI_LABEL_CAP_STATE_FONT UI_LABEL_FRIC_SPEED_FONT
-#define UI_LABEL_CAP_STATE_WIDTH UI_LABEL_FRIC_SPEED_WIDTH
+// 超电能量百分比放在大号 `c` 标签正下方，目的是形成"标签在上、数值在下"的紧凑纵向布局，不再沿用旧的水平排列状态字方案。
+#define UI_LABEL_CAP_PERCENT_X    UI_LABEL_CAP_X        // 198, 与 "c" 标签左对齐
+#define UI_LABEL_CAP_PERCENT_Y    698u                  // "c" 标签(661)下方，保留约37单位的纵向间距
+#define UI_LABEL_CAP_PERCENT_FONT 20u                   // 与 F 旁档位字号一致，保证左侧列信息层级统一
+#define UI_LABEL_CAP_PERCENT_WIDTH 2u
 
 // What: 这组横线和竖线直接继承参考工程里的 `meter_5/meter_3/ChuiZhi`；Why: 用户这次明确要求把这 3 条静态标尺整合进当前 UI，并且不改原有通信方式。
 #define UI_METER_5_START_X 594u
@@ -198,13 +204,13 @@
 #define UI_TEXT_3_FONT 20u
 #define UI_TEXT_3_WIDTH 2u
 
-// What: 亮灯时统一使用绿色；Why: 三个 `on_x` 都是“功能开启”语义，用统一正向颜色最直观。
+// What: 亮灯时统一使用绿色；Why: 三个 `on_x` 都是"功能开启"语义，用统一正向颜色最直观。
 #define UI_STATE_ON_COLOR UI_Color_Green
-// What: 发射机构断电时 `on_1` 统一使用橙色；Why: 这次需要把“摩擦轮想开但裁判判定 shooter 无输出”与普通关闭红色明确区分。
+// What: 发射机构断电时 `on_1` 统一使用橙色；Why: 这次需要把"摩擦轮想开但裁判判定 shooter 无输出"与普通关闭红色明确区分。
 #define UI_STATE_POWER_CUT_COLOR UI_Color_Orange
-// What: 熄灭态统一使用固定红色；Why: 用户已经明确要求“关闭为红色、开启为绿色”，且不能跟随主色变蓝。
+// What: 熄灭态统一使用固定红色；Why: 用户已经明确要求"关闭为红色、开启为绿色"，且不能跟随主色变蓝。
 #define UI_STATE_OFF_COLOR UI_Color_Purplish_red
-// What: buffer 断电告警不用 `UI_Color_Main`；Why: 主色在蓝方会变蓝，无法满足“断电就变红”的固定语义。
+// What: buffer 断电告警不用 `UI_Color_Main`；Why: 主色在蓝方会变蓝，无法满足"断电就变红"的固定语义。
 #define UI_BUFFER_ALERT_COLOR UI_Color_Purplish_red
 
 typedef enum {
@@ -240,6 +246,9 @@ typedef enum {
     UI_MOVE_FIGURE_BODY_2,
     UI_MOVE_FIGURE_BODY_3,
     UI_MOVE_FIGURE_PITCH_NEEDLE,
+    // 这两个图元在车体前后两端各画一条横杠，目的是让选手端能一眼分辨底盘前方(红色横杠)和后方(灰色短线)，解决一键掉头后前后不分的问题。
+    UI_MOVE_FIGURE_BODY_FRONT,
+    UI_MOVE_FIGURE_BODY_REAR,
     UI_MOVE_FIGURE_COUNT,
 } UIMoveFigureIndex_e;
 
@@ -260,8 +269,8 @@ typedef enum {
     UI_STRING_PITCH,
     UI_STRING_ROBOT,
     UI_STRING_CAP,
-    // 这个字符串单独承载超电状态字，目的是把 CAP 这一列压缩成单行语义，减少百分比频繁跳动带来的突兀感。
-    UI_STRING_CAP_STATE,
+    // 这个字符串单独承载超电能量百分比，目的是在"c"标签下方直观显示可用能量比例并配合颜色区分状态，不再沿用旧的状态字五态文本。
+    UI_STRING_CAP_PERCENT,
     // What: 这 2 个字符串直接对应参考工程里的 `3m/5m`；Why: 新增标尺如果没有文字刻度，操作者很难把横线快速理解成距离参考。
     UI_STRING_TEXT_3,
     UI_STRING_TEXT_5,
@@ -289,7 +298,7 @@ typedef enum {
     UI_RUNTIME_PACKET_DATA,
 } UIRuntimePacket_e;
 
-// What: `on_1` 的显示状态单独抽成三态枚举；Why: fric 现在既要表达正常开关，又要表达“命令已开但 shooter 被裁判切断输出”的异常态。
+// What: `on_1` 的显示状态单独抽成三态枚举；Why: fric 现在既要表达正常开关，又要表达"命令已开但 shooter 被裁判切断输出"的异常态。
 typedef enum {
     UI_FRIC_INDICATOR_OFF = 0,
     UI_FRIC_INDICATOR_ON,
@@ -313,6 +322,8 @@ typedef struct
     int32_t bullet_num;
     uint8_t ui_bullet_speed_value;
     UICapState_e cap_state;
+    uint8_t cap_energy_percent_int; // 超电能量百分比整数值(0-100)，四舍五入自cap_energy_percent，用于避免浮点格式化
+    uint8_t cap_is_online;          // 超电板是否在线，直接从interactive_data传递，用于UIBuildStrings颜色选择
     uint32_t pitch_needle_start_x;
     uint32_t pitch_needle_start_y;
     uint32_t pitch_needle_end_x;
@@ -333,12 +344,12 @@ typedef struct
     uint8_t state_retry_count[UI_STATE_FIGURE_COUNT];
     uint8_t fire_speed_string_dirty;
     uint8_t fire_speed_string_retry_count;
-    uint8_t cap_state_string_dirty;
-    uint8_t cap_state_string_retry_count;
+    uint8_t cap_energy_string_dirty;
+    uint8_t cap_energy_string_retry_count;
     Graph_Data_t last_move_figures[UI_MOVE_FIGURE_COUNT];
     Graph_Data_t last_data_figures[UI_DATA_FIGURE_COUNT];
     String_Data_t last_fire_speed_string;
-    String_Data_t last_cap_state_string;
+    String_Data_t last_cap_energy_string;
     UIIndicatorState_t last_indicator_state;
 } UIRuntime_t;
 
@@ -367,11 +378,11 @@ static void UIBuildDataFigures(uint32_t operate_type, const UIDisplaySnapshot_t 
 static void UIBuildStrings(uint32_t operate_type, const UIDisplaySnapshot_t *snapshot);
 static void UIRefreshStateChanges(const UIIndicatorState_t *indicator_state);
 static void UIRefreshFireSpeedString(const UIDisplaySnapshot_t *snapshot);
-static void UIRefreshCapStateString(const UIDisplaySnapshot_t *snapshot);
+static void UIRefreshCapEnergyPercent(const UIDisplaySnapshot_t *snapshot);
 static void UIProcessRuntimeUpdate(uint32_t now_tick_ms);
 static uint8_t UISendNextDirtyState(uint32_t now_tick_ms);
 static uint8_t UISendDirtyFireSpeedString(uint32_t now_tick_ms);
-static uint8_t UISendDirtyCapStateString(uint32_t now_tick_ms);
+static uint8_t UISendDirtyCapEnergyPercent(uint32_t now_tick_ms);
 static void UISendMovePacket(uint32_t now_tick_ms);
 static void UISendDataPacket(uint32_t now_tick_ms);
 static uint8_t UIMovePacketIsDirty(const UIDisplaySnapshot_t *snapshot);
@@ -477,12 +488,12 @@ static void UIRuntimeReset(void)
     // 复位时把当前档位字符串也同步成运行期基线，目的是初始化完成前后都只围绕同一份 12/16 真值做脏检查，不会平白多发一轮字符刷新。
     UIBuildStrings(UI_Graph_Change, &snapshot);
     ui_runtime.last_fire_speed_string = ui_strings[UI_STRING_FRIC_SPEED];
-    // 复位时把超电状态字同步成运行期基线，目的是初始化完成后只有状态真变了才发字符 change 包，不会再被旧缓存误判成脏数据。
-    ui_runtime.last_cap_state_string = ui_strings[UI_STRING_CAP_STATE];
+    // 复位时把超电能量百分比字符串同步成运行期基线，目的是初始化完成后只有百分比真变了才发字符 change 包，不会再被旧缓存误判成脏数据。
+    ui_runtime.last_cap_energy_string = ui_strings[UI_STRING_CAP_PERCENT];
     ui_runtime.fire_speed_string_dirty = 0u;
     ui_runtime.fire_speed_string_retry_count = 0u;
-    ui_runtime.cap_state_string_dirty = 0u;
-    ui_runtime.cap_state_string_retry_count = 0u;
+    ui_runtime.cap_energy_string_dirty = 0u;
+    ui_runtime.cap_energy_string_retry_count = 0u;
     // What: 复位时清空状态灯重发计数；Why: 避免旧的脏状态残留到下一轮建图后继续重复发送。
     memset(ui_runtime.state_retry_count, 0, sizeof(ui_runtime.state_retry_count));
 }
@@ -495,8 +506,8 @@ static void UIStartInitCycle(uint32_t now_tick_ms)
     ui_runtime.dirty_state_mask = 0u;
     ui_runtime.fire_speed_string_dirty = 0u;
     ui_runtime.fire_speed_string_retry_count = 0u;
-    ui_runtime.cap_state_string_dirty = 0u;
-    ui_runtime.cap_state_string_retry_count = 0u;
+    ui_runtime.cap_energy_string_dirty = 0u;
+    ui_runtime.cap_energy_string_retry_count = 0u;
     // What: 开始整页重建时同步清空状态灯重发队列；Why: 初始化阶段会重新 add 正确状态圆环，旧 change 重发已经没有意义。
     memset(ui_runtime.state_retry_count, 0, sizeof(ui_runtime.state_retry_count));
 }
@@ -522,11 +533,11 @@ static void UIFinishInitCycle(uint32_t now_tick_ms)
     memcpy(ui_runtime.last_move_figures, ui_move_figures, sizeof(ui_runtime.last_move_figures));
     memcpy(ui_runtime.last_data_figures, ui_data_figures, sizeof(ui_runtime.last_data_figures));
     ui_runtime.last_fire_speed_string = ui_strings[UI_STRING_FRIC_SPEED];
-    ui_runtime.last_cap_state_string = ui_strings[UI_STRING_CAP_STATE];
+    ui_runtime.last_cap_energy_string = ui_strings[UI_STRING_CAP_PERCENT];
     ui_runtime.fire_speed_string_dirty = 0u;
     ui_runtime.fire_speed_string_retry_count = 0u;
-    ui_runtime.cap_state_string_dirty = 0u;
-    ui_runtime.cap_state_string_retry_count = 0u;
+    ui_runtime.cap_energy_string_dirty = 0u;
+    ui_runtime.cap_energy_string_retry_count = 0u;
     ui_runtime.last_indicator_state = snapshot.indicator_state;
 }
 
@@ -598,14 +609,16 @@ static void UIAdvanceInitStage(uint32_t now_tick_ms)
         break;
 
     case UI_INIT_STAGE_DRAW_MOVE_FIGURES:
-        // What: 运动组继续固定使用 4 条 body 填充线 + 1 条 pitch 指针；Why: 这样仍然能维持合法 Draw5 包，同时把旧滑块替换成 RMUC 红色指针。
+        // What: 运动组扩展为 4条body填充线 + 1条pitch指针 + 前后方向标识共7个图元；Why: 新增红色前方横杠和灰色后方短线后Draw5不够用，改为Draw7合法分包。
         UIBuildMoveFigures(UI_Graph_ADD, &snapshot);
-        UIGraphRefresh(&referee_recv_info->referee_id, 5,
+        UIGraphRefresh(&referee_recv_info->referee_id, 7,
                        ui_move_figures[UI_MOVE_FIGURE_BODY_0],
                        ui_move_figures[UI_MOVE_FIGURE_BODY_1],
                        ui_move_figures[UI_MOVE_FIGURE_BODY_2],
                        ui_move_figures[UI_MOVE_FIGURE_BODY_3],
-                       ui_move_figures[UI_MOVE_FIGURE_PITCH_NEEDLE]);
+                       ui_move_figures[UI_MOVE_FIGURE_PITCH_NEEDLE],
+                       ui_move_figures[UI_MOVE_FIGURE_BODY_FRONT],
+                       ui_move_figures[UI_MOVE_FIGURE_BODY_REAR]);
         ui_runtime.init_stage = UI_INIT_STAGE_DRAW_DATA_FIGURES;
         break;
 
@@ -659,7 +672,7 @@ static void UIBuildDisplaySnapshot(UIDisplaySnapshot_t *snapshot)
 
     memset(snapshot, 0, sizeof(*snapshot));
 
-    // What: body 只显示底盘相对云台的偏角；Why: 你已经确认 shooter 固定不动，因此 body 只能按“相对角”来转才符合视觉语义。
+    // What: body 只显示底盘相对云台的偏角；Why: 你已经确认 shooter 固定不动，因此 body 只能按"相对角"来转才符合视觉语义。
     snapshot->body_relative_angle_deg = theta_format(-interactive_data->chassis_gimbal_offset_deg);
 
     // What: pitch 必须限制在机构上下限内；Why: 新的圆盘指针和数值都要与当前项目的真实机械行程保持一致，不能显示出越界角。
@@ -699,6 +712,9 @@ static void UIBuildDisplaySnapshot(UIDisplaySnapshot_t *snapshot)
     snapshot->bullet_num = (int32_t)referee_recv_info->ProjectileAllowance.projectile_allowance_17mm;
     // 这里直接把 UI 数据入口里已经归一化好的超电状态拷进快照，目的是后面的字符串绘制只消费一份稳定结果，不再跨模块重复推断状态。
     snapshot->cap_state = interactive_data->cap_state;
+    // 把能量百分比四舍五入为整数并存在线标志，目的是UIBuildStrings只消费整型快照完成百分比格式化和颜色选择，不碰浮点也不跨模块回读。
+    snapshot->cap_energy_percent_int = (uint8_t)(interactive_data->cap_energy_percent + 0.5f);
+    snapshot->cap_is_online = interactive_data->cap_is_online;
 
     buffer_ratio = (float)referee_recv_info->PowerHeatData.buffer_energy / UI_BUFFER_FULL_SCALE_J;
     buffer_ratio = UIClampFloat(buffer_ratio, 0.0f, 1.0f);
@@ -707,15 +723,15 @@ static void UIBuildDisplaySnapshot(UIDisplaySnapshot_t *snapshot)
     snapshot->buffer_color = (referee_recv_info->GameRobotState.power_management_chassis_output != 0u) ? UI_Color_Green : UI_BUFFER_ALERT_COLOR;
     shooter_output_enabled = (referee_recv_info->GameRobotState.power_management_shooter_output != 0u) ? 1u : 0u;
 
-    // What: `on_1` 现在不是简单开关，而是“关/正常开/想开但发射机构断电”三态；Why: 用户要求在摩擦轮打开时，如果 shooter 输出被裁判切掉，要立刻显示第三种告警颜色。
+    // What: `on_1` 现在不是简单开关，而是"关/正常开/想开但发射机构断电"三态；Why: 用户要求在摩擦轮打开时，如果 shooter 输出被裁判切掉，要立刻显示第三种告警颜色。
     if (interactive_data->friction_on == 0u) {
         // What: 摩擦轮命令本来就是关闭时直接显示关闭态；Why: 这时即便 shooter 总输出也被关掉，也不应误报成告警。
         snapshot->indicator_state.fric_state = UI_FRIC_INDICATOR_OFF;
     } else if (shooter_output_enabled != 0u) {
-        // What: 只有在“摩擦轮要求开启且 shooter 输出正常”时才显示绿色；Why: 这样 `on_1` 才真正表达发射链当前可用。
+        // What: 只有在"摩擦轮要求开启且 shooter 输出正常"时才显示绿色；Why: 这样 `on_1` 才真正表达发射链当前可用。
         snapshot->indicator_state.fric_state = UI_FRIC_INDICATOR_ON;
     } else {
-        // What: 摩擦轮要求开启但 shooter 总输出断电时改成断电告警态；Why: 这是本轮新增的现场排障信息，目的是让操作者一眼区分“没开”和“开了但被切电”。
+        // What: 摩擦轮要求开启但 shooter 总输出断电时改成断电告警态；Why: 这是本轮新增的现场排障信息，目的是让操作者一眼区分"没开"和"开了但被切电"。
         snapshot->indicator_state.fric_state = UI_FRIC_INDICATOR_POWER_CUT;
     }
 
@@ -811,7 +827,7 @@ static void UIBuildMoveFigures(uint32_t operate_type, const UIDisplaySnapshot_t 
     }
 
     for (i = 0u; i < 4u; i++) {
-        // What: 4 条粗线围绕 body 中心按相对偏角旋转；Why: 这样既能保持“代码里的方块车身感”，又满足裁判协议的图元能力限制。
+        // What: 4 条粗线围绕 body 中心按相对偏角旋转；Why: 这样既能保持"代码里的方块车身感"，又满足裁判协议的图元能力限制。
         UIRotateRelativePoint(body_fill_center_x[i], -UI_BODY_HALF_SIZE, snapshot->body_relative_angle_deg, &body_start_x, &body_start_y);
         UIRotateRelativePoint(body_fill_center_x[i], UI_BODY_HALF_SIZE, snapshot->body_relative_angle_deg, &body_end_x, &body_end_y);
 
@@ -828,6 +844,28 @@ static void UIBuildMoveFigures(uint32_t operate_type, const UIDisplaySnapshot_t 
     UILineDraw(&ui_move_figures[UI_MOVE_FIGURE_PITCH_NEEDLE], "ptn", operate_type, UI_LAYER_MAIN, UI_Color_Purplish_red, UI_PITCH_NEEDLE_WIDTH,
                snapshot->pitch_needle_start_x, snapshot->pitch_needle_start_y,
                snapshot->pitch_needle_end_x, snapshot->pitch_needle_end_y);
+
+    // What: 在body前方(Y=+HALF)画红色横杠、后方(Y=-HALF)画灰色短线；Why: 解决一键掉头后原始前方和新前方无法分辨的问题，红色横杠始终指向底盘前进方向。
+    {
+        int32_t front_left_x = 0, front_left_y = 0, front_right_x = 0, front_right_y = 0;
+        int32_t rear_left_x = 0, rear_left_y = 0, rear_right_x = 0, rear_right_y = 0;
+
+        UIRotateRelativePoint(-UI_BODY_FRONT_BAR_HALF_LEN, UI_BODY_HALF_SIZE, snapshot->body_relative_angle_deg, &front_left_x, &front_left_y);
+        UIRotateRelativePoint( UI_BODY_FRONT_BAR_HALF_LEN, UI_BODY_HALF_SIZE, snapshot->body_relative_angle_deg, &front_right_x, &front_right_y);
+        UILineDraw(&ui_move_figures[UI_MOVE_FIGURE_BODY_FRONT], "bfr", operate_type, UI_LAYER_MAIN, UI_Color_Purplish_red, UI_BODY_FRONT_BAR_WIDTH,
+                   UIClampCoord(UIRoundFloatToInt(UI_BODY_CENTER_X + (float)front_left_x)),
+                   UIClampCoord(UIRoundFloatToInt(UI_BODY_CENTER_Y + (float)front_left_y)),
+                   UIClampCoord(UIRoundFloatToInt(UI_BODY_CENTER_X + (float)front_right_x)),
+                   UIClampCoord(UIRoundFloatToInt(UI_BODY_CENTER_Y + (float)front_right_y)));
+
+        UIRotateRelativePoint(-UI_BODY_REAR_BAR_HALF_LEN, -UI_BODY_HALF_SIZE, snapshot->body_relative_angle_deg, &rear_left_x, &rear_left_y);
+        UIRotateRelativePoint( UI_BODY_REAR_BAR_HALF_LEN, -UI_BODY_HALF_SIZE, snapshot->body_relative_angle_deg, &rear_right_x, &rear_right_y);
+        UILineDraw(&ui_move_figures[UI_MOVE_FIGURE_BODY_REAR], "brr", operate_type, UI_LAYER_MAIN, UI_Color_Cyan, UI_BODY_REAR_BAR_WIDTH,
+                   UIClampCoord(UIRoundFloatToInt(UI_BODY_CENTER_X + (float)rear_left_x)),
+                   UIClampCoord(UIRoundFloatToInt(UI_BODY_CENTER_Y + (float)rear_left_y)),
+                   UIClampCoord(UIRoundFloatToInt(UI_BODY_CENTER_X + (float)rear_right_x)),
+                   UIClampCoord(UIRoundFloatToInt(UI_BODY_CENTER_Y + (float)rear_right_y)));
+    }
 }
 
 static void UIBuildDataFigures(uint32_t operate_type, const UIDisplaySnapshot_t *snapshot)
@@ -854,24 +892,25 @@ static void UIBuildDataFigures(uint32_t operate_type, const UIDisplaySnapshot_t 
 static void UIBuildStrings(uint32_t operate_type, const UIDisplaySnapshot_t *snapshot)
 {
     const char *fric_speed_text = "12";
-    const char *cap_state_text = "OFF";
+    // 超电百分比默认显示"0%"并用紫红色表示离线不可用，目的是即使还没收到超电板数据也能一眼看出当前没有超电辅助。
+    char cap_percent_text[8] = "0%";
+    uint32_t cap_percent_color = UI_STATE_OFF_COLOR;
 
-    // 这里把 F 旁的档位限制成 12/16 两种字符串，目的是左侧提示只承担“当前预选档位”这一件事，避免混入右侧实时弹速那种连续数值语义。
+    // 这里把 F 旁的档位限制成 12/16 两种字符串，目的是左侧提示只承担"当前预选档位"这一件事，避免混入右侧实时弹速那种连续数值语义。
     if (snapshot != NULL && snapshot->ui_bullet_speed_value == 16u) {
         fric_speed_text = "16";
     }
     if (snapshot != NULL) {
-        if (snapshot->cap_state == UI_CAP_STATE_READY) {
-            // 在线健康但当前没在实际放功率时显示 STB，目的是把“可用待命”和“已经输出”区别开，同时避开 RDY 读起来发硬的问题。
-            cap_state_text = "STB";
-        } else if (snapshot->cap_state == UI_CAP_STATE_ASSIST) {
-            // 一旦超电已经真正参与当前拍输出，就统一显示 OUT，目的是让操作者一眼读成“现在正在出力”。
-            cap_state_text = "OUT";
-        } else if (snapshot->cap_state == UI_CAP_STATE_FAULT) {
-            cap_state_text = "FLT";
-        } else if (snapshot->cap_state == UI_CAP_STATE_DISABLED) {
-            // 在线但被超电板禁止输出时改成 CUT，目的是直接表达“输出被切掉”，比 DIS 更贴近现场判断语义。
-            cap_state_text = "CUT";
+        // 超电百分比根据在线标志和cap_on选择颜色，目的是用绿/橙/紫红三色一眼区分"可用/在线但不可用/离线"三种超电状态，不再依赖旧五态文本。
+        if (snapshot->cap_is_online != 0u) {
+            if (snapshot->indicator_state.cap_on != 0u) {
+                cap_percent_color = UI_Color_Green;  // 超电在线且可用(READY/ASSIST)，绿色表示可以吃超电
+            } else {
+                cap_percent_color = UI_Color_Orange; // 超电在线但不可用(故障/禁用/充电中)，橙色表示在线但暂时不能出力
+            }
+        }
+        if (snapshot->cap_energy_percent_int <= 100u) {
+            snprintf(cap_percent_text, sizeof(cap_percent_text), "%u%%", (unsigned int)snapshot->cap_energy_percent_int);
         }
     }
 
@@ -890,9 +929,9 @@ static void UIBuildStrings(uint32_t operate_type, const UIDisplaySnapshot_t *sna
                UI_LABEL_ROBOT_FONT, UI_LABEL_ROBOT_WIDTH, UI_LABEL_ROBOT_X, UI_LABEL_ROBOT_Y, "r");
     UICharDraw(&ui_strings[UI_STRING_CAP], "cap", operate_type, UI_LAYER_MAIN, UI_Color_Yellow,
                UI_LABEL_CAP_FONT, UI_LABEL_CAP_WIDTH, UI_LABEL_CAP_X, UI_LABEL_CAP_Y, "c");
-    // 这条状态字固定放在大号 `c` 右侧，只显示当前单一状态，目的是把 CAP 这一列收敛成单行信息，不再让第二行百分比持续打断视线。
-    UICharDraw(&ui_strings[UI_STRING_CAP_STATE], "cst", operate_type, UI_LAYER_MAIN, UI_Color_Yellow,
-               UI_LABEL_CAP_STATE_FONT, UI_LABEL_CAP_STATE_WIDTH, UI_LABEL_CAP_STATE_X, UI_LABEL_CAP_STATE_Y, (char *)cap_state_text);
+    // 超电能量百分比放在大号 `c` 标签正下方，配合颜色区分绿/橙/紫红三种状态，目的是让操作者一眼看到可用能量比例和当前是否可吃超电。
+    UICharDraw(&ui_strings[UI_STRING_CAP_PERCENT], "cpe", operate_type, UI_LAYER_MAIN, cap_percent_color,
+               UI_LABEL_CAP_PERCENT_FONT, UI_LABEL_CAP_PERCENT_WIDTH, UI_LABEL_CAP_PERCENT_X, UI_LABEL_CAP_PERCENT_Y, cap_percent_text);
 
     // What: 这里新增参考工程里的 `3m/5m` 标尺文字；Why: 它们必须和新增的 `meter_3/meter_5` 一起出现，操作者才能直接读懂横线含义。
     UICharDraw(&ui_strings[UI_STRING_TEXT_3], "t03", operate_type, UI_LAYER_MAIN, UI_Color_Orange,
@@ -917,19 +956,19 @@ static void UIRefreshFireSpeedString(const UIDisplaySnapshot_t *snapshot)
     }
 }
 
-static void UIRefreshCapStateString(const UIDisplaySnapshot_t *snapshot)
+static void UIRefreshCapEnergyPercent(const UIDisplaySnapshot_t *snapshot)
 {
     if (snapshot == NULL) {
         return;
     }
 
-    // 每拍都先按当前快照重建一次超电状态字，目的是让后面的脏检查永远围绕最新的 OFF/STB/OUT/FLT/CUT 真值比较，而不是靠别处缓存推导。
+    // 每拍都先按当前快照重建一次超电百分比字符串，目的是让后面的脏检查永远围绕最新的百分比真值比较，而不是靠别处缓存推导。
     UIBuildStrings(UI_Graph_Change, snapshot);
-    if (memcmp(&ui_runtime.last_cap_state_string, &ui_strings[UI_STRING_CAP_STATE], sizeof(String_Data_t)) != 0) {
-        // 一旦状态字发生变化，就把新字符串收成运行期基线并安排两次补发，目的是在状态切换时尽快落图，同时给偶发字符丢包留出自愈机会。
-        ui_runtime.last_cap_state_string = ui_strings[UI_STRING_CAP_STATE];
-        ui_runtime.cap_state_string_dirty = 1u;
-        ui_runtime.cap_state_string_retry_count = 2u;
+    if (memcmp(&ui_runtime.last_cap_energy_string, &ui_strings[UI_STRING_CAP_PERCENT], sizeof(String_Data_t)) != 0) {
+        // 一旦百分比发生变化，就把新字符串收成运行期基线并安排两次补发，目的是在能量变化时尽快落图，同时给偶发字符丢包留出自愈机会。
+        ui_runtime.last_cap_energy_string = ui_strings[UI_STRING_CAP_PERCENT];
+        ui_runtime.cap_energy_string_dirty = 1u;
+        ui_runtime.cap_energy_string_retry_count = 2u;
     }
 }
 
@@ -1011,9 +1050,9 @@ static void UIProcessRuntimeUpdate(uint32_t now_tick_ms)
         (void)UISendDirtyFireSpeedString(now_tick_ms);
         return;
     }
-    UIRefreshCapStateString(&snapshot);
-    if (ui_runtime.cap_state_string_dirty != 0u) {
-        (void)UISendDirtyCapStateString(now_tick_ms);
+    UIRefreshCapEnergyPercent(&snapshot);
+    if (ui_runtime.cap_energy_string_dirty != 0u) {
+        (void)UISendDirtyCapEnergyPercent(now_tick_ms);
         return;
     }
 
@@ -1072,19 +1111,19 @@ static uint8_t UISendDirtyFireSpeedString(uint32_t now_tick_ms)
     return 1u;
 }
 
-static uint8_t UISendDirtyCapStateString(uint32_t now_tick_ms)
+static uint8_t UISendDirtyCapEnergyPercent(uint32_t now_tick_ms)
 {
-    if (ui_runtime.cap_state_string_dirty == 0u) {
+    if (ui_runtime.cap_energy_string_dirty == 0u) {
         return 0u;
     }
 
-    // 超电状态字单独走字符 change 包，目的是不改现有 Draw5 分包前提下，让 STB/OUT/FLT/CUT 这种关键状态切换尽快落到客户端。
-    UICharRefresh(&referee_recv_info->referee_id, ui_strings[UI_STRING_CAP_STATE]);
-    if (ui_runtime.cap_state_string_retry_count > 0u) {
-        ui_runtime.cap_state_string_retry_count--;
+    // 超电百分比单独走字符 change 包，目的是不改现有 Draw5 分包前提下，让能量百分比变化尽快落到客户端。
+    UICharRefresh(&referee_recv_info->referee_id, ui_strings[UI_STRING_CAP_PERCENT]);
+    if (ui_runtime.cap_energy_string_retry_count > 0u) {
+        ui_runtime.cap_energy_string_retry_count--;
     }
-    if (ui_runtime.cap_state_string_retry_count == 0u) {
-        ui_runtime.cap_state_string_dirty = 0u;
+    if (ui_runtime.cap_energy_string_retry_count == 0u) {
+        ui_runtime.cap_energy_string_dirty = 0u;
     }
     ui_runtime.last_packet_tick_ms = now_tick_ms;
     return 1u;
@@ -1092,13 +1131,15 @@ static uint8_t UISendDirtyCapStateString(uint32_t now_tick_ms)
 
 static void UISendMovePacket(uint32_t now_tick_ms)
 {
-    // What: 高频动画组仍固定打成 Draw5；Why: 4 条 body 线和 1 条 pitch 指针仍然刚好组成合法动态包，不需要改通信节奏。
-    UIGraphRefresh(&referee_recv_info->referee_id, 5,
+    // What: 高频动画组扩展为Draw7；Why: 新增前后方向标识后图元数从5增到7，必须改用Draw7才能合法打包4条body线+1条pitch指针+前后横杠。
+    UIGraphRefresh(&referee_recv_info->referee_id, 7,
                    ui_move_figures[UI_MOVE_FIGURE_BODY_0],
                    ui_move_figures[UI_MOVE_FIGURE_BODY_1],
                    ui_move_figures[UI_MOVE_FIGURE_BODY_2],
                    ui_move_figures[UI_MOVE_FIGURE_BODY_3],
-                   ui_move_figures[UI_MOVE_FIGURE_PITCH_NEEDLE]);
+                   ui_move_figures[UI_MOVE_FIGURE_PITCH_NEEDLE],
+                   ui_move_figures[UI_MOVE_FIGURE_BODY_FRONT],
+                   ui_move_figures[UI_MOVE_FIGURE_BODY_REAR]);
 
     memcpy(ui_runtime.last_move_figures, ui_move_figures, sizeof(ui_runtime.last_move_figures));
     do {

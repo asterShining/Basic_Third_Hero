@@ -36,6 +36,7 @@ typedef struct {
     float retry_start_time;
     float brake_start_time;
     float cooldown_start_time;
+    float increment_target_angle; // 当前增量步进的目标角度，每次只推进一小步后检查掉速，掉速则立即停止形成物理事件闭环
     uint8_t retry_count;
     uint8_t inner_dip_stable_count;
     uint8_t recover_stable_count;

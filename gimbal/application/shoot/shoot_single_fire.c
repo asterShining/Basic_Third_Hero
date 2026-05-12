@@ -47,134 +47,46 @@ static void UpdateControlDipPeakBaseline(void)
 }
 
 /**
- * @brief 计算当前喂弹步的推进量
- * @return 当前推进的机械行程，单位为 bullet
- */
-static float GetCurrentFeedProgressBullet(void)
-{
-    float progress_angle = loader->measure.total_angle - single_fire.rush_start_angle;
-
-    if (progress_angle < 0.0f)
-        progress_angle = 0.0f;
-
-    return progress_angle / LOADER_MOTOR_ANGLE_PER_BULLET;
-}
-
-/**
- * @brief 以内圈基线计算当前掉速电机数量和平均掉速
- * @param out_avg_dip 输出内圈平均掉速，单位为 deg/s
- * @return 当前超过掉速阈值的内圈电机数量
- */
-static uint8_t GetInnerDipMetrics(float *out_avg_dip)
-{
-    uint8_t dip_count = 0;
-    float dip_left = dip_control.inner_left_baseline - fabsf(GetMotorSpeedAps(friction_inner_left));
-    float dip_right = dip_control.inner_right_baseline - fabsf(GetMotorSpeedAps(friction_inner_right));
-    float dip_down = dip_control.inner_down_baseline - fabsf(GetMotorSpeedAps(friction_inner_down));
-
-    if (out_avg_dip != NULL)
-        *out_avg_dip = (dip_left + dip_right + dip_down) * 0.3333333f;
-
-    if (dip_left > FRICTION_SPEED_DIP_THRESHOLD)
-        dip_count++;
-    if (dip_right > FRICTION_SPEED_DIP_THRESHOLD)
-        dip_count++;
-    if (dip_down > FRICTION_SPEED_DIP_THRESHOLD)
-        dip_count++;
-
-    return dip_count;
-}
-
-/**
- * @brief 以外圈基线计算当前掉速电机数量和平均掉速
- * @param out_avg_dip 输出外圈平均掉速，单位为 deg/s
- * @return 当前超过阈值的外圈电机数量
+ * @brief 获取外圈摩擦轮掉速指标
+ * @param out_avg_dip 输出外圈三电机平均掉速量 (deg/s)
+ * @return 外圈掉速超过阈值的电机数量
  */
 static uint8_t GetOuterDipMetrics(float *out_avg_dip)
 {
-    uint8_t dip_count = 0;
-    float dip_left;
-    float dip_right;
-    float dip_down;
+    float dip_left = dip_control.outer_left_baseline - fabsf(GetMotorSpeedAps(friction_outer_left));
+    float dip_right = dip_control.outer_right_baseline - fabsf(GetMotorSpeedAps(friction_outer_right));
+    float dip_down = dip_control.outer_down_baseline - fabsf(GetMotorSpeedAps(friction_outer_down));
+    uint8_t count = 0;
 
-    if (!HasOuterFrictionWheel()) {
-        if (out_avg_dip != NULL)
-            *out_avg_dip = 0.0f;
-        return 0;
-    }
-
-    dip_left = dip_control.outer_left_baseline - fabsf(GetMotorSpeedAps(friction_outer_left));
-    dip_right = dip_control.outer_right_baseline - fabsf(GetMotorSpeedAps(friction_outer_right));
-    dip_down = dip_control.outer_down_baseline - fabsf(GetMotorSpeedAps(friction_outer_down));
-
-    if (out_avg_dip != NULL)
-        *out_avg_dip = (dip_left + dip_right + dip_down) * 0.3333333f;
+    *out_avg_dip = (dip_left + dip_right + dip_down) * 0.3333333f;
 
     if (dip_left > OUTER_DIP_CONFIRM_THRESHOLD)
-        dip_count++;
+        count++;
     if (dip_right > OUTER_DIP_CONFIRM_THRESHOLD)
-        dip_count++;
+        count++;
     if (dip_down > OUTER_DIP_CONFIRM_THRESHOLD)
-        dip_count++;
+        count++;
 
-    return dip_count;
+    return count;
 }
 
 /**
- * @brief 判断当前掉速是否足以计为一发弹丸
- * @return 1 表示可以累计一次发射计数，0 表示当前掉速仍应视为扰动或尚未咬弹
- */
-static uint8_t ShouldCountByFrictionDip(void)
-{
-    float inner_avg_dip = 0.0f;
-    float outer_avg_dip = 0.0f;
-    uint8_t dip_count;
-    uint8_t outer_dip_count;
-
-    if (GetCurrentFeedProgressBullet() < SF_MIN_VALID_DIP_PROGRESS_BULLET) {
-        single_fire.inner_dip_stable_count = 0;
-        return 0;
-    }
-
-    dip_count = GetInnerDipMetrics(&inner_avg_dip);
-    if (dip_count >= DIP_MIN_MOTOR_COUNT) {
-        single_fire.inner_dip_stable_count = 0;
-        return 1;
-    }
-
-    outer_dip_count = GetOuterDipMetrics(&outer_avg_dip);
-
-    if (inner_avg_dip > FRICTION_SPEED_DIP_THRESHOLD) {
-        if (single_fire.inner_dip_stable_count < 0xFFu)
-            single_fire.inner_dip_stable_count++;
-    } else {
-        single_fire.inner_dip_stable_count = 0;
-    }
-
-    if (single_fire.inner_dip_stable_count < SF_DIP_AVG_STABLE_CYCLES)
-        return 0;
-
-    if (!HasOuterFrictionWheel()) {
-        // 外圈不存在时保留平均掉速确认链路，目的是当前工程允许裁剪外圈配置，辅助确认不能让无外圈平台完全失去出弹计数能力。
-        return 1;
-    }
-
-    // 对“弱但连续”的内圈平均掉速增加外圈辅助确认，目的是减少半咬弹或随机扰动被误记为真实出弹。
-    return (outer_dip_count >= 1u) || (outer_avg_dip > OUTER_DIP_CONFIRM_THRESHOLD);
-}
-
-/**
- * @brief 在检测到有效掉速时只累计发射数，不改变拨盘目标角度
+ * @brief 外圈掉速时累计发射数与抓拍，弹丸完整通过两级摩擦轮才计为一发
  */
 static void CountFiredBulletByDipIfNeeded(void)
 {
+    float outer_avg_dip = 0.0f;
+    uint8_t outer_dip_count;
+
     if (single_fire.shot_counted != 0u)
         return;
 
-    if (!ShouldCountByFrictionDip())
+    outer_dip_count = GetOuterDipMetrics(&outer_avg_dip);
+
+    // 至少1个外圈电机掉速超过阈值，或者外圈平均掉速超过阈值才确认出弹
+    if (outer_dip_count < 1u && outer_avg_dip <= OUTER_DIP_CONFIRM_THRESHOLD)
         return;
 
-    // 掉速抓拍仍然绑定到首次有效掉速，目的是调试数据和 fire_count 对应同一颗弹丸，但这里不再调用收口逻辑，避免摩擦轮掉速提前停止拨弹盘。
     TakeDipSnapshot();
     ValidateAndSaveDipSnapshot();
     single_fire.fire_count++;
@@ -248,8 +160,12 @@ static void BeginSingleFireFeedAttempt(float current_time, float feed_bullet_cou
         single_fire.shot_start_time = current_time;
     }
     single_fire.rush_start_angle = loader->measure.total_angle;
+    // 安全上限设为最大总行程，目的是一次事务最多走到上限就停止，防止空拨无限步进
     single_fire.rush_target_angle = single_fire.rush_start_angle +
-                                    LoaderBulletCountToMotorAngle(feed_bullet_count);
+                                    LoaderBulletCountToMotorAngle(SF_MAX_TOTAL_FEED_BULLET);
+    // 首个增量目标只推进一小步，每步完成后检查掉速
+    single_fire.increment_target_angle = single_fire.rush_start_angle +
+                                         SF_INCREMENT_MOTOR_ANGLE;
     single_fire.lock_target_angle = single_fire.rush_start_angle;
     single_fire.baseline_speed = GetInnerFrictionAvgSpeed();
     single_fire.outer_baseline_speed = GetOuterFrictionAvgSpeed();
@@ -262,7 +178,7 @@ static void BeginSingleFireFeedAttempt(float current_time, float feed_bullet_cou
     RecordDipBaseline();
     RecordControlDipBaseline();
     SetFrictionFeedforward(0.0f, 0.0f);
-    LoaderSetAngleRef(single_fire.rush_target_angle);
+    LoaderSetAngleRef(single_fire.increment_target_angle);
 }
 
 /**
@@ -386,11 +302,16 @@ void HandleSingleFire(uint8_t trigger_active)
             SetFrictionFeedforward(0.0f, 0.0f);
         }
 
-        // 拨弹盘线性电流前馈：根据当前位置误差动态计算，
+        // 拨弹盘线性速度前馈：根据当前增量目标动态计算，
         // 误差大时提供更强推力以减轻 PID 负担，到位时自然衰减为零
         UpdateLoaderFeedforward();
 
-        // 基准线随峰值更新，目的是掉速检测依赖“基准 - 当前”，若基线不跟峰值走就会把正常升速误判成掉速不足。
+        // 增量期间保证前馈速度不低于地板值，目的是位置环PID在小误差时输出不足，
+        // 通过前馈地板维持高速，到位时容差内自动切换下一增量
+        if (ff_loader < LOADER_FF_INCREMENT_FLOOR)
+            ff_loader = LOADER_FF_INCREMENT_FLOOR;
+
+        // 基准线随峰值更新，目的是掉速检测依赖”基准 - 当前”，若基线不跟峰值走就会把正常升速误判成掉速不足。
         if (inner_speed > single_fire.baseline_speed) {
             single_fire.baseline_speed = inner_speed;
         }
@@ -407,17 +328,38 @@ void HandleSingleFire(uint8_t trigger_active)
             GetMotorSpeedAps(friction_outer_right),
             GetMotorSpeedAps(friction_outer_down));
 
+        // 外圈掉速只负责发射计数，拨盘停止由增量步进 + 掉速停止逻辑控制
         CountFiredBulletByDipIfNeeded();
 
         if ((single_fire.shot_start_time > 0.0f) &&
             ((current_time - single_fire.shot_start_time) > SF_TRANSACTION_TIMEOUT)) {
             // 固定一发事务超过总时限后直接收口，目的是堵转强推策略只允许在短窗口内持续顶推，避免限制位紧张时长期追目标导致机构过载。
             FinishSingleFire(current_time);
-        } else if (fabsf(single_fire.rush_target_angle - loader->measure.total_angle) < SF_RUSH_REACHED_TOLERANCE) {
-            // 只要固定一发机械行程已经到位就结束本次拨弹，目的是摩擦轮掉速不再拥有停止或补发拨弹盘的控制权。
-            FinishSingleFire(current_time);
         } else {
-            LoaderSetAngleRef(single_fire.rush_target_angle);
+            float feed_progress = loader->measure.total_angle - single_fire.rush_start_angle;
+
+            // 拨盘推进超过半增量后才允许外圈掉速触发停止，目的是忽略起步阶段电机启动电流浪涌导致的摩擦轮瞬时扰动
+            if (feed_progress >= SF_INCREMENT_MOTOR_ANGLE * 0.5f) {
+                float outer_avg_dip = 0.0f;
+                uint8_t outer_dip_count = GetOuterDipMetrics(&outer_avg_dip);
+
+                // 外圈掉速立即停止，以物理事件闭环替代固定角度开环
+                if (outer_dip_count >= 1u || outer_avg_dip > OUTER_DIP_CONFIRM_THRESHOLD) {
+                    FinishSingleFire(current_time);
+                    break;
+                }
+            }
+
+            // 当前增量到位且无掉速时推进到下一增量目标
+            if (fabsf(single_fire.increment_target_angle - loader->measure.total_angle) < SF_INCREMENT_REACHED_TOLERANCE) {
+                float next_increment = single_fire.increment_target_angle + SF_INCREMENT_MOTOR_ANGLE;
+                if (next_increment <= single_fire.rush_target_angle) {
+                    single_fire.increment_target_angle = next_increment;
+                }
+                // 超出总行程安全上限时不再推进，等待超时兜底收口
+            }
+
+            LoaderSetAngleRef(single_fire.increment_target_angle);
         }
         break;
 

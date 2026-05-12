@@ -19,6 +19,7 @@ void RefereeUIUpdateData(void)
     // 先给超电显示量安全默认值，目的是即使后面超电离线或本拍直接走回退分支，UI 也不会继续沿用上一拍残留的状态字或圆灯状态。
     ui_data.cap_state = UI_CAP_STATE_OFF;
     ui_data.cap_on = 0u;
+    ui_data.cap_is_online = 0u;
 
 #ifdef CHASSIS_BOARD
     if (chasiss_can_comm != NULL && CANCommIsOnline(chasiss_can_comm) != 0u) {
@@ -57,6 +58,9 @@ void RefereeUIUpdateData(void)
     if (cap != NULL && SuperCapIsOnline(cap) != 0u) {
         // 超电在线时优先显示其回传的真实底盘功率，目的是功率值本身就该尽量贴近真实电源链路表现，而不是退回到底盘侧估算。
         ui_data.chassis_power_w = SuperCapGetChassisPower(cap);
+        // 超电在线时直接从超电板采集能量百分比和在线标志，目的是把capEnergyPercent(0-255→0-100%)送入UI管线，同时用is_online将"在线能量低"与"完全离线"区分开来供颜色选择。
+        ui_data.cap_energy_percent = SuperCapGetEnergyPercent(cap);
+        ui_data.cap_is_online = 1u;
 
         // 先处理最宽泛的 OFF 场景，目的是离线之外，裁判切掉底盘输出和零力模式同样都属于“本拍不该让超电参与”的关闭态。
         if (chassis_output_allowed == 0u || chassis_cmd_recv.chassis_mode == CHASSIS_ZERO_FORCE) {
@@ -86,4 +90,7 @@ void RefereeUIUpdateData(void)
     ui_data.chassis_power_w = PowerControlGetChassisPower();
     ui_data.cap_state = UI_CAP_STATE_OFF;
     ui_data.cap_on = 0u;
+    // 超电离线时把能量百分比清零并标记离线，目的是让UI百分比显示"0%"并用紫红色明确表示当前无超电辅助。
+    ui_data.cap_energy_percent = 0.0f;
+    ui_data.cap_is_online = 0u;
 }

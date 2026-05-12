@@ -1,6 +1,6 @@
 {
   "version": "1.0.0",
-  "lastScanned": 1777664403815,
+  "lastScanned": 1778587417118,
   "projectRoot": "/home/aster/Documents/robomaster/Basic_Third_Hero",
   "techStack": {
     "languages": [],
@@ -36,7 +36,7 @@
       "path": "chassis",
       "purpose": null,
       "fileCount": 12,
-      "lastAccessed": 1777664403814,
+      "lastAccessed": 1778587417117,
       "keyFiles": [
         "CMakeLists.txt",
         "CMakePresets.json",
@@ -49,7 +49,7 @@
       "path": "gimbal",
       "purpose": null,
       "fileCount": 13,
-      "lastAccessed": 1777664403815,
+      "lastAccessed": 1778587417117,
       "keyFiles": [
         "CMakeLists.txt",
         "CMakePresets.json",
@@ -62,7 +62,7 @@
       "path": "tools",
       "purpose": null,
       "fileCount": 1,
-      "lastAccessed": 1777664403815,
+      "lastAccessed": 1778587417117,
       "keyFiles": [
         "export_pitch_cali_from_rtt.py"
       ]
@@ -71,26 +71,38 @@
   "hotPaths": [
     {
       "path": "",
-      "accessCount": 24,
-      "lastAccessed": 1777664451794,
+      "accessCount": 70,
+      "lastAccessed": 1778590981817,
       "type": "directory"
     },
     {
       "path": "gimbal",
-      "accessCount": 23,
-      "lastAccessed": 1777533001877,
+      "accessCount": 25,
+      "lastAccessed": 1778590965404,
       "type": "directory"
+    },
+    {
+      "path": "gimbal/application/robot_def.h",
+      "accessCount": 13,
+      "lastAccessed": 1778590965338,
+      "type": "file"
+    },
+    {
+      "path": "chassis/application/robot_def.h",
+      "accessCount": 12,
+      "lastAccessed": 1778590952032,
+      "type": "file"
+    },
+    {
+      "path": "gimbal/modules/motor/motor_def.h",
+      "accessCount": 9,
+      "lastAccessed": 1778590970697,
+      "type": "file"
     },
     {
       "path": "gimbal/modules/motor/DJImotor/dji_motor.c",
       "accessCount": 8,
       "lastAccessed": 1777664443970,
-      "type": "file"
-    },
-    {
-      "path": "gimbal/application/robot_def.h",
-      "accessCount": 8,
-      "lastAccessed": 1777664523470,
       "type": "file"
     },
     {
@@ -100,16 +112,16 @@
       "type": "file"
     },
     {
-      "path": "gimbal/modules/motor/motor_def.h",
-      "accessCount": 7,
-      "lastAccessed": 1777664443891,
-      "type": "file"
-    },
-    {
       "path": "gimbal/application/gimbal/gimbal.c",
       "accessCount": 6,
       "lastAccessed": 1777450501148,
       "type": "file"
+    },
+    {
+      "path": "chassis",
+      "accessCount": 6,
+      "lastAccessed": 1778363161230,
+      "type": "directory"
     },
     {
       "path": "gimbal/application/gimbal/gimbal_private.h",
@@ -121,6 +133,18 @@
       "path": "gimbal/modules/motor/DJImotor/dji_motor.h",
       "accessCount": 5,
       "lastAccessed": 1777664443946,
+      "type": "file"
+    },
+    {
+      "path": "chassis/application/chassis/chassis.c",
+      "accessCount": 5,
+      "lastAccessed": 1778363031851,
+      "type": "file"
+    },
+    {
+      "path": "chassis/application/chassis/chassis_private.h",
+      "accessCount": 5,
+      "lastAccessed": 1778363044470,
       "type": "file"
     },
     {
@@ -143,9 +167,15 @@
     },
     {
       "path": "chassis/application",
-      "accessCount": 3,
-      "lastAccessed": 1777445872813,
+      "accessCount": 4,
+      "lastAccessed": 1778363174279,
       "type": "directory"
+    },
+    {
+      "path": "CLAUDE.md",
+      "accessCount": 4,
+      "lastAccessed": 1778590958054,
+      "type": "file"
     },
     {
       "path": "gimbal/application/gimbal/gimbal.h",
@@ -166,9 +196,15 @@
       "type": "file"
     },
     {
-      "path": "chassis/application/robot_def.h",
+      "path": "chassis/application/chassis/chassis_motion.c",
       "accessCount": 3,
-      "lastAccessed": 1777664443998,
+      "lastAccessed": 1778363031828,
+      "type": "file"
+    },
+    {
+      "path": "chassis/modules/motor/motor_def.h",
+      "accessCount": 3,
+      "lastAccessed": 1778590970677,
       "type": "file"
     },
     {
@@ -196,12 +232,6 @@
       "type": "directory"
     },
     {
-      "path": "chassis",
-      "accessCount": 2,
-      "lastAccessed": 1777445965946,
-      "type": "directory"
-    },
-    {
       "path": "gimbal/application/gimbal/gimbal_runtime.c",
       "accessCount": 2,
       "lastAccessed": 1777446146974,
@@ -214,21 +244,15 @@
       "type": "file"
     },
     {
-      "path": "chassis/application/chassis/chassis.c",
+      "path": "gimbal/CMakeLists.txt",
       "accessCount": 2,
-      "lastAccessed": 1777555204852,
+      "lastAccessed": 1778590957998,
       "type": "file"
     },
     {
-      "path": "CLAUDE.md",
+      "path": "gimbal/bsp/can/bsp_can.h",
       "accessCount": 2,
-      "lastAccessed": 1777531728572,
-      "type": "file"
-    },
-    {
-      "path": "chassis/modules/motor/motor_def.h",
-      "accessCount": 2,
-      "lastAccessed": 1777664444010,
+      "lastAccessed": 1778590988839,
       "type": "file"
     },
     {
@@ -265,12 +289,6 @@
       "path": "gimbal/CMakePresets.json",
       "accessCount": 1,
       "lastAccessed": 1777445419332,
-      "type": "file"
-    },
-    {
-      "path": "gimbal/CMakeLists.txt",
-      "accessCount": 1,
-      "lastAccessed": 1777445419377,
       "type": "file"
     },
     {
@@ -328,12 +346,6 @@
       "type": "file"
     },
     {
-      "path": "chassis/application/chassis/chassis_private.h",
-      "accessCount": 1,
-      "lastAccessed": 1777445908094,
-      "type": "file"
-    },
-    {
       "path": "chassis/bsp/can/bsp_can.h",
       "accessCount": 1,
       "lastAccessed": 1777445908187,
@@ -349,18 +361,6 @@
       "path": "chassis/application/chassis/chassis.h",
       "accessCount": 1,
       "lastAccessed": 1777445919458,
-      "type": "file"
-    },
-    {
-      "path": "gimbal/bsp/can/bsp_can.h",
-      "accessCount": 1,
-      "lastAccessed": 1777445953169,
-      "type": "file"
-    },
-    {
-      "path": "chassis/application/chassis/chassis_motion.c",
-      "accessCount": 1,
-      "lastAccessed": 1777445953229,
       "type": "file"
     },
     {

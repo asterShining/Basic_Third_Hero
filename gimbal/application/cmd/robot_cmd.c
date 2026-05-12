@@ -102,7 +102,7 @@ uint8_t keyboard_ui_refresh_last = 0u;
 // 保存 C 键上一拍电平，目的是超电开关采用“按一次切一次”的上升沿语义，避免按住期间每拍翻转。
 uint8_t keyboard_super_cap_toggle_last = 0u;
 // 保存键鼠超电锁存状态，目的是上电、急停和断链后默认关闭，只有用户明确按 C 才允许底盘侧启用超电策略。
-uint8_t keyboard_super_cap_latched = 0u;
+uint8_t keyboard_super_cap_latched = 1u;
 // 保存键盘小陀螺锁存状态，目的是用户要求 X 键按一次切一次，而不是按住才进入。
 uint8_t keyboard_spin_mode_latched = 0u;
 // 保存键盘自由模式锁存状态，目的是用户要求 B 键按一下就持续保持自由模式。

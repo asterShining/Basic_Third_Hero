@@ -88,6 +88,8 @@ typedef struct
 	uint8_t robot_spin_on; // What: 小陀螺当前是否真正处于执行态；Why: on_2 需要反映本拍是否仍在按自旋模式输出，不能继续被历史模式残留误导。
 	UICapState_e cap_state; // 超电当前的五态显示值，目的是给 UI 直接消费 OFF/READY/ASSIST/FAULT/DISABLED，而不是再让显示层自己推断。
 	uint8_t cap_on; // 超电当前是否真正处于可输出工作态，目的是 cap 指示必须直接反映本拍还能不能给底盘供能，不能再混入上层意图位造成误判。
+	float cap_energy_percent; // 超电能量百分比(0.0-100.0)，数据来源于超电板的capEnergyPercent字段(0-255映射)，由SuperCapGetEnergyPercent()采集供给UI层消费。
+	uint8_t cap_is_online; // 超电板是否在线(0=离线, 1=在线)，目的是在UI层区分"离线显示0%"和"在线但能量低/故障"这两种情况，从而为百分比选择不同颜色。
 } Referee_Interactive_info_t;
 
 // 裁判接收链路诊断信息，记录“中断触发->协议校验->离线判定”的阶段计数，便于快速定位首个失败环节
