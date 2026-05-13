@@ -143,6 +143,7 @@ static void DJIMotorLostCallback(void *motor_ptr)
     DJIMotorInstance *motor = (DJIMotorInstance *)motor_ptr;
     uint16_t can_bus = motor->motor_can_instance->can_handle == &hcan1 ? 1 : 2;
     LOGWARNING("[dji_motor] Motor lost, can bus [%d] , id [%d]", can_bus, motor->motor_can_instance->tx_id);
+    DJIMotorStop(motor); // CAN 断连自动失能，停止该电机输出
 }
 
 // 电机初始化,返回一个电机实例

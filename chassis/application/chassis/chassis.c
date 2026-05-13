@@ -185,6 +185,10 @@ void ChassisTask(void)
 #endif
 #ifdef CHASSIS_BOARD
     chassis_cmd_recv = *(Chassis_Ctrl_Cmd_s *)CANCommGet(chasiss_can_comm);
+    // CAN 双板通信断连时强制底盘零力，原因是 CAN 离线后 CANCommGet 返回陈旧数据，继续沿用会让底盘失控
+    if (CANCommIsOnline(chasiss_can_comm) == 0u) {
+        chassis_cmd_recv.chassis_mode = CHASSIS_ZERO_FORCE;
+    }
 #endif // CHASSIS_BOARD
 
     // 先缓存本拍最新的云台角速度前馈，目的是跟随支路要避免“先读旧前馈、再更新命令”造成固定一拍滞后。

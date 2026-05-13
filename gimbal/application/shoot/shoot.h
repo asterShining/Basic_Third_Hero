@@ -40,9 +40,9 @@
 // 起步估算：希望满行程时前馈贡献角度环输出的 20%，
 // 角度环输出 ≈ Kp × error = 14 × 1260 ≈ 17640，20% ≈ 3530，
 // K = 3530 / 1260 ≈ 2.8，建议从 2.0 开始逐步增大
-#define LOADER_FF_GAIN 5.0f
+#define LOADER_FF_GAIN 10.0f
 // 前馈速度输出上限 (deg/s)，防止大误差时前馈过大导致速度环参考值跳变过猛
-#define LOADER_FF_MAX_SPEED 10000.0f
+#define LOADER_FF_MAX_SPEED 12000.0f
 
 // ==================== 堵转检测参数 ====================
 // 堵转检测电流阈值 (raw值, M3508满量程16384, 设为 ~80% 高阈值使堵转处理更激烈)
@@ -71,7 +71,7 @@
 #define SF_MAX_TOTAL_FEED_BULLET 2.5f
 // 增量期间最低前馈速度 (deg/s)，保证每个10度增量快速推进达到速度环效果，
 // 位置环PID在小误差时输出不足，通过前馈地板维持高速，到位时容差内自动切换下一增量
-#define LOADER_FF_INCREMENT_FLOOR 5000.0f
+#define LOADER_FF_INCREMENT_FLOOR 8000.0f
 // 拨盘电机总角度对应的一发角度 (deg), 需要乘减速比, 因为 total_angle 是电机转子多圈角度
 #define LOADER_MOTOR_ANGLE_PER_BULLET (ONE_BULLET_DELTA_ANGLE * REDUCTION_RATIO_LOADER)
 // 单发目标总角度 (deg)，用于位置环按固定一发机械行程推弹，实际输出端角度由 ONE_BULLET_DELTA_ANGLE 决定。
@@ -86,6 +86,18 @@
 #define SF_DIP_AVG_STABLE_CYCLES 2u
 // 定义发射成功后的回速稳定拍数，目的是略微收紧回速判定，让上一发完全恢复后才允许下一次单发进入，进一步压住连续点射时的多发风险。
 #define FRICTION_RECOVER_STABLE_CYCLES 4u
+// 出弹确认后拨盘低速预压下一发的速度，目的是让下一颗弹丸慢慢抵住单发限制位置，而不是继续沿用送弹冲刺阶段的大前馈。
+#define SF_PRELOAD_SPEED_DPS 600.0f
+// 预压触限电流阈值使用明显低于堵转阈值的轻顶门槛，目的是靠电流上升识别弹丸已经抵到限位，同时避免把正常送弹强推当成卡死。
+#define SF_PRELOAD_CURRENT_THRESHOLD 5000
+// 预压触限还要求拨盘速度已经明显降下来，目的是过滤低速起步瞬间的电流尖峰，只有“顶住后推不动”的状态才锁角。
+#define SF_PRELOAD_SPEED_THRESHOLD 350.0f
+// 预压电流需要连续多拍满足才收口，目的是避免单拍电流噪声让下一发还没真正抵到位就提前停住。
+#define SF_PRELOAD_CURRENT_STABLE_CYCLES 3u
+// 预压最长持续时间，目的是缺下一发或电流触限不明显时也必须收口，不能让拨盘一直低速卷弹。
+#define SF_PRELOAD_TIMEOUT_MS 250.0f
+// 预压最大补偿行程，目的是即使电流阈值漏检，也最多把下一发慢推一个弹位，避免越过限制位造成连发风险。
+#define SF_PRELOAD_MAX_BULLET 1.0f
 
 // ==================== 发射确认检测参数 ====================
 // 掉速检测阈值 (deg/s), 内圈摩擦轮速度下降超过此值认为有弹丸通过

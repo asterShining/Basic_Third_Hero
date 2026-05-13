@@ -37,9 +37,12 @@ typedef struct {
     float brake_start_time;
     float cooldown_start_time;
     float increment_target_angle; // 当前增量步进的目标角度，每次只推进一小步后检查掉速，掉速则立即停止形成物理事件闭环
+    float preload_start_angle; // 下一发预压开始时的拨盘角度，目的是用最大补偿行程兜住电流触限漏检或空仓情况。
+    float preload_start_time; // 下一发预压开始时间，目的是低速轻顶也必须有明确超时边界，不能无限等待电流阈值。
     uint8_t retry_count;
     uint8_t inner_dip_stable_count;
     uint8_t recover_stable_count;
+    uint8_t preload_current_stable_count; // 预压触限电流连续确认计数，目的是过滤单拍电流噪声后再锁定下一发位置。
     uint8_t shot_counted; // 本次固定一发送弹事务是否已经由摩擦轮掉速计入 fire_count，目的是把“计数”和“拨盘停止”彻底解耦并防止持续掉速重复计数。
     uint16_t fire_count;
     uint16_t feed_timeout_count;

@@ -71,6 +71,7 @@ static void HTMotorLostCallback(void *motor_ptr)
 {
     HTMotorInstance *motor = (HTMotorInstance *)motor_ptr;
     LOGWARNING("[ht_motor] motor %d lost\n", motor->motor_can_instace->tx_id);
+    HTMotorStop(motor); // CAN 断连自动失能，停止该电机输出
     if (++motor->lost_cnt % 10 != 0)
         HTMotorSetMode(CMD_MOTOR_MODE, motor); // 尝试重新让电机进入控制模式
 }

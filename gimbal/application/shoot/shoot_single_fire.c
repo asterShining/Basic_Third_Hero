@@ -73,24 +73,31 @@ static uint8_t GetOuterDipMetrics(float *out_avg_dip)
 /**
  * @brief 外圈掉速时累计发射数与抓拍，弹丸完整通过两级摩擦轮才计为一发
  */
-static void CountFiredBulletByDipIfNeeded(void)
+static uint8_t CountFiredBulletByDipIfNeeded(float feed_progress)
 {
     float outer_avg_dip = 0.0f;
     uint8_t outer_dip_count;
 
     if (single_fire.shot_counted != 0u)
-        return;
+        return 0u;
+
+    if (feed_progress < LoaderBulletCountToMotorAngle(SF_MIN_VALID_DIP_PROGRESS_BULLET)) {
+        // 掉速确认必须等拨盘至少推进到可能咬弹的位置，目的是把起步电流浪涌或摩擦轮自身抖动挡在“真实出弹”判定之外。
+        single_fire.inner_dip_stable_count = 0u;
+        return 0u;
+    }
 
     outer_dip_count = GetOuterDipMetrics(&outer_avg_dip);
 
     // 至少1个外圈电机掉速超过阈值，或者外圈平均掉速超过阈值才确认出弹
     if (outer_dip_count < 1u && outer_avg_dip <= OUTER_DIP_CONFIRM_THRESHOLD)
-        return;
+        return 0u;
 
     TakeDipSnapshot();
     ValidateAndSaveDipSnapshot();
     single_fire.fire_count++;
     single_fire.shot_counted = 1u;
+    return 1u;
 }
 
 /**
@@ -107,6 +114,9 @@ static void AcceptPendingSingleFireRequest(float current_time)
     single_fire.retry_start_time = 0.0f;
     single_fire.inner_dip_stable_count = 0;
     single_fire.recover_stable_count = 0;
+    single_fire.preload_start_angle = loader->measure.total_angle;
+    single_fire.preload_start_time = 0.0f;
+    single_fire.preload_current_stable_count = 0u;
     single_fire.shot_counted = 0u;
     single_fire.lock_target_angle = loader->measure.total_angle;
     single_fire.brake_start_time = current_time;
@@ -125,6 +135,9 @@ void AbortSingleFire(void)
     single_fire.retry_start_time = 0.0f;
     single_fire.inner_dip_stable_count = 0;
     single_fire.recover_stable_count = 0;
+    single_fire.preload_start_angle = 0.0f;
+    single_fire.preload_start_time = 0.0f;
+    single_fire.preload_current_stable_count = 0u;
     single_fire.shot_counted = 0u;
     fire_trigger.pending_fire = 0;
     SetFrictionFeedforward(0.0f, 0.0f);
@@ -174,6 +187,9 @@ static void BeginSingleFireFeedAttempt(float current_time, float feed_bullet_cou
         // 只有一轮全新的单发事务才清掉计数锁存，目的是同一发在固定一发行程内可能持续掉速多拍，但只能贡献一次 fire_count。
         single_fire.shot_counted = 0u;
     }
+    single_fire.preload_start_angle = single_fire.rush_start_angle;
+    single_fire.preload_start_time = 0.0f;
+    single_fire.preload_current_stable_count = 0u;
 
     RecordDipBaseline();
     RecordControlDipBaseline();
@@ -227,6 +243,91 @@ static void FinishSingleFire(float current_time)
         single_fire.feed_timeout_count++;
     }
 
+    LoaderSetAngleRef(single_fire.lock_target_angle);
+}
+
+/**
+ * @brief 获取拨盘电流绝对值
+ * @return 拨盘反馈电流的绝对值，拨盘未初始化时返回 0
+ */
+static int16_t GetLoaderCurrentAbs(void)
+{
+    int16_t current;
+
+    if (loader == NULL)
+        return 0;
+
+    current = loader->measure.real_current;
+    return current >= 0 ? current : (int16_t)-current;
+}
+
+/**
+ * @brief 获取拨盘速度绝对值
+ * @return 拨盘速度绝对值，拨盘未初始化时返回 0
+ */
+static float GetLoaderSpeedAbs(void)
+{
+    if (loader == NULL)
+        return 0.0f;
+
+    return fabsf(loader->measure.speed_aps);
+}
+
+/**
+ * @brief 出弹确认后进入下一发慢速预压
+ * @param current_time 当前系统时间，单位为 ms
+ */
+static void BeginNextBulletPreload(float current_time)
+{
+    single_fire.state = SF_PRELOAD_NEXT;
+    single_fire.preload_start_angle = loader->measure.total_angle;
+    single_fire.preload_start_time = current_time;
+    single_fire.preload_current_stable_count = 0u;
+    single_fire.recover_stable_count = 0u;
+    // 出弹后预压下一发时必须退出位置环大步进和速度前馈，目的是让拨盘只用低速轻顶去找机械限位，不再把下一发继续强行打进摩擦轮。
+    single_fire.lock_target_angle = loader->measure.total_angle;
+    SetFrictionFeedforward(0.0f, 0.0f);
+    ff_loader = 0.0f;
+    LoaderSetSpeedRef(SF_PRELOAD_SPEED_DPS);
+}
+
+/**
+ * @brief 判断下一发预压是否已经抵到单发限制位置
+ * @return 1 表示应停止预压并锁角，0 表示继续低速轻顶
+ */
+static uint8_t IsNextBulletPreloadLimited(void)
+{
+    int16_t loader_current_abs = GetLoaderCurrentAbs();
+    float loader_speed_abs = GetLoaderSpeedAbs();
+
+    if (loader_current_abs >= STALL_CURRENT_THRESHOLD)
+        return 1u;
+
+    if (loader_current_abs >= SF_PRELOAD_CURRENT_THRESHOLD &&
+        loader_speed_abs <= SF_PRELOAD_SPEED_THRESHOLD) {
+        if (single_fire.preload_current_stable_count < 0xFFu)
+            single_fire.preload_current_stable_count++;
+    } else {
+        single_fire.preload_current_stable_count = 0u;
+    }
+
+    return single_fire.preload_current_stable_count >= SF_PRELOAD_CURRENT_STABLE_CYCLES;
+}
+
+/**
+ * @brief 结束下一发预压并锁住当前位置
+ * @param current_time 当前系统时间，单位为 ms
+ */
+static void FinishNextBulletPreload(float current_time)
+{
+    single_fire.brake_start_time = current_time;
+    single_fire.lock_target_angle = loader->measure.total_angle;
+    single_fire.preload_current_stable_count = 0u;
+    single_fire.recover_stable_count = 0u;
+    // 预压结束后切回位置环锁当前触限位置，目的是下一次单发从已经抵住限制位的机械状态起步，而不是继续速度环低速推压。
+    single_fire.state = SF_WAIT_RECOVER;
+    SetFrictionFeedforward(0.0f, 0.0f);
+    ff_loader = 0.0f;
     LoaderSetAngleRef(single_fire.lock_target_angle);
 }
 
@@ -328,9 +429,6 @@ void HandleSingleFire(uint8_t trigger_active)
             GetMotorSpeedAps(friction_outer_right),
             GetMotorSpeedAps(friction_outer_down));
 
-        // 外圈掉速只负责发射计数，拨盘停止由增量步进 + 掉速停止逻辑控制
-        CountFiredBulletByDipIfNeeded();
-
         if ((single_fire.shot_start_time > 0.0f) &&
             ((current_time - single_fire.shot_start_time) > SF_TRANSACTION_TIMEOUT)) {
             // 固定一发事务超过总时限后直接收口，目的是堵转强推策略只允许在短窗口内持续顶推，避免限制位紧张时长期追目标导致机构过载。
@@ -338,14 +436,20 @@ void HandleSingleFire(uint8_t trigger_active)
         } else {
             float feed_progress = loader->measure.total_angle - single_fire.rush_start_angle;
 
-            // 拨盘推进超过半增量后才允许外圈掉速触发停止，目的是忽略起步阶段电机启动电流浪涌导致的摩擦轮瞬时扰动
-            if (feed_progress >= SF_INCREMENT_MOTOR_ANGLE * 0.5f) {
+            // 外圈掉速确认真实出弹后不再立即锁住当前位置，而是切到低速预压下一发，满足“下一颗弹丸慢慢抵到单发限制位置”的机械需求。
+            if (CountFiredBulletByDipIfNeeded(feed_progress) != 0u) {
+                BeginNextBulletPreload(current_time);
+                break;
+            }
+
+            // 拨盘推进到最小有效咬弹行程后才允许外圈掉速触发停止，目的是忽略起步阶段电机启动电流浪涌导致的摩擦轮瞬时扰动。
+            if (feed_progress >= LoaderBulletCountToMotorAngle(SF_MIN_VALID_DIP_PROGRESS_BULLET)) {
                 float outer_avg_dip = 0.0f;
                 uint8_t outer_dip_count = GetOuterDipMetrics(&outer_avg_dip);
 
-                // 外圈掉速立即停止，以物理事件闭环替代固定角度开环
+                // 这里保留掉速停止兜底，目的是即使计数函数因为本拍已计数等原因没有切状态，也不能在确认出弹后继续推进送弹增量。
                 if (outer_dip_count >= 1u || outer_avg_dip > OUTER_DIP_CONFIRM_THRESHOLD) {
-                    FinishSingleFire(current_time);
+                    BeginNextBulletPreload(current_time);
                     break;
                 }
             }
@@ -366,6 +470,25 @@ void HandleSingleFire(uint8_t trigger_active)
     case SF_RETRYING:
         // 新策略不再补发推进；保留这个兜底分支是为了旧状态残留时也能立即收口，而不是继续执行历史补发路径。
         FinishSingleFire(current_time);
+        break;
+
+    case SF_PRELOAD_NEXT:
+        SetFrictionFeedforward(0.0f, 0.0f);
+        ff_loader = 0.0f;
+        if ((current_time - single_fire.preload_start_time) >= SF_PRELOAD_TIMEOUT_MS) {
+            // 低速预压超过时间上限后直接锁住当前位置，目的是缺下一发或触限电流不明显时也不能让拨盘持续慢卷。
+            FinishNextBulletPreload(current_time);
+        } else if ((loader->measure.total_angle - single_fire.preload_start_angle) >=
+                   LoaderBulletCountToMotorAngle(SF_PRELOAD_MAX_BULLET)) {
+            // 电流触限漏检时最多补偿一个弹位，目的是保留“抵到限位”的机会，同时避免继续推过下一颗弹丸形成连发。
+            FinishNextBulletPreload(current_time);
+        } else if (IsNextBulletPreloadLimited()) {
+            // 电流连续确认且速度已经降下来时认为下一发抵到单发限制位置，立即锁角等待摩擦轮回速。
+            FinishNextBulletPreload(current_time);
+        } else {
+            // 未触限时保持低速速度环轻顶，目的是让下一颗弹丸靠机械阻力自然抵到限位，而不是用位置环大目标硬推。
+            LoaderSetSpeedRef(SF_PRELOAD_SPEED_DPS);
+        }
         break;
 
     case SF_WAIT_RECOVER:

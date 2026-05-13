@@ -71,26 +71,32 @@
   "hotPaths": [
     {
       "path": "",
-      "accessCount": 70,
-      "lastAccessed": 1778590981817,
+      "accessCount": 85,
+      "lastAccessed": 1778671291101,
       "type": "directory"
     },
     {
       "path": "gimbal",
-      "accessCount": 25,
-      "lastAccessed": 1778590965404,
+      "accessCount": 26,
+      "lastAccessed": 1778671262620,
       "type": "directory"
     },
     {
       "path": "gimbal/application/robot_def.h",
-      "accessCount": 13,
-      "lastAccessed": 1778590965338,
+      "accessCount": 15,
+      "lastAccessed": 1778671269004,
       "type": "file"
     },
     {
       "path": "chassis/application/robot_def.h",
-      "accessCount": 12,
-      "lastAccessed": 1778590952032,
+      "accessCount": 13,
+      "lastAccessed": 1778671268986,
+      "type": "file"
+    },
+    {
+      "path": "gimbal/modules/motor/DJImotor/dji_motor.c",
+      "accessCount": 10,
+      "lastAccessed": 1778679223580,
       "type": "file"
     },
     {
@@ -100,9 +106,9 @@
       "type": "file"
     },
     {
-      "path": "gimbal/modules/motor/DJImotor/dji_motor.c",
+      "path": "chassis/application/chassis/chassis.c",
       "accessCount": 8,
-      "lastAccessed": 1777664443970,
+      "lastAccessed": 1778678485566,
       "type": "file"
     },
     {
@@ -112,16 +118,28 @@
       "type": "file"
     },
     {
+      "path": "chassis",
+      "accessCount": 7,
+      "lastAccessed": 1778671262558,
+      "type": "directory"
+    },
+    {
       "path": "gimbal/application/gimbal/gimbal.c",
-      "accessCount": 6,
-      "lastAccessed": 1777450501148,
+      "accessCount": 7,
+      "lastAccessed": 1778671269044,
       "type": "file"
     },
     {
-      "path": "chassis",
+      "path": "gimbal/modules/motor/DMmotor/dmmotor.c",
+      "accessCount": 7,
+      "lastAccessed": 1778679323895,
+      "type": "file"
+    },
+    {
+      "path": "chassis/application/chassis/chassis_private.h",
       "accessCount": 6,
-      "lastAccessed": 1778363161230,
-      "type": "directory"
+      "lastAccessed": 1778671268709,
+      "type": "file"
     },
     {
       "path": "gimbal/application/gimbal/gimbal_private.h",
@@ -133,18 +151,6 @@
       "path": "gimbal/modules/motor/DJImotor/dji_motor.h",
       "accessCount": 5,
       "lastAccessed": 1777664443946,
-      "type": "file"
-    },
-    {
-      "path": "chassis/application/chassis/chassis.c",
-      "accessCount": 5,
-      "lastAccessed": 1778363031851,
-      "type": "file"
-    },
-    {
-      "path": "chassis/application/chassis/chassis_private.h",
-      "accessCount": 5,
-      "lastAccessed": 1778363044470,
       "type": "file"
     },
     {
@@ -160,12 +166,6 @@
       "type": "file"
     },
     {
-      "path": "gimbal/modules/motor/DMmotor/dmmotor.c",
-      "accessCount": 4,
-      "lastAccessed": 1777531748659,
-      "type": "file"
-    },
-    {
       "path": "chassis/application",
       "accessCount": 4,
       "lastAccessed": 1778363174279,
@@ -175,6 +175,12 @@
       "path": "CLAUDE.md",
       "accessCount": 4,
       "lastAccessed": 1778590958054,
+      "type": "file"
+    },
+    {
+      "path": "chassis/modules/motor/DJImotor/dji_motor.c",
+      "accessCount": 4,
+      "lastAccessed": 1778679223336,
       "type": "file"
     },
     {
@@ -208,15 +214,15 @@
       "type": "file"
     },
     {
-      "path": "chassis/modules/motor/DJImotor/dji_motor.h",
-      "accessCount": 2,
-      "lastAccessed": 1777445884640,
+      "path": "gimbal/bsp/can/bsp_can.h",
+      "accessCount": 3,
+      "lastAccessed": 1778671251594,
       "type": "file"
     },
     {
-      "path": "chassis/modules/motor/DJImotor/dji_motor.c",
-      "accessCount": 2,
-      "lastAccessed": 1777445884748,
+      "path": "chassis/modules/motor/DJImotor/dji_motor.h",
+      "accessCount": 3,
+      "lastAccessed": 1778678673340,
       "type": "file"
     },
     {
@@ -250,9 +256,27 @@
       "type": "file"
     },
     {
-      "path": "gimbal/bsp/can/bsp_can.h",
+      "path": "gimbal/modules/daemon/daemon.h",
       "accessCount": 2,
-      "lastAccessed": 1778590988839,
+      "lastAccessed": 1778671251366,
+      "type": "file"
+    },
+    {
+      "path": "chassis/bsp/can/bsp_can.c",
+      "accessCount": 2,
+      "lastAccessed": 1778671251450,
+      "type": "file"
+    },
+    {
+      "path": "chassis/bsp/can/bsp_can.h",
+      "accessCount": 2,
+      "lastAccessed": 1778671251514,
+      "type": "file"
+    },
+    {
+      "path": "chassis/application/robot_task.h",
+      "accessCount": 2,
+      "lastAccessed": 1778671278971,
       "type": "file"
     },
     {
@@ -328,27 +352,9 @@
       "type": "file"
     },
     {
-      "path": "chassis/application/robot_task.h",
-      "accessCount": 1,
-      "lastAccessed": 1777445861195,
-      "type": "file"
-    },
-    {
       "path": "gimbal/modules/motor/HTmotor/HT04.h",
       "accessCount": 1,
       "lastAccessed": 1777445879871,
-      "type": "file"
-    },
-    {
-      "path": "chassis/bsp/can/bsp_can.c",
-      "accessCount": 1,
-      "lastAccessed": 1777445884866,
-      "type": "file"
-    },
-    {
-      "path": "chassis/bsp/can/bsp_can.h",
-      "accessCount": 1,
-      "lastAccessed": 1777445908187,
       "type": "file"
     },
     {
@@ -361,12 +367,6 @@
       "path": "chassis/application/chassis/chassis.h",
       "accessCount": 1,
       "lastAccessed": 1777445919458,
-      "type": "file"
-    },
-    {
-      "path": "gimbal/modules/daemon/daemon.h",
-      "accessCount": 1,
-      "lastAccessed": 1777445965794,
       "type": "file"
     }
   ],

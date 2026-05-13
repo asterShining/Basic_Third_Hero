@@ -385,6 +385,11 @@ void RobotCMDTask(void)
 #endif
 #ifdef GIMBAL_BOARD
     chassis_fetch_data = *(Chassis_Upload_Data_s *)CANCommGet(cmd_can_comm);
+    // CAN 双板通信断连时自动急停，原因是 CAN 离线后 CANCommGet 返回陈旧数据，继续沿用会让底盘失控
+    if (CANCommIsOnline(cmd_can_comm) == 0u) {
+        EmergencyHandler();
+        goto skip_control;
+    }
 #endif
     SubGetMessage(shoot_feed_sub, &shoot_fetch_data);
     SubGetMessage(gimbal_feed_sub, &gimbal_fetch_data);
@@ -465,6 +470,7 @@ void RobotCMDTask(void)
         chassis_cmd_send.ui_bullet_speed = keyboard_bullet_speed_selected;
     }
 
+skip_control:;
 #ifdef ONE_BOARD
     PubPushMessage(chassis_cmd_pub, (void *)&chassis_cmd_send);
 #endif

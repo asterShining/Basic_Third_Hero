@@ -48,6 +48,7 @@ static void LKMotorLostCallback(void *motor_ptr)
 {
     LKMotorInstance *motor = (LKMotorInstance *)motor_ptr;
     LOGWARNING("[LKMotor] motor lost, id: %d", motor->motor_can_ins->tx_id);
+    LKMotorStop(motor); // CAN 断连自动失能，停止该电机输出
 }
 
 LKMotorInstance *LKMotorInit(Motor_Init_Config_s *config)
