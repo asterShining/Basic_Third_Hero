@@ -116,7 +116,7 @@ static void DMMotorLostCallback(void *motor_ptr)
 {
     DMMotorInstance *motor = (DMMotorInstance *)motor_ptr;
     uint16_t can_bus = motor->motor_can_instace->can_handle == &hcan1 ? 1 : 2;
-//     LOGWARNING("[dm_motor] Motor lost, can bus [%d] , id [%d]", can_bus, motor->motor_can_instace->tx_id);
+    LOGWARNING("[dm_motor] Motor lost, can bus [%d] , id [%d]", can_bus, motor->motor_can_instace->tx_id);
 }
 void DMMotorCaliEncoder(DMMotorInstance *motor)
 {

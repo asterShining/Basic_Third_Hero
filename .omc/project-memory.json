@@ -1,6 +1,6 @@
 {
   "version": "1.0.0",
-  "lastScanned": 1777664403815,
+  "lastScanned": 1778861165910,
   "projectRoot": "/home/aster/Documents/robomaster/Basic_Third_Hero",
   "techStack": {
     "languages": [],
@@ -36,7 +36,7 @@
       "path": "chassis",
       "purpose": null,
       "fileCount": 12,
-      "lastAccessed": 1777664403814,
+      "lastAccessed": 1778861165903,
       "keyFiles": [
         "CMakeLists.txt",
         "CMakePresets.json",
@@ -49,7 +49,7 @@
       "path": "gimbal",
       "purpose": null,
       "fileCount": 13,
-      "lastAccessed": 1777664403815,
+      "lastAccessed": 1778861165903,
       "keyFiles": [
         "CMakeLists.txt",
         "CMakePresets.json",
@@ -62,7 +62,7 @@
       "path": "tools",
       "purpose": null,
       "fileCount": 1,
-      "lastAccessed": 1777664403815,
+      "lastAccessed": 1778861165903,
       "keyFiles": [
         "export_pitch_cali_from_rtt.py"
       ]
@@ -77,14 +77,14 @@
     },
     {
       "path": "gimbal",
-      "accessCount": 23,
-      "lastAccessed": 1777533001877,
+      "accessCount": 24,
+      "lastAccessed": 1778863341004,
       "type": "directory"
     },
     {
       "path": "gimbal/modules/motor/DJImotor/dji_motor.c",
-      "accessCount": 8,
-      "lastAccessed": 1777664443970,
+      "accessCount": 12,
+      "lastAccessed": 1778862832021,
       "type": "file"
     },
     {
@@ -112,6 +112,12 @@
       "type": "file"
     },
     {
+      "path": "gimbal/modules/motor/DMmotor/dmmotor.c",
+      "accessCount": 6,
+      "lastAccessed": 1778862332655,
+      "type": "file"
+    },
+    {
       "path": "gimbal/application/gimbal/gimbal_private.h",
       "accessCount": 5,
       "lastAccessed": 1777451963312,
@@ -133,12 +139,6 @@
       "path": "gimbal/modules/motor/motor_task.c",
       "accessCount": 4,
       "lastAccessed": 1777531735127,
-      "type": "file"
-    },
-    {
-      "path": "gimbal/modules/motor/DMmotor/dmmotor.c",
-      "accessCount": 4,
-      "lastAccessed": 1777531748659,
       "type": "file"
     },
     {

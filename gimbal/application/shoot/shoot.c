@@ -443,10 +443,10 @@ void ShootTask(void)
             ShootSetSpeedDual(11.0f, 11.5f);
             break;
         case BIG_AMU_16:
-            ShootSetSpeedDual(15.5f, 16.2f);
+            ShootSetSpeedDual(12.0f, 18.0f);
             break;
         default:
-            ShootSetSpeedDual(15.5f, 16.2f);
+            ShootSetSpeedDual(16.8f, 16.8f);
             break;
         }
     } else {
@@ -498,14 +498,17 @@ void ShootTask(void)
         // ch9: 累计发射计数，每跳一格代表成功检测到一发弹丸
         VofaDebugSetChannel(9, (float)p_vofa_sf->fire_count);
 
-        // ch10~ch15: 6 个电机各自的实时掉速量 (baseline - |current|, deg/s)
-        // 从 dip_control 取送弹前锁存的基线，减去当前瞬时速度绝对值，正值代表该轮正在被弹丸减速
-        VofaDebugSetChannel(10, dip_control.inner_left_baseline - fabsf(GetMotorSpeedAps(friction_inner_left)));
-        VofaDebugSetChannel(11, dip_control.inner_right_baseline - fabsf(GetMotorSpeedAps(friction_inner_right)));
-        VofaDebugSetChannel(12, dip_control.inner_down_baseline - fabsf(GetMotorSpeedAps(friction_inner_down)));
-        VofaDebugSetChannel(13, dip_control.outer_left_baseline - fabsf(GetMotorSpeedAps(friction_outer_left)));
-        VofaDebugSetChannel(14, dip_control.outer_right_baseline - fabsf(GetMotorSpeedAps(friction_outer_right)));
-        VofaDebugSetChannel(15, dip_control.outer_down_baseline - fabsf(GetMotorSpeedAps(friction_outer_down)));
+        // ch10~ch15: 6 个电机各自的掉速量 (baseline - dip, deg/s)，仅在弹丸确认发射时从抓拍更新
+        // 从 dip_snapshot 取掉速抓拍值，未发射时为 0/上发残留值，发射确认时锁定本次掉速量
+        {
+            BulletDipSnapshot_s *p_vofa_dip = ShootDebug_GetDipSnapshotPtr();
+            VofaDebugSetChannel(10, p_vofa_dip->delta_inner_left);
+            VofaDebugSetChannel(11, p_vofa_dip->delta_inner_right);
+            VofaDebugSetChannel(12, p_vofa_dip->delta_inner_down);
+            VofaDebugSetChannel(13, p_vofa_dip->delta_outer_left);
+            VofaDebugSetChannel(14, p_vofa_dip->delta_outer_right);
+            VofaDebugSetChannel(15, p_vofa_dip->delta_outer_down);
+        }
 
         VofaDebugSend();
     }

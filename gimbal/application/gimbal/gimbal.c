@@ -36,7 +36,7 @@ void GimbalInit(void)
         },
         .controller_param_init_config = {
             .angle_PID = {
-                .Kp = 0.67,
+                .Kp = 1.47,
                 .Ki = 0,
                 .Kd = 0.01,
                 .Improve = PID_Trapezoid_Intergral | PID_Integral_Limit | PID_Derivative_On_Measurement | PID_ErrorHandle,
@@ -44,7 +44,7 @@ void GimbalInit(void)
                 .MaxOut = 21,
             },
             .speed_PID = {
-                .Kp = 1.32,
+                .Kp = 1.61,
                 .Ki = YAW_SPEED_PID_KI,
                 .Kd = 0,
                 .DeadBand = YAW_SPEED_PID_DEADBAND_RAD,

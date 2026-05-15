@@ -79,8 +79,8 @@ __attribute__((noreturn)) void StartINSTASK(void const *argument)
         ins_dt = DWT_GetTimeline_ms() - ins_start;
 
         // 修改点：移除 &，将 float 转为 int (微秒)，使用 %d 打印
-        // if (ins_dt > 1)
-        //     LOGERROR("[freeRTOS] INS Task DELAY! dt = %d us", (int)(ins_dt * 1000));
+        if (ins_dt > 1)
+            LOGERROR("[freeRTOS] INS Task DELAY! dt = %d us", (int)(ins_dt * 1000));
 
         osDelay(1);
     }
@@ -97,8 +97,8 @@ __attribute__((noreturn)) void StartMOTORTASK(void const *argument)
         motor_dt = DWT_GetTimeline_ms() - motor_start;
         // 控制频率改为500hz
         //  修改点：移除 &，将 float 转为 int (微秒)，使用 %d 打印
-        // if (motor_dt > 1)
-        //     LOGERROR("[freeRTOS] MOTOR Task DELAY! dt = %d us", (int)(motor_dt * 1000));
+        if (motor_dt > 1)
+            LOGERROR("[freeRTOS] MOTOR Task DELAY! dt = %d us", (int)(motor_dt * 1000));
 
         osDelay(1);
     }
@@ -137,8 +137,8 @@ __attribute__((noreturn)) void StartROBOTTASK(void const *argument)
         robot_dt = DWT_GetTimeline_ms() - robot_start;
 
         // 修改点：移除 &，将 float 转为 int (微秒)，使用 %d 打印
-        // if (robot_dt > 5)
-        //     LOGERROR("[freeRTOS] ROBOT core Task DELAY! dt = %d us", (int)(robot_dt * 1000));
+        if (robot_dt > 5)
+            LOGERROR("[freeRTOS] ROBOT core Task DELAY! dt = %d us", (int)(robot_dt * 1000));
 
         osDelay(5);
     }

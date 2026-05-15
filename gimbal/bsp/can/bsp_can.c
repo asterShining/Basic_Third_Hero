@@ -110,18 +110,18 @@ uint8_t CANTransmit(CANInstance *_instance, float timeout)
     {
         if (DWT_GetTimeline_ms() - dwt_start > timeout) // 超时
         {
-            // LOGWARNING("[bsp_can] CAN MAILbox full! failed to add msg to mailbox. Cnt [%d]", busy_count);
+            LOGWARNING("[bsp_can] CAN MAILbox full! failed to add msg to mailbox. Cnt [%d]", busy_count);
             busy_count++;
             if (busy_count % 10 == 0) {
-                // LOGWARNING("[bsp_can] TIMEOUT! Victim ID: 0x%03X (This msg failed)", _instance->tx_id);
-                // // 【核心诊断】：打印当前是谁占着茅坑不拉屎（或者拉得太慢）
-                // LOGWARNING("  -> Suspects in Mailboxes: MB0[0x%03X] MB1[0x%03X] MB2[0x%03X]",
-                //            mb_owners[0], mb_owners[1], mb_owners[2]);
+                LOGWARNING("[bsp_can] TIMEOUT! Victim ID: 0x%03X (This msg failed)", _instance->tx_id);
+                // 【核心诊断】：打印当前是谁占着茅坑不拉屎（或者拉得太慢）
+                LOGWARNING("  -> Suspects in Mailboxes: MB0[0x%03X] MB1[0x%03X] MB2[0x%03X]",
+                           mb_owners[0], mb_owners[1], mb_owners[2]);
 
-                // 顺便看下是不是硬件掉线了（暂时注释，避免总线异常时刷屏）
-                // uint8_t lec = (_instance->can_handle->Instance->ESR & CAN_ESR_LEC) >> 4;
-                // if (lec == 0x3)
-                //     LOGWARNING("  -> HW Error: ACK Error (Check Cable!)");
+                // 顺便看下是不是硬件掉线了
+                uint8_t lec = (_instance->can_handle->Instance->ESR & CAN_ESR_LEC) >> 4;
+                if (lec == 0x3)
+                    LOGWARNING("  -> HW Error: ACK Error (Check Cable!)");
             }
             return 0;
         }
@@ -129,7 +129,7 @@ uint8_t CANTransmit(CANInstance *_instance, float timeout)
     wait_time = DWT_GetTimeline_ms() - dwt_start;
     // tx_mailbox会保存实际填入了这一帧消息的邮箱,但是知道是哪个邮箱发的似乎也没啥用
     if (HAL_CAN_AddTxMessage(_instance->can_handle, &_instance->txconf, _instance->tx_buff, &_instance->tx_mailbox)) {
-        // LOGWARNING("[bsp_can] CAN bus BUS! cnt:%d", busy_count);
+        LOGWARNING("[bsp_can] CAN bus BUS! cnt:%d", busy_count);
         busy_count++;
 
         return 0;
