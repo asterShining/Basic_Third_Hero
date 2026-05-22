@@ -440,10 +440,10 @@ void ShootTask(void)
         // 正常模式: 根据不同的弹速等级设置不同的分级速度；原因是当前双级摩擦轮靠“内圈先加速、外圈后稳速”来匹配目标弹速。
         switch (shoot_cmd_recv.bullet_speed) {
         case BIG_AMU_12:
-            ShootSetSpeedDual(11.0f, 11.5f);
+            ShootSetSpeedDual(11.0f, 11.4f);
             break;
         case BIG_AMU_16:
-            ShootSetSpeedDual(12.0f, 18.0f);
+            ShootSetSpeedDual(15.5f, 16.7f);
             break;
         default:
             ShootSetSpeedDual(16.8f, 16.8f);

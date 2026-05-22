@@ -329,6 +329,7 @@ static void RemoteControlSetDT7(void)
 static void ApplyVT03ShootLogic(const VideoLinkKM_RemoteState_s *video_link_remote_state, uint8_t pitch_cali_active)
 {
     uint8_t fn_left_pressed;
+    uint8_t fn_right_pressed;
     uint8_t trigger_pressed;
 
     if (video_link_remote_state == NULL) {
@@ -336,17 +337,34 @@ static void ApplyVT03ShootLogic(const VideoLinkKM_RemoteState_s *video_link_remo
     }
 
     fn_left_pressed = video_link_remote_state->fn_left_button_down;
+    fn_right_pressed = video_link_remote_state->fn_right_button_down;
     trigger_pressed = video_link_remote_state->trigger_button_down;
 
     if (pitch_cali_active == 0u && fn_left_pressed && !vt03_fn_left_last) {
         // 左 `fn` 继续承担摩擦轮边沿切换，目的是在移除 VT03 的 pitch 标定入口后，发射侧手感和按键语义保持不变。
         friction_switch_state = (uint8_t)!friction_switch_state;
+        if (friction_switch_state != 0u) {
+            // 摩擦轮每次从关闭切到开启时都回到 12m/s 档，目的是用户明确要求 VT03 预热默认保守，只有再次点右 Fn 才允许进入 16m/s。
+            vt03_bullet_speed_selected = BIG_AMU_12;
+        }
+    }
+
+    if (pitch_cali_active == 0u &&
+        friction_switch_state != 0u &&
+        fn_right_pressed &&
+        !vt03_fn_right_last) {
+        // 右 Fn 只在摩擦轮已经开启后切换弹速档位，目的是避免关闭状态下误触把下一次预热悄悄带到 16m/s。
+        if (vt03_bullet_speed_selected == BIG_AMU_16) {
+            vt03_bullet_speed_selected = BIG_AMU_12;
+        } else {
+            vt03_bullet_speed_selected = BIG_AMU_16;
+        }
     }
 
     if (friction_switch_state != 0u) {
         shoot_cmd_send.shoot_mode = SHOOT_ON;
         shoot_cmd_send.friction_mode = FRICTION_ON;
-        shoot_cmd_send.bullet_speed = BIG_AMU_16;
+        shoot_cmd_send.bullet_speed = vt03_bullet_speed_selected;
 
         // 扳机只响应单发上升沿，目的是用户要求 VT03 遥控器保持“扳机点一下打一发”的安全语义。
         if (trigger_pressed && !vt03_trigger_last) {
@@ -356,13 +374,15 @@ static void ApplyVT03ShootLogic(const VideoLinkKM_RemoteState_s *video_link_remo
         }
     } else {
         // VT03 摩擦轮关闭时同步清空装填和射频命令，目的是防止扳机边沿在关闭状态下继续残留到发射应用。
+        vt03_bullet_speed_selected = BIG_AMU_12;
         shoot_cmd_send.friction_mode = FRICTION_OFF;
         shoot_cmd_send.load_mode = LOAD_STOP;
         shoot_cmd_send.shoot_rate = 0.0f;
     }
 
-    // 发射逻辑结束后统一更新左 `fn` 与扳机的上一拍电平，目的是下一个控制周期继续基于正确边沿做切换和单发判定。
+    // 发射逻辑结束后统一更新左右 `fn` 与扳机的上一拍电平，目的是下一个控制周期继续基于正确边沿做切换、档位和单发判定。
     vt03_fn_left_last = fn_left_pressed;
+    vt03_fn_right_last = fn_right_pressed;
     vt03_trigger_last = trigger_pressed;
 }
 
@@ -446,6 +466,8 @@ static void RemoteControlSetVT03(void)
     }
 
     robot_state = ROBOT_READY;
+    // VT03 遥控器只要正常接管并退出 Pause 零力，就显式恢复超电允许态，目的是保持历史默认全开语义，不再依赖任何键盘锁存开关。
+    chassis_cmd_send.cap_mode = SUPER_CAP_ON;
     if (video_link_remote_state->mode_sw == VT03_MODE_SW_C) {
         // VT03 的 C 挡进入小陀螺 + 云台陀螺仪模式，目的是用户明确要求切到 C 挡时直接进入小陀螺。
         chassis_cmd_send.chassis_mode = CHASSIS_ROTATE;
@@ -470,9 +492,6 @@ static void RemoteControlSetVT03(void)
     rocker_rx = ApplyRCDeadzone((float)video_link_data[TEMP].rc.rocker_r_);
     rocker_ry = ApplyRCDeadzone((float)video_link_data[TEMP].rc.rocker_r1);
 
-    // VT03 不再负责触发 pitch 标定，因此这里直接读取当前标定占用状态；
-    // 原因是用户要求只移除遥控器上的 pitch 标定入口，但若标定由其它入口启动，VT03 仍应在运行期间让出 pitch/yaw 的相关控制权。
-    vt03_fn_right_last = video_link_remote_state->fn_right_button_down;
     pitch_cali_active = GimbalPitchCalibrationActive();
     if (pitch_cali_active == 0u) {
         // VT03 pitch 摇杆直接下发速度环目标，目的是让抬头/低头手感与“IMU 软件限位 + DJI 速度环”的底层控制方式一致。

@@ -99,10 +99,6 @@ uint32_t keyboard_turnback_last_frame_serial = 0u;
 uint8_t keyboard_turnback_press_frame_count = 0u;
 // 保存 G 键上一拍电平，目的是UI 整页刷新是一次性请求，不能按住期间反复触发。
 uint8_t keyboard_ui_refresh_last = 0u;
-// 保存 C 键上一拍电平，目的是超电开关采用“按一次切一次”的上升沿语义，避免按住期间每拍翻转。
-uint8_t keyboard_super_cap_toggle_last = 0u;
-// 保存键鼠超电锁存状态，目的是上电、急停和断链后默认关闭，只有用户明确按 C 才允许底盘侧启用超电策略。
-uint8_t keyboard_super_cap_latched = 0u;
 // 保存键盘小陀螺锁存状态，目的是用户要求 X 键按一次切一次，而不是按住才进入。
 uint8_t keyboard_spin_mode_latched = 0u;
 // 保存键盘自由模式锁存状态，目的是用户要求 B 键按一下就持续保持自由模式。
@@ -131,6 +127,8 @@ uint8_t vt03_fn_left_last = 0u;
 uint8_t vt03_fn_right_last = 0u;
 // 保存 VT03 扳机上一拍电平，目的是单发拨弹只能响应上升沿，不能把电平直接送进装填状态机。
 uint8_t vt03_trigger_last = 0u;
+// 保存 VT03 摩擦轮当前弹速档位，目的是左 Fn 开启摩擦轮后默认进入 12m/s，右 Fn 只在摩擦轮已开启时显式切换到 16m/s。
+Bullet_Speed_e vt03_bullet_speed_selected = BIG_AMU_12;
 // 保存 VT03 Pause 上一拍电平，目的是Pause 现在同时承担短按零力和长按校零，必须分清按下、保持和释放三个阶段。
 uint8_t vt03_pause_last = 0u;
 // 保存 VT03 Pause 的零力锁存状态，目的是进入零力后即使松手前链路波动，也不能自动恢复使能。
@@ -369,6 +367,7 @@ void EmergencyHandler(void)
     shoot_cmd_send.bullet_speed = BULLET_SPEED_NONE;
     shoot_cmd_send.shoot_rate = 0.0f;
     friction_switch_state = 0u;
+    vt03_bullet_speed_selected = BIG_AMU_12;
     // 零力出口统一清空键鼠和遥控锁存，目的是否则恢复有力后会把暂停前的旧输入当成当前意图继续执行。
     ResetMouseControlLatchState();
     ResetKeyboardMotionState();
@@ -433,6 +432,11 @@ void RobotCMDTask(void)
     last_effective_chassis_mode = chassis_cmd_send.chassis_mode;
     last_effective_gimbal_mode = gimbal_cmd_send.gimbal_mode;
 
+    if (chassis_cmd_send.chassis_mode != CHASSIS_ZERO_FORCE) {
+        // 按历史超电策略，机器人只要进入有力底盘模式就默认请求超电参与；零力基线仍保持 OFF，目的是保留失能安全边界，同时不再让键盘 C 影响功率策略。
+        chassis_cmd_send.cap_mode = SUPER_CAP_ON;
+    }
+
     if (follow_transition_request_hold_ticks != 0u) {
         // 在请求后的若干拍持续下发底盘跟随接管位，目的是双板命令缓冲只保留最新帧，持续几拍才能避免边沿请求被覆盖丢失。
         chassis_cmd_send.follow_transition_request = 1u;
@@ -458,9 +462,11 @@ void RobotCMDTask(void)
     chassis_cmd_send.gimbal_gyro_z = gimbal_fetch_data.gimbal_imu_data.Gyro[2] * RAD_2_DEGREE;
     chassis_cmd_send.gimbal_pitch_deg = gimbal_fetch_data.gimbal_imu_data.Pitch;
     chassis_cmd_send.friction_on = (shoot_cmd_send.friction_mode == FRICTION_ON) ? 1u : 0u;
-    // 底盘 UI 优先显示本拍已经明确生效的弹速；若当前没有有效发射档位，再回落到键鼠预选值，保证 F 旁数字既能反映键鼠设置，也不会在遥控发射时停留在旧值。
+    // 底盘 UI 优先显示本拍已经明确生效的弹速；若当前没有有效发射档位，则按当前主控源回落到对应预选值，避免 VT03 已经回到默认 12m/s 但 UI 仍显示键鼠 R 键旧档位。
     if (shoot_cmd_send.bullet_speed != BULLET_SPEED_NONE) {
         chassis_cmd_send.ui_bullet_speed = shoot_cmd_send.bullet_speed;
+    } else if (current_control_source == CONTROL_SOURCE_VT03) {
+        chassis_cmd_send.ui_bullet_speed = vt03_bullet_speed_selected;
     } else {
         chassis_cmd_send.ui_bullet_speed = keyboard_bullet_speed_selected;
     }

@@ -59,8 +59,8 @@ uint32_t GetControlSourceKeyFrameSerial(ControlSource_e source)
  */
 void ResetMouseControlLatchState(void)
 {
-    // 这里保留“安全出口硬清理”语义，作用是急停、零力或真正双离线时把全部键鼠模式锁存一起打回安全基线；
-    // 原因是这些场景下用户的旧模式意图已经失效，恢复后必须重新显式给出命令，不能让小陀螺或自由模式自己回来。
+    // 这里保留“安全出口硬清理”语义，作用是急停、零力或真正双离线时把运动、发射和模式类键鼠锁存打回安全基线；
+    // 超电已经恢复为有力模式自动开启，键鼠锁存清理只处理驾驶、发射和模式类状态，避免再把 C 键当成功率策略入口。
     ResetMouseFireState();
     keyboard_spin_toggle_last = 0u;
     keyboard_free_toggle_last = 0u;
@@ -68,8 +68,6 @@ void ResetMouseControlLatchState(void)
     keyboard_turnback_last_frame_serial = 0u;
     keyboard_turnback_press_frame_count = 0u;
     keyboard_ui_refresh_last = 0u;
-    keyboard_super_cap_toggle_last = 0u;
-    keyboard_super_cap_latched = 0u;
     keyboard_spin_mode_latched = 0u;
     keyboard_free_mode_latched = 0u;
     ClearKeyboardTurnbackState();
@@ -220,8 +218,6 @@ static void SyncMouseKeyEdgeState(ControlSource_e source, const RC_ctrl_t *mouse
     keyboard_turnback_press_frame_count = (turnback_pressed != 0u) ? TURNBACK_TRIGGER_STABLE_FRAMES : 0u;
     // 同步对齐 G 键边沿历史，目的是主控切换时用户若正按着 G，不应该在切源首拍误触发一次 UI 全量刷新。
     keyboard_ui_refresh_last = (uint8_t)((key_bits >> Key_G) & 0x1u);
-    // 同步对齐 C 键边沿历史，目的是主控切换时如果 C 已经按住，不能在新输入源首拍误触发一次超电开关。
-    keyboard_super_cap_toggle_last = (uint8_t)((key_bits >> Key_C) & 0x1u);
     // 同步对齐 X 键边沿历史，目的是主控切换时若用户正按着 X，不应在切源首拍被误判成新的小陀螺切换。
     keyboard_spin_toggle_last = (uint8_t)((key_bits >> Key_X) & 0x1u);
 }
@@ -241,12 +237,13 @@ void HandleControlSourceSwitch(ControlSource_e new_source)
         return;
     }
 
-    // 切换主控源时统一清空跨周期键鼠锁存，目的是恢复旧逻辑，让不同链路的模式状态不要互相继承。
-    // 这样做的代价是 X 小陀螺和 B 自由模式都会在切源时失效，但行为更贴近之前依赖当前主控源重新给模式意图的方案。
+    // 切换主控源时统一清空跨周期键鼠运动和模式锁存，目的是恢复旧逻辑，让不同链路的驾驶状态不要互相继承。
+    // 超电默认跟随有力模式自动开启，切源不再携带或恢复任何 C 键功率锁存，避免输入源变化影响底盘功率语义。
     ResetMouseControlLatchState();
     ResetKeyboardMotionState();
     ResetChassisAuxState();
     friction_switch_state = 0u;
+    vt03_bullet_speed_selected = BIG_AMU_12;
     shoot_cmd_send.shoot_rate = 0.0f;
     // 切换主控源时同步清掉 DT7 校零锁存，目的是内八组合已经失效，继续沿用旧触发状态会让蜂鸣器残留或下次组合无法重新触发。
     cali_triggered = 0u;

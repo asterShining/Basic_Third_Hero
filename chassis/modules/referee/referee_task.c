@@ -187,6 +187,12 @@
 #define UI_METER_3_END_X 1335u
 #define UI_METER_3_END_Y 422u
 #define UI_METER_3_WIDTH 3u
+// `line_8` 使用 5m 线作为垂直基准并整体下移 78 像素，目的是在上一版下移 83 像素的基础上按现场反馈相对上移 5 像素。
+#define UI_LINE_8_START_X 946u
+#define UI_LINE_8_START_Y (UI_METER_5_START_Y - 78u)
+#define UI_LINE_8_END_X 1289u
+#define UI_LINE_8_END_Y (UI_METER_5_END_Y - 78u)
+#define UI_LINE_8_WIDTH 5u
 
 // What: 这组文字坐标直接继承参考工程里的 `text_5/text_3`；Why: 两个距离标签必须和新增的标尺线严格配对，否则客户端上会只剩横线没有语义。
 #define UI_TEXT_5_X 535u
@@ -224,6 +230,7 @@ typedef enum {
     UI_STATIC_FIGURE_PITCH_SCALE_VALUE_30,
     UI_STATIC_FIGURE_PITCH_SCALE_VALUE_20,
     UI_STATIC_FIGURE_PITCH_SCALE_VALUE_10,
+    UI_STATIC_FIGURE_LINE_8,
     UI_STATIC_FIGURE_COUNT,
 } UIStaticFigureIndex_e;
 
@@ -273,7 +280,7 @@ typedef enum {
     UI_INIT_STAGE_DELETE_ALL,
     UI_INIT_STAGE_DRAW_STATIC_FIGURES_0,
     UI_INIT_STAGE_DRAW_STATIC_FIGURES_1,
-    // What: 静态图元总数从 12 增到 15 后必须新增第三拍；Why: `UIGraphRefresh` 只支持 1/2/5/7，初始化静态层只能改成 7 + 7 + 1 合法分包。
+    // 静态图元总数增加后继续拆成 7 + 7 + 2，目的是遵守 `UIGraphRefresh` 只支持 1/2/5/7 的协议封装限制。
     UI_INIT_STAGE_DRAW_STATIC_FIGURES_2,
     UI_INIT_STAGE_DRAW_STATE_FIGURES_0,
     UI_INIT_STAGE_DRAW_STATE_FIGURES_1,
@@ -573,10 +580,11 @@ static void UIAdvanceInitStage(uint32_t now_tick_ms)
         break;
 
     case UI_INIT_STAGE_DRAW_STATIC_FIGURES_2:
-        // What: 第三拍只补最后一个 pitch 数字标记；Why: 15 个静态图元无法刚好拆成两个合法包，只能用 Draw1 收尾。
+        // 第三拍补最后一个 pitch 数字标记和参考 UI 的 `line_8`，目的是在不改变前两包顺序的前提下用合法 Draw2 收尾。
         UIBuildStaticFigures(UI_Graph_ADD);
-        UIGraphRefresh(&referee_recv_info->referee_id, 1,
-                       ui_static_figures[UI_STATIC_FIGURE_PITCH_SCALE_VALUE_10]);
+        UIGraphRefresh(&referee_recv_info->referee_id, 2,
+                       ui_static_figures[UI_STATIC_FIGURE_PITCH_SCALE_VALUE_10],
+                       ui_static_figures[UI_STATIC_FIGURE_LINE_8]);
         ui_runtime.init_stage = UI_INIT_STAGE_DRAW_STATE_FIGURES_0;
         break;
 
@@ -763,6 +771,9 @@ static void UIBuildStaticFigures(uint32_t operate_type)
               UI_PITCH_SCALE_FONT, UI_PITCH_SCALE_VALUE_WIDTH, UI_PITCH_SCALE_VALUE_20_X, UI_PITCH_SCALE_VALUE_20_Y, 20);
     UIIntDraw(&ui_static_figures[UI_STATIC_FIGURE_PITCH_SCALE_VALUE_10], "n10", operate_type, UI_LAYER_MAIN, UI_Color_White,
               UI_PITCH_SCALE_FONT, UI_PITCH_SCALE_VALUE_WIDTH, UI_PITCH_SCALE_VALUE_10_X, UI_PITCH_SCALE_VALUE_10_Y, 10);
+    // `l08` 对应参考目录生成器里的 `line_8`，但颜色按现场语义改为黄色，避免被误认为普通白色结构线。
+    UILineDraw(&ui_static_figures[UI_STATIC_FIGURE_LINE_8], "l08", operate_type, UI_LAYER_MAIN, UI_Color_Yellow, UI_LINE_8_WIDTH,
+               UI_LINE_8_START_X, UI_LINE_8_START_Y, UI_LINE_8_END_X, UI_LINE_8_END_Y);
 }
 
 static void UIBuildStateFigures(uint32_t operate_type, const UIIndicatorState_t *indicator_state)

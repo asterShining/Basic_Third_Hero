@@ -128,10 +128,6 @@ extern uint8_t keyboard_turnback_toggle_last;
 extern uint32_t keyboard_turnback_last_frame_serial;
 extern uint8_t keyboard_turnback_press_frame_count;
 extern uint8_t keyboard_ui_refresh_last;
-// 保存 C 键上一拍电平，目的是超电开关必须只响应一次上升沿，不能在按住期间反复翻转导致 DCDC 请求抖动。
-extern uint8_t keyboard_super_cap_toggle_last;
-// 保存键鼠超电显式开关锁存，目的是超电默认关闭，只有操作者按 C 后才允许 cmd 层把 SUPER_CAP_ON 下发到底盘。
-extern uint8_t keyboard_super_cap_latched;
 extern uint8_t keyboard_spin_mode_latched;
 extern uint8_t keyboard_free_mode_latched;
 extern uint8_t keyboard_turnback_active;
@@ -146,6 +142,8 @@ extern ControlSource_e current_control_source;
 extern uint8_t vt03_fn_left_last;
 extern uint8_t vt03_fn_right_last;
 extern uint8_t vt03_trigger_last;
+// VT03 独立维护自己的弹速锁存，目的是不把右 Fn 的 12/16 切换和键鼠 R 键预选档位混在同一份状态里。
+extern Bullet_Speed_e vt03_bullet_speed_selected;
 extern uint8_t vt03_pause_last;
 extern uint8_t vt03_pause_zero_force_latched;
 extern uint32_t vt03_pause_press_start_ms;

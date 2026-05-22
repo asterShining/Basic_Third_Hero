@@ -36,9 +36,13 @@ void UpdateSuperCapOutputState(uint8_t chassis_output_allowed)
     last_dcdc_state = super_cap_policy_state.dcdc_state;
 
     // 裁判切掉输出、底盘零力或超电离线时必须立即进入关闭态，目的是这些场景都属于安全优先路径，不应再等待最小切换时间。
+    // 键盘 C 已经不再参与超电控制，因此 DCDC 状态机只响应真实输出许可、底盘模式、在线状态和硬件故障。
     if (SuperCapIsOnline(cap) == 0u ||
         chassis_output_allowed == 0u ||
         chassis_cmd_recv.chassis_mode == CHASSIS_ZERO_FORCE) {
+        super_cap_policy_state.assist_enabled = 0u;
+        super_cap_policy_state.assist_target_w = 0.0f;
+        super_cap_policy_state.assist_applied_w = 0.0f;
         super_cap_policy_state.dcdc_state = SUPER_CAP_DCDC_OFF;
         super_cap_policy_state.fault_toggle_started_ms = 0u;
         desired_enable = 0u;

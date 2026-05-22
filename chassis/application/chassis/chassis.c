@@ -251,7 +251,7 @@ void ChassisTask(void)
             reported_power_limit = (float)SuperCapGetReportedPowerLimit(cap);
             if (reported_power_limit >= CHASSIS_SUPER_CAP_REPORTED_LIMIT_MIN_W) {
                 super_cap_policy_state.reported_limit_valid = 1u;
-                // 这里保留一次最终裁剪，目的是即使 helper 前面已经按 `chassisPowerLimit - 5W` 算了额外功率，本层仍确保总预算不会因为跨拍状态差异而超过同一拍回传上限。
+                // 这里保留一次最终裁剪并扣掉 5W 余量，目的是即使 helper 前面已经按 `chassisPowerLimit - 5W` 算过目标，本层仍能挡住跨拍状态差异或回传抖动带来的贴边超限。
                 reported_power_limit -= CHASSIS_SUPER_CAP_REPORTED_LIMIT_MARGIN_W;
                 if (final_power_limit > reported_power_limit) {
                     final_power_limit = reported_power_limit;
@@ -262,6 +262,7 @@ void ChassisTask(void)
         } else {
             super_cap_policy_state.reported_limit_valid = 0u;
         }
+
     }
 #endif // USE_SUPER_CAP
     // 把最终预算交给底盘功率控制算法，目的是轮组参考值后续都必须在同一套预算下闭环，不应该各自单独裁剪。
@@ -294,7 +295,7 @@ void ChassisTask(void)
         break;
 
     case CHASSIS_FOLLOW_GIMBAL_YAW: {
-        const float follow_yaw_kp = 21.0f;
+        const float follow_yaw_kp = 14.0f;
         const float follow_yaw_kd = 0.5f;
         const float follow_yaw_kff = 1.3f;
         const float follow_yaw_deadband = 0.5f;

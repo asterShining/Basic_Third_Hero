@@ -36,7 +36,7 @@ void GimbalInit(void)
         },
         .controller_param_init_config = {
             .angle_PID = {
-                .Kp = 1.47,
+                .Kp = 0.84,
                 .Ki = 0,
                 .Kd = 0.01,
                 .Improve = PID_Trapezoid_Intergral | PID_Integral_Limit | PID_Derivative_On_Measurement | PID_ErrorHandle,
@@ -44,7 +44,7 @@ void GimbalInit(void)
                 .MaxOut = 21,
             },
             .speed_PID = {
-                .Kp = 1.61,
+                .Kp = 1.51,
                 .Ki = YAW_SPEED_PID_KI,
                 .Kd = 0,
                 .DeadBand = YAW_SPEED_PID_DEADBAND_RAD,
@@ -140,6 +140,8 @@ void GimbalTask(void)
     uint8_t yaw_motor_online_changed = 0u;
     uint8_t pitch_motor_online_changed = 0u;
     uint8_t gimbal_mode_changed = 0u;
+    uint8_t yaw_output_allowed = 0u;
+    uint8_t pitch_output_allowed = 0u;
     float pitch_speed_ref;
     float current_pitch_deg;
     float pitch_limit_distance_deg;
@@ -170,6 +172,10 @@ void GimbalTask(void)
         pitch_motor_online_changed = 1u;
         last_pitch_motor_online = pitch_motor_online;
     }
+
+    // 云台非零力模式下按轴独立隔离掉线电机，目的是某一个执行器丢反馈时只切断该轴输出，不能把仍在线的另一个轴一起拖进全局零力。
+    yaw_output_allowed = (uint8_t)(yaw_motor != NULL && yaw_motor_online != 0u);
+    pitch_output_allowed = (uint8_t)(pitch_motor != NULL && pitch_motor_online != 0u);
 
     // 速度环模式下 pitch 的安全边界必须看 IMU 实际角，而不是只看 cmd 的角度目标；这样即使上层目标或输入源异常，也不能在撞限位方向继续给速度。
     current_pitch_deg = (gimba_IMU_data != NULL) ? gimba_IMU_data->Pitch : 0.0f;
@@ -224,18 +230,27 @@ void GimbalTask(void)
 
     case GIMBAL_GYRO_MODE:
         if (yaw_motor != NULL) {
-            DMMotorEnable(yaw_motor);
+            if (yaw_output_allowed != 0u) {
+                // yaw 反馈仍在线时才恢复该轴有力并下发目标，目的是避免掉线周期内反复重新使能离线电机，同时不影响 pitch 轴继续响应。
+                DMMotorEnable(yaw_motor);
+                // yaw 目标角继续直接采用 cmd 侧整理后的多圈目标，目的是本轮拆分只调整文件结构，不改原有多圈控制语义。
+                DMMotorSetRef(yaw_motor, gimbal_cmd_recv.yaw);
+            } else {
+                // yaw 单轴掉线时只把 yaw 力矩输出压到零，目的是冻结该轴执行器风险，同时保留 pitch 轴和图传随动机构的正常工作路径。
+                DMMotorStop(yaw_motor);
+            }
         }
         if (pitch_motor != NULL) {
-            DJIMotorEnable(pitch_motor);
-        }
-        if (yaw_motor != NULL) {
-            // yaw 目标角继续直接采用 cmd 侧整理后的多圈目标，目的是本轮拆分只调整文件结构，不改原有多圈控制语义。
-            DMMotorSetRef(yaw_motor, gimbal_cmd_recv.yaw);
-        }
-        if (pitch_motor != NULL) {
-            // pitch 已切成速度环，输入参考直接来自 cmd 汇总出的瞬态角速度；方向统一交给 DJI 电机配置里的 MOTOR_DIRECTION_REVERSE 处理，避免应用层再取反导致速度语义和 IMU 限位方向互相打架。
-            DJIMotorSetRef(pitch_motor, pitch_speed_ref);
+            if (pitch_output_allowed != 0u) {
+                // pitch 反馈仍在线时才恢复该轴有力，目的是单独隔离 C620 掉线故障，不再让 pitch 异常把 yaw 轴也一起停掉。
+                DJIMotorEnable(pitch_motor);
+                // pitch 已切成速度环，输入参考直接来自 cmd 汇总出的瞬态角速度；方向统一交给 DJI 电机配置里的 MOTOR_DIRECTION_REVERSE 处理，避免应用层再取反导致速度语义和 IMU 限位方向互相打架。
+                DJIMotorSetRef(pitch_motor, pitch_speed_ref);
+            } else {
+                // pitch 单轴掉线时只停 pitch 并把速度参考贴回零，目的是掉线期间不保留旧速度命令，复活后再由 cmd 侧恢复同步链重新接管。
+                DJIMotorStop(pitch_motor);
+                DJIMotorSetRef(pitch_motor, 0.0f);
+            }
         }
         // 陀螺仪模式下使能图传固定电机，目的是云台正常工作时图传随动机构也应保持工作。
         VideoLinkMotorEnable();
@@ -243,19 +258,28 @@ void GimbalTask(void)
 
     case GIMBAL_FREE_MODE:
         if (yaw_motor != NULL) {
-            DMMotorEnable(yaw_motor);
             // 自由模式先关闭旧的速度前馈位，目的是保持与原逻辑一致，避免这一路旧标志和当前电流前馈语义混用。
             yaw_motor->motor_settings.feedforward_flag &= ~SPEED_FEEDFORWARD;
+            if (yaw_output_allowed != 0u) {
+                // 自由模式同样只恢复在线 yaw 轴，目的是保持单轴隔离策略在两种有力模式下一致，避免模式切换绕过掉线保护。
+                DMMotorEnable(yaw_motor);
+                DMMotorSetRef(yaw_motor, gimbal_cmd_recv.yaw);
+            } else {
+                // yaw 离线时自由模式也只停 yaw，不改写全局 gimbal_mode，目的是操作者仍可用 pitch 轴做可控恢复和姿态调整。
+                DMMotorStop(yaw_motor);
+            }
         }
         if (pitch_motor != NULL) {
-            DJIMotorEnable(pitch_motor);
-        }
-        if (yaw_motor != NULL) {
-            DMMotorSetRef(yaw_motor, gimbal_cmd_recv.yaw);
-        }
-        if (pitch_motor != NULL) {
-            // 自由模式仍然沿用同一条 pitch 速度环，目的是只改变底盘/云台模式语义，不再为 pitch 额外分叉一套角度控制。
-            DJIMotorSetRef(pitch_motor, pitch_speed_ref);
+            if (pitch_output_allowed != 0u) {
+                // 自由模式下 pitch 在线才恢复速度环输出，目的是把掉线处理收敛在本轴，不能影响 yaw 的正常控制。
+                DJIMotorEnable(pitch_motor);
+                // 自由模式仍然沿用同一条 pitch 速度环，目的是只改变底盘/云台模式语义，不再为 pitch 额外分叉一套角度控制。
+                DJIMotorSetRef(pitch_motor, pitch_speed_ref);
+            } else {
+                // pitch 离线时持续清零本轴速度参考，目的是避免掉线期间的旧瞬态输入在电机复活边沿被直接送进速度环。
+                DJIMotorStop(pitch_motor);
+                DJIMotorSetRef(pitch_motor, 0.0f);
+            }
         }
         // 自由模式下也保持图传固定电机工作，目的是该机构从属于“云台有力”状态，而不是某一种具体姿态模式。
         VideoLinkMotorEnable();

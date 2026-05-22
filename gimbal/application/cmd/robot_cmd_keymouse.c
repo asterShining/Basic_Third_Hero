@@ -101,7 +101,6 @@ void MouseKeySet(void)
     uint8_t turnback_toggle_raw_pressed = (uint8_t)((key_bits >> Key_V) & 0x1u);
     uint8_t turnback_sample_updated = 0u;
     uint8_t ui_refresh_pressed = (uint8_t)((key_bits >> Key_G) & 0x1u);
-    uint8_t super_cap_toggle_pressed = (uint8_t)((key_bits >> Key_C) & 0x1u);
     uint8_t spin_toggle_pressed = (uint8_t)((key_bits >> Key_X) & 0x1u);
     int8_t keyboard_vx = (int8_t)((key_bits >> Key_W) & 0x1u) - (int8_t)((key_bits >> Key_S) & 0x1u);
     int8_t keyboard_vy = (int8_t)((key_bits >> Key_D) & 0x1u) - (int8_t)((key_bits >> Key_A) & 0x1u);
@@ -115,7 +114,7 @@ void MouseKeySet(void)
     float mouse_pitch_delta_deg;
 
     // 图传从在线掉到离线的这一拍立即清空键鼠锁存和斜坡尾巴，目的是恢复旧逻辑，防止旧链路的模式和速度残留到回退后的控制源里。
-    // 这样做会让 X 小陀螺在图传断链边沿直接退出，但符合之前“图传一掉就完全丢弃键鼠态”的处理方式。
+    // 超电不再由 C 键锁存控制，因此图传断链只影响驾驶和发射类键鼠状态，不改变有力模式默认开启超电的历史语义。
     if (last_video_link_online && !video_link_online) {
         ResetMouseControlLatchState();
         ResetKeyboardMotionState();
@@ -130,8 +129,8 @@ void MouseKeySet(void)
     }
     keyboard_ramp_last_ms = now_ms;
 
-    // 遇到急停或零力模式时直接清空键鼠锁存，作用是确保任何鼠标残留命令都不会越过急停；
-    // 原因是键鼠现在和遥控器并行输入，停机优先级必须最高。
+    // 遇到急停或零力模式时直接清空运动、发射和模式类键鼠锁存，作用是确保任何鼠标残留命令都不会越过急停；
+    // 超电策略现在由最终底盘模式统一决定，键鼠急停清理不再需要保留任何 C 键功率状态。
     if (robot_state == ROBOT_STOP ||
         gimbal_cmd_send.gimbal_mode == GIMBAL_ZERO_FORCE ||
         chassis_cmd_send.chassis_mode == CHASSIS_ZERO_FORCE) {
@@ -215,17 +214,6 @@ void MouseKeySet(void)
         chassis_cmd_send.ui_refresh_request = 1u;
     }
     keyboard_ui_refresh_last = ui_refresh_pressed;
-
-    if (super_cap_toggle_pressed && !keyboard_super_cap_toggle_last) {
-        // C 键只负责翻转超电显式许可，目的是把超电从“有力模式自动开启”改成用户主动开关，避免平时默认带起 DCDC。
-        keyboard_super_cap_latched = (uint8_t)!keyboard_super_cap_latched;
-    }
-    keyboard_super_cap_toggle_last = super_cap_toggle_pressed;
-
-    if (keyboard_super_cap_latched != 0u) {
-        // `PrepareControlCommandBase` 每拍都会把 cap_mode 复位为 OFF；只有 C 键锁存仍为开启时才重新拉高，确保默认关闭语义不会被旧帧残留破坏。
-        chassis_cmd_send.cap_mode = SUPER_CAP_ON;
-    }
 
     if (spin_toggle_pressed && !keyboard_spin_toggle_last) {
         // X 键显式切模式前先取消一键掉头状态；用户已经要求转入小陀螺，旧掉头任务和强制跟随锁存必须立刻失效，避免两个模式同时抢控制权。

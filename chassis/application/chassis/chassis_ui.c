@@ -8,6 +8,9 @@ void RefereeUIUpdateData(void)
 {
     uint8_t chassis_output_allowed = 1u;
     uint8_t chassis_rotate_active = 0u;
+#ifdef USE_SUPER_CAP
+    uint8_t super_cap_requested = 0u;
+#endif
 
     // 先取一份当前裁判系统对底盘输出的许可状态，目的是小陀螺和 cap 的显示都应该反映“这拍是否真的允许输出”，不能继续只看抽象模式或慢一拍的回包位。
     if (referee_data != NULL) {
@@ -58,14 +61,22 @@ void RefereeUIUpdateData(void)
         // 超电在线时优先显示其回传的真实底盘功率，目的是功率值本身就该尽量贴近真实电源链路表现，而不是退回到底盘侧估算。
         ui_data.chassis_power_w = SuperCapGetChassisPower(cap);
 
-        // 先处理最宽泛的 OFF 场景，目的是离线之外，裁判切掉底盘输出和零力模式同样都属于“本拍不该让超电参与”的关闭态。
-        if (chassis_output_allowed == 0u || chassis_cmd_recv.chassis_mode == CHASSIS_ZERO_FORCE) {
+        // 超电显示恢复为真实可用状态语义，键盘 C 不再参与功率策略；这里只把裁判禁输出和零力收敛成 OFF，避免人为锁存遮住超电实际工作状态。
+        super_cap_requested = (uint8_t)(chassis_output_allowed != 0u &&
+                                        chassis_cmd_recv.chassis_mode != CHASSIS_ZERO_FORCE);
+
+        // 裁判不允许底盘输出或底盘处于零力时直接显示 OFF，目的是 UI 只在本拍确实可能使用超电时才继续细分健康、待命和输出状态。
+        if (super_cap_requested == 0u) {
             ui_data.cap_state = UI_CAP_STATE_OFF;
         } else if (SuperCapHasHardFault(cap) != 0u) {
             // 真实硬错误优先显示为 FAULT，目的是把故障与普通关闭态彻底区分开，方便场上直接判断是板子异常还是策略没开。
             ui_data.cap_state = UI_CAP_STATE_FAULT;
+        } else if (super_cap_policy_state.dcdc_state == SUPER_CAP_DCDC_OFF ||
+                   super_cap_policy_state.dcdc_requested_enable == 0u) {
+            // 正常开启路径里若 DCDC 请求还没真正拉高则仍显示 OFF，目的是让绿灯只对应真实可输出链路，避免最小开关保持时间内提前亮灯。
+            ui_data.cap_state = UI_CAP_STATE_OFF;
         } else if (SuperCapIsOutputDisabled(cap) != 0u) {
-            // 只有超电板明确回报 bit7 输出禁用时才显示 DISABLED，目的是把“板子在线但当前不给输出”单独做成一类可见语义。
+            // 只有在已经请求 DCDC 且超电板仍明确回报 bit7 输出禁用时才显示 DISABLED，目的是把“开启请求有效但板子不给输出”与普通关闭区分开。
             ui_data.cap_state = UI_CAP_STATE_DISABLED;
         } else if (super_cap_policy_state.dcdc_state == SUPER_CAP_DCDC_ASSIST &&
                    super_cap_policy_state.assist_applied_w > 0.5f) {

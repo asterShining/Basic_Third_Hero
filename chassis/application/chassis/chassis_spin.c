@@ -67,7 +67,8 @@ float GetAggressiveSuperCapBonus(float referee_power_limit, float buffer_energy_
     float available_bonus = 0.0f;
 
     // 超电离线、裁判切掉底盘输出或底盘进入零力时，辅助预算必须立刻清零，目的是这些场景都属于安全优先的硬退出条件，不应保留任何残余加成。
-    if (cap == NULL || SuperCapIsOnline(cap) == 0u || chassis_output_allowed == 0u ||
+    if (cap == NULL || SuperCapIsOnline(cap) == 0u ||
+        chassis_output_allowed == 0u ||
         chassis_cmd_recv.chassis_mode == CHASSIS_ZERO_FORCE) {
         super_cap_policy_state.assist_enabled = 0u;
         super_cap_policy_state.assist_target_w = 0.0f;
@@ -83,7 +84,7 @@ float GetAggressiveSuperCapBonus(float referee_power_limit, float buffer_energy_
         return 0.0f;
     }
 
-    // 先根据电容百分比和裁判缓冲做进入/退出滞回判断，目的是把原来只看单个临界值的硬切换改成“进入”和“退出”两套门槛，减少边界抖动。
+    // 先根据电容百分比和裁判缓冲做进入/退出滞回判断，目的是把默认开启语义落到“有余量才辅助”的稳妥策略上，而不是上电后无条件吃满回传上限。
     cap_percent = SuperCapGetEnergyPercent(cap);
     if (super_cap_policy_state.assist_enabled == 0u) {
         if (cap_percent >= CHASSIS_SUPER_CAP_ENTER_PERCENT &&
@@ -95,25 +96,21 @@ float GetAggressiveSuperCapBonus(float referee_power_limit, float buffer_energy_
         super_cap_policy_state.assist_enabled = 0u;
     }
 
-    // 进入辅助后不再对超电板回传上限额外乘电量或 buffer 系数，目的是用户明确希望主上限直接跟 `chassisPowerLimit` 走，而不是再做一层保守缩放。
+    // 进入辅助后按超电板回传上限扣掉保护余量计算目标 bonus，目的是保留历史 `af1d0c66` 的稳定边界，同时默认开启仍能在条件满足时自动用上超电。
     if (super_cap_policy_state.assist_enabled != 0u) {
-        // 先取超电板当前回传的真实可给功率上限，目的是一旦过了最低门槛，就让底盘主功率直接贴着电源链真实能力跑。
         reported_power_limit = (float)SuperCapGetReportedPowerLimit(cap);
         if (reported_power_limit >= CHASSIS_SUPER_CAP_REPORTED_LIMIT_MIN_W) {
-            // 这里直接把“超电板当前可给上限减去安全余量”与“裁判基础功率”做差，得到本拍还允许额外加上的功率，目的是最终总功率尽量直接贴着 `chassisPowerLimit - 5W` 运行。
             available_bonus = (reported_power_limit - CHASSIS_SUPER_CAP_REPORTED_LIMIT_MARGIN_W) - referee_power_limit;
             if (available_bonus < 0.0f) {
                 available_bonus = 0.0f;
             }
-
-            // 目标额外功率不再继续乘系数，目的是让过门槛后的响应尽可能直接，真正体现“按 chassisPowerLimit 动态设置功率”的策略。
             super_cap_policy_state.assist_target_w = available_bonus;
         } else {
-            // 若这一拍还没有拿到可信的超电板能力回报，就先不要虚构 bonus，目的是避免底盘在电源链信息缺失时盲目冲高总功率预算。
+            // 回传值无效时只撤掉目标 bonus，不直接清掉锁存态，目的是下一拍回传恢复后仍由电量和 buffer 滞回决定是否继续辅助。
             super_cap_policy_state.assist_target_w = 0.0f;
         }
     } else {
-        // 退出辅助后目标功率先回到 0，再交给斜率限制慢慢收掉，目的是保持体感平顺而不是瞬间断崖。
+        // 退出辅助后目标功率先回到 0，再交给斜率限制逐步收掉，目的是保持体感平顺而不是瞬间断崖。
         super_cap_policy_state.assist_target_w = 0.0f;
     }
 
