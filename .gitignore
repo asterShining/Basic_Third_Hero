@@ -40,7 +40,52 @@ Makefile
 # --- 操作系统/IDE 相关 ---
 .DS_Store
 .vscode/
+
+# --- AI / Agent 工具上下文与生成产物 ---
+AGENTS.md
+CLAUDE.md
+GEMINI.md
+.codex
+.codex/
+.claude
+.claude/
+.cursor
+.cursor/
+.windsurf
+.windsurf/
+.aider*
+.agents
+.agents/
+.continue
+.continue/
+.omx
 .omx/
+.omc
+.omc/
+.omg
+.omg/
+.repomixignore
+repomix-output.xml
+**/.codex
+**/.codex/
+**/.claude
+**/.claude/
+**/.cursor
+**/.cursor/
+**/.windsurf
+**/.windsurf/
+**/.agents
+**/.agents/
+**/.continue
+**/.continue/
+**/.omx
+**/.omx/
+**/.omc
+**/.omc/
+**/.omg
+**/.omg/
+**/.repomixignore
+**/repomix-output.xml
 
 # --- Python 工具缓存 ---
 __pycache__/
