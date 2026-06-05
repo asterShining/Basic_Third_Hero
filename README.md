@@ -1,166 +1,117 @@
-# Basic Third Hero
+# RoboMaster 英雄机器人双板控制系统
 
-## 项目定位
+本项目是面向 RoboMaster 英雄机器人的嵌入式控制工程，基于 `STM32F407`、`FreeRTOS`、`CMake` 和 `arm-none-eabi-gcc` 构建。系统采用云台板与底盘板分布式架构，将输入仲裁、云台控制、发射机构、底盘运动、功率管理、裁判系统交互和图传链路拆分为相对独立的模块，并配套跨平台编译、J-Link 烧录和 Ozone 调试流程，适合实车调试、快速迭代和比赛场景下的功能扩展。
 
-本仓库是第三代英雄机器人双板控制工程，当前主分支已经合并 `5m_v2` 分支内容。工程以 `STM32F407 + FreeRTOS + CMake + arm-none-eabi-gcc` 为主要工具链，按 `chassis` 底盘板和 `gimbal` 云台板拆成两套可独立编译、独立烧录的固件。
+## 系统架构
 
-当前版本的核心目标是把英雄机器人场上实战链路收口到稳定的双板架构：云台板负责遥控器、VT03 图传键鼠、云台和发射机构；底盘板负责麦轮底盘、功率控制、超电、裁判系统 UI 和双板反馈。两块板之间通过 `CANComm` 交换 `Chassis_Ctrl_Cmd_s` 与 `Chassis_Upload_Data_s`，避免输入源、执行模块和 UI 状态互相散落。
+工程分为 `gimbal` 和 `chassis` 两个子工程，分别对应云台板和底盘板。两块控制板通过 CAN 总线进行双板通信：云台板统一接收操作输入并下发底盘控制命令，底盘板回传运动状态、功率状态和裁判系统数据，形成完整的闭环控制链路。
 
-## 分支合并总结
+```text
+        DT7 / VT03 / 键鼠 / 上位机
+                    |
+                    v
+              gimbal 云台板
+   输入仲裁 -> 云台控制 -> 发射机构 -> 图像桥接
+                    |
+                 CANComm
+                    |
+                    v
+              chassis 底盘板
+   麦轮运动 -> 功率控制 -> 超级电容 -> 裁判系统 UI
+```
 
-本次将 `5m_v2` 合入 `main` 后，主分支获得了从早期发射机构、视觉通信、5m 场地逻辑、VT03 接入，到后期力控、图传电机、自定义图像桥接和实战 UI 的完整演进。
+整体设计遵循“输入集中仲裁、执行模块只消费命令、反馈统一回传”的原则。`robot_cmd` 负责整车控制意图的生成，云台、发射和底盘模块只处理各自执行层逻辑，避免遥控器、键鼠、视觉和调试链路直接侵入底层控制代码。
 
-主要变化包括：
+## 主要模块
 
-- 云台控制拆分为输入仲裁、运行态、前馈力控和 pitch 标定等模块，降低 `gimbal.c` 单文件负担。
-- 发射机构拆分为摩擦轮控制、单发状态机、堵转处理和调试输出，支持内外圈六摩擦轮和固定角度单发。
-- 底盘控制拆分为跟随、小陀螺、运动学、UI 数据聚合和上岛辅助机构，保留功率控制与坡道补偿链路。
-- 双板协议删除旧 `master_machine` 目录，改为由 `robot_def.h` 中的公共控制/反馈结构体表达实际需要的数据。
-- 新增 VT03 图传键鼠解析、自定义图像桥接、VOFA 调试、pitch 标定导出工具和多份联调说明文档。
+### 云台板 `gimbal`
 
-## 目录结构
+云台板负责整车上层控制入口和英雄机器人核心上装执行机构。
+
+- `application/cmd`：统一处理 DT7、VT03 图传键鼠和离线保护逻辑，完成控制源切换、零力保护、校零、小陀螺、一键掉头、摩擦轮锁存和弹速档位选择。
+- `application/gimbal`：实现 yaw / pitch 控制，包含串级 PID、姿态反馈、软件限位、pitch 标定和基于模型的前馈补偿。
+- `application/shoot`：实现英雄发射机构控制，包含六摩擦轮调速、拨盘位置环、单发状态机、掉速检测、堵转恢复和调试数据输出。
+- `modules/video_link`：接入 VT03 图传链路，解析键鼠与自定义控制数据。
+- `modules/custom_image_bridge`：将上位机 raw H.264 数据通过 USB CDC 接入，并按裁判系统 `0x0310` 自定义数据链路转发。
+
+### 底盘板 `chassis`
+
+底盘板负责移动底盘、功率约束和裁判系统显示链路。
+
+- `application/chassis`：实现麦克纳姆轮运动学、底盘跟随、小陀螺、跟随接管、坡道补偿和底盘状态聚合。
+- `modules/motor`：封装 DJI、DM、HT、舵机等电机驱动，并提供底盘功率控制入口。
+- `modules/super_cap`：接入超级电容模块，根据裁判功率限制、缓冲能量和电容状态动态调整底盘输出预算。
+- `modules/referee`：解析裁判系统数据并绘制客户端 UI，显示云台 pitch、摩擦轮状态、弹速档位、功率和超电状态。
+- `application/chassis/island_action`：预留上岛辅助机构控制逻辑，支持前履带和后抬升机构的条件编译接入。
+
+## 技术特点
+
+- **双板分布式控制**：云台板和底盘板职责清晰，通过 `CANComm` 传输结构化命令与反馈，降低模块耦合。
+- **多输入源统一仲裁**：DT7、VT03、键鼠和离线状态统一进入 `robot_cmd`，执行层不直接读取输入设备。
+- **云台模型前馈控制**：在 PID 闭环外叠加重力、惯量、摩擦、离心和耦合项补偿，提高云台大角度和动态动作下的响应一致性。
+- **英雄发射机构状态机**：发射模块将摩擦轮稳速、拨盘送弹、单发计数、掉速判断和堵转恢复拆分处理，提升调试可观测性。
+- **底盘功率闭环约束**：结合裁判系统、超级电容和底盘运动状态进行功率预算分配，兼顾小陀螺、平移手感和功率安全。
+- **裁判系统与图传扩展**：支持客户端 UI 绘制和 `0x0310` 自定义图像数据桥接，为操作手提供更完整的场上信息。
+- **跨平台开发调试链**：基于 CMake 和 Arm GNU Toolchain 在 Windows / Linux 环境下统一构建，通过 J-Link 脚本烧录固件，并配合 Ozone 进行断点调试、变量观察、曲线分析和 RTT 日志查看。
+
+## 工程结构
 
 ```text
 .
-├── chassis/                         # 底盘板固件工程
-│   ├── application/chassis/          # 底盘应用层：跟随、小陀螺、运动学、UI 聚合、上岛辅助
-│   ├── modules/referee/              # 裁判系统解析与 UI 绘制
-│   ├── modules/motor/                # DJI / DM / HT / 舵机 / 步进电机与功率控制
-│   ├── modules/super_cap/            # 超级电容 CAN 协议与输出状态
-│   └── CMakeLists.txt                # 底盘板 CMake 入口
-├── gimbal/                           # 云台板固件工程
-│   ├── application/cmd/              # 遥控器、VT03、键鼠、云台、底盘和发射命令仲裁
-│   ├── application/gimbal/           # 云台 PID、力控前馈、运行态和 pitch 标定
-│   ├── application/shoot/            # 发射机构、摩擦轮、拨盘、单发和堵转处理
-│   ├── modules/custom_image_bridge/  # USB CDC 到裁判 0x0310 的 H.264 透传桥
-│   ├── modules/video_link/           # VT03 键鼠与图传电机链路
-│   ├── modules/vofa_debug/           # VOFA+ 调试数据输出
-│   └── CMakeLists.txt                # 云台板 CMake 入口
-└── tools/
-    └── export_pitch_cali_from_rtt.py # 从 RTT 日志导出 pitch 标定数据
+├── chassis/                         # 底盘板工程
+│   ├── application/chassis/          # 底盘应用层
+│   ├── modules/motor/                # 电机与功率控制
+│   ├── modules/referee/              # 裁判系统与 UI
+│   ├── modules/super_cap/            # 超级电容模块
+│   └── CMakeLists.txt
+├── gimbal/                           # 云台板工程
+│   ├── application/cmd/              # 输入仲裁与整车命令生成
+│   ├── application/gimbal/           # 云台控制
+│   ├── application/shoot/            # 发射机构
+│   ├── modules/custom_image_bridge/  # 自定义图像桥接
+│   ├── modules/video_link/           # VT03 图传链路
+│   └── CMakeLists.txt
+└── tools/                            # 调试和数据处理脚本
 ```
-
-## 双板职责
-
-### gimbal 云台板
-
-云台板当前定义为 `GIMBAL_BOARD`，入口在 `gimbal/application/robot.c`。初始化顺序为 `BSPInit()`、`RobotCMDInit()`、`CustomImageBridgeInit()`、`GimbalInit()`、`ShootInit()`，随后由 FreeRTOS 拉起 INS、电机、daemon、自定义图像桥接和机器人核心任务。
-
-云台板主要负责：
-
-- 解析 DT7 遥控器和 VT03 图传键鼠输入。
-- 在 `robot_cmd` 中统一处理控制源切换、零力、校零、摩擦轮锁存、弹速切换、小陀螺、一键掉头和 UI 刷新请求。
-- 通过消息中心向 `gimbal`、`shoot` 发布控制命令，并通过 `CANComm` 向底盘板发送底盘命令。
-- 执行云台 yaw / pitch 控制，包含重力、惯量、摩擦、离心和科氏耦合等前馈项。
-- 执行发射机构控制，包含六摩擦轮、拨盘位置环单发、掉速检测、堵转恢复和 VOFA 调试。
-- 将 USB CDC 输入的 raw H.264 Annex-B 字节流切成裁判系统 `0x0310` 的 300B payload，经 USART6 转发给 VT03 / 裁判链路。
-
-### chassis 底盘板
-
-底盘板当前定义为 `CHASSIS_BOARD`，入口在 `chassis/application/robot.c`。初始化顺序为 `BSPInit()`、`ChassisInit()`，随后创建 INS、电机、daemon、机器人核心和裁判 UI 任务。
-
-底盘板主要负责：
-
-- 通过 `CANComm` 接收云台板下发的底盘控制命令，并上传底盘状态、功率和 UI 所需数据。
-- 执行麦克纳姆轮运动学、底盘跟随、小陀螺、跟随接管刹停和输出限斜率。
-- 结合裁判系统功率限制、缓冲能量和超电回传，执行底盘功率预算与输出裁剪。
-- 根据底盘 pitch 姿态执行坡道前馈，并在启停、急停和换向时提供速度 PID 力控前馈。
-- 维护裁判系统 UI，包括 pitch 滑块、摩擦轮状态、弹速档位、功率/超电状态和手动刷新。
-- 在启用 `USE_ISLAND_ACTION` 后挂载前履带和后抬升辅助机构。
-
-## 关键功能
-
-### 输入与模式仲裁
-
-`gimbal/application/cmd` 是整车控制源的唯一收口点。当前输入源按 VT03、DT7 和离线零力进行仲裁，避免云台、底盘和发射机构各自直接读取遥控器或键鼠。
-
-常用操作语义：
-
-- VT03 首次接管默认保持零力，需要用户显式解除。
-- VT03 `Pause` 短按用于零力锁存，零力态长按用于 yaw 校零。
-- 键鼠 `F` 切换摩擦轮，`R` 切换 12 / 16m/s 弹速预选，鼠标左键按上升沿触发单发。
-- 键鼠 `X` 切换小陀螺，`B` 切换云台自由模式，`V` 执行一键掉头，`G` 请求底盘 UI 整页刷新。
-
-### 云台力控与 pitch 标定
-
-云台执行层继续只消费 `Gimbal_Ctrl_Cmd_s`，不直接读取输入源。`gimbal_force_control_tuning.md` 记录了 pitch / yaw 前馈参数、PID 参数和推荐调参顺序；`tools/export_pitch_cali_from_rtt.py` 用于从 RTT 日志导出 pitch 标定数据。
-
-当前 pitch 控制特别注意软件限位和速度目标限幅。输入层会在 `PITCH_MIN_ANGLE`、`PITCH_MAX_ANGLE`、`PITCH_SPEED_REF_MAX_DPS` 内统一裁剪，避免不同输入源绕过机构安全边界。
-
-### 发射机构
-
-发射模块位于 `gimbal/application/shoot`，当前以六摩擦轮和拨盘位置环为核心。摩擦轮支持内外圈目标速度、软启动 ramp、前馈和掉速调试；拨盘使用输出端固定角度推进，单发逻辑通过掉速计数与锁角保持解耦，减少持续掉速导致重复计数的问题。
-
-调试相关数据集中在 `shoot_debug` 与 `vofa_debug`，方便 Ozone 和 VOFA+ 同时观察摩擦轮速度、掉速基线、单发状态机和堵转状态。
-
-### 底盘功率、小陀螺与超电
-
-底盘模块位于 `chassis/application/chassis`，当前把跟随控制、小陀螺、运动学和 UI 数据更新拆成多个私有编译单元。小陀螺围绕裁判功率目标做自适应转速，并保留无节奏变速，平移优先级用于避免横移时整车被旋转功率拖死。
-
-超电链路位于 `chassis/modules/super_cap`，底盘策略会结合裁判功率、缓冲能量、超电电量和超电板回传功率上限计算额外预算。DCDC 请求带最小开关保持时间和故障方波重试逻辑，避免临界状态频繁开关。
-
-### 裁判系统与自定义图像
-
-底盘板维护裁判系统解析和 UI 绘制，云台板维护自定义图像桥接。图像桥接固定为：
-
-```text
-上位机 raw H.264
--> USB CDC
--> gimbal custom_image_bridge
--> USART6 / VT03
--> 裁判系统 0x0310
--> 客户端 CustomByteBlock
-```
-
-该链路不解析 JPEG，不参与键鼠/遥控仲裁，也不修改云台、发射和底盘控制频率。上位机必须输出 `serial.transport_mode=raw_h264`，默认建议 `921600 8N1`、`192x192`、`18fps`、`112kbps`。
 
 ## 构建方式
 
-环境要求：
+工程采用 CMake 管理底盘板和云台板两个固件子工程，配合 `arm-none-eabi-gcc` 完成交叉编译。烧录脚本会根据运行环境选择 `JLink.exe` 或 `JLinkExe`，便于在 Windows、Linux 或类 Unix 终端中复用同一套流程。
 
-- CMake 3.22 或更高版本
+需要安装：
+
+- `CMake >= 3.22`
 - `arm-none-eabi-gcc`
-- Ninja 或 Make
+- `Ninja` 或 `Make`
+- `SEGGER J-Link` 工具链
+- `SEGGER Ozone` 调试器
 
-底盘板：
+构建底盘板：
 
 ```bash
 cmake -S chassis -B build/chassis -G Ninja -DCMAKE_BUILD_TYPE=Debug
 cmake --build build/chassis
 ```
 
-云台板：
+构建云台板：
 
 ```bash
 cmake -S gimbal -B build/gimbal -G Ninja -DCMAKE_BUILD_TYPE=Debug
 cmake --build build/gimbal
 ```
 
-如果只需要生成 `compile_commands.json` 给 clangd 使用，也可以只执行 configure 阶段。当前两个子工程都已经在 `CMakeLists.txt` 中开启 `CMAKE_EXPORT_COMPILE_COMMANDS`。
+烧录时进入对应子工程目录，执行项目内置的 J-Link 脚本。脚本默认使用 `STM32F407IGHx`、`SWD` 和 `4000 kHz` 连接参数，并将 `build/basic_framework.elf` 写入目标板。
 
-## 联调检查点
+```bash
+cd chassis
+./jlink.sh
 
-1. 烧录前确认 `robot_def.h` 里只启用一个板级宏：底盘板启用 `CHASSIS_BOARD`，云台板启用 `GIMBAL_BOARD`。
-2. 检查双板 `CANComm` 的 `tx_id / rx_id` 是否互补，且 `Chassis_Ctrl_Cmd_s` 与 `Chassis_Upload_Data_s` 未超过 `CAN_COMM_MAX_BUFFSIZE`。
-3. 云台板先看 DT7 / VT03 是否在线，再看 `robot_cmd` 是否正确进入零力、陀螺仪、自由模式或小陀螺模式。
-4. 发射机构先空载验证摩擦轮目标速度、拨盘初始位锁存和单发状态机，再装弹验证掉速计数。
-5. 底盘板先断开超电按默认裁判功率验证麦轮方向，再接入裁判系统和超电验证功率预算。
-6. 裁判 UI 优先验证整页刷新、pitch 滑块、摩擦轮状态、弹速档位和超电状态是否随真实数据变化。
-7. 自定义图像桥接联调时观察 `[img_bridge]` 日志，重点看 `usb_pkt_total`、`tx0310_total`、`pending_drop` 和 `uart_tx_error_count`。
+cd ../gimbal
+./jlink.sh
+```
 
-## 重要文档
+调试时使用 Ozone 加载对应子工程生成的 `basic_framework.elf`，结合 J-Link / SWD 连接目标板，可直接观察任务运行状态、控制变量、摩擦轮调试结构体、云台姿态反馈和 RTT 日志。工程内保留了 `VSCode+Ozone使用方法.md`，用于说明完整的编辑、编译、烧录和可视化调试工作流。
 
-- [gimbal/遥控器与电脑操控接入迁移说明.md](gimbal/遥控器与电脑操控接入迁移说明.md)
-- [gimbal/自定义图像桥接接入说明.md](gimbal/自定义图像桥接接入说明.md)
-- [gimbal/application/gimbal/gimbal_force_control_tuning.md](gimbal/application/gimbal/gimbal_force_control_tuning.md)
-- [chassis/通信协议.md](chassis/通信协议.md)
-- [chassis/application/chassis/chassis.md](chassis/application/chassis/chassis.md)
-- [gimbal/application/shoot/shoot.md](gimbal/application/shoot/shoot.md)
+## 项目亮点
 
-## 已知风险与待验证项
-
-- 本次合并覆盖历史提交较多，虽然 Git 合并无冲突，但仍需要在真实双板硬件上验证 CANComm、裁判系统、超电和 VT03 链路。
-- `USE_ISLAND_ACTION` 当前默认未打开；启用后必须重新确认前履带、抬升电机 CAN ID、限位和机械行程。
-- 云台 pitch、yaw 的力控参数和软件限位与当前机械装配强相关，更换机构或重装 IMU 后必须重新标定。
-- 自定义图像链路依赖上位机 raw H.264 输出和客户端 H.264 重组逻辑，任一端切回旧 JPEG 或 inner packet 协议都会失效。
-- 仓库内包含 `repomix-output.xml`、`.omc`、`.omg` 等辅助生成文件，它们来自被合并分支；若后续要清理仓库体积，应单独开清理提交，避免和功能合并混在一起。
+该工程不是单一功能 demo，而是一套围绕真实英雄机器人实车调试形成的完整控制系统。项目覆盖遥控输入、云台姿态、发射机构、底盘运动、裁判系统、超级电容、图传扩展和调试工具链等多个 RoboMaster 关键子系统，重点解决多控制源协同、双板通信、执行层解耦、功率受限运动控制、跨平台构建烧录和比赛可视化信息反馈等实际工程问题。
