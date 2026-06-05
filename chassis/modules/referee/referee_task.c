@@ -171,38 +171,24 @@
 #define UI_LABEL_CAP_STATE_FONT UI_LABEL_FRIC_SPEED_FONT
 #define UI_LABEL_CAP_STATE_WIDTH UI_LABEL_FRIC_SPEED_WIDTH
 
-// What: 这组横线和竖线直接继承参考工程里的 `meter_5/meter_3/ChuiZhi`；Why: 用户这次明确要求把这 3 条静态标尺整合进当前 UI，并且不改原有通信方式。
-#define UI_METER_5_START_X 594u
-#define UI_METER_5_START_Y 401u
-#define UI_METER_5_END_X 1330u
-#define UI_METER_5_END_Y 400u
-#define UI_METER_5_WIDTH 2u
+// 这里只保留竖直基准线，目的是删掉旧 3m/5m 横向参考线后，仍给画面保留中心方向参照。
 #define UI_CHUI_ZHI_START_X 972u
 #define UI_CHUI_ZHI_START_Y 94u
 #define UI_CHUI_ZHI_END_X 967u
 #define UI_CHUI_ZHI_END_Y 813u
 #define UI_CHUI_ZHI_WIDTH 2u
-#define UI_METER_3_START_X 585u
-#define UI_METER_3_START_Y 422u
-#define UI_METER_3_END_X 1335u
-#define UI_METER_3_END_Y 422u
-#define UI_METER_3_WIDTH 3u
-// `line_8` 使用 5m 线作为垂直基准并整体下移 78 像素，目的是在上一版下移 83 像素的基础上按现场反馈相对上移 5 像素。
+// `line_8` 保留上一版已经验过的绝对位置，目的是删除 5m 基准线后不再依赖已移除的距离尺宏。
 #define UI_LINE_8_START_X 946u
-#define UI_LINE_8_START_Y (UI_METER_5_START_Y - 78u)
+#define UI_LINE_8_START_Y 323u
 #define UI_LINE_8_END_X 1289u
-#define UI_LINE_8_END_Y (UI_METER_5_END_Y - 78u)
+#define UI_LINE_8_END_Y 322u
 #define UI_LINE_8_WIDTH 5u
-
-// What: 这组文字坐标直接继承参考工程里的 `text_5/text_3`；Why: 两个距离标签必须和新增的标尺线严格配对，否则客户端上会只剩横线没有语义。
-#define UI_TEXT_5_X 535u
-#define UI_TEXT_5_Y 402u
-#define UI_TEXT_5_FONT 20u
-#define UI_TEXT_5_WIDTH 2u
-#define UI_TEXT_3_X 534u
-#define UI_TEXT_3_Y 440u
-#define UI_TEXT_3_FONT 20u
-#define UI_TEXT_3_WIDTH 2u
+// qianshao 线按参考生成器 `/home/aster/Downloads/codes (1)/ui_g.c` 的原始图元接入，目的是保留参考 UI 的前哨基准位置，不和已按现场反馈调过的 `line_8` 合并。
+#define UI_QIANSHAO_START_X 628u
+#define UI_QIANSHAO_START_Y 479u
+#define UI_QIANSHAO_END_X 1272u
+#define UI_QIANSHAO_END_Y 479u
+#define UI_QIANSHAO_WIDTH 1u
 
 // What: 亮灯时统一使用绿色；Why: 三个 `on_x` 都是“功能开启”语义，用统一正向颜色最直观。
 #define UI_STATE_ON_COLOR UI_Color_Green
@@ -217,10 +203,8 @@ typedef enum {
     UI_STATIC_FIGURE_SHOOTER = 0,
     UI_STATIC_FIGURE_BODY_LINE_LEFT,
     UI_STATIC_FIGURE_BODY_LINE_RIGHT,
-    // What: 这 3 个静态图元直接复用参考工程的距离尺与竖直基准线；Why: 用户当前只要求把这组静态视觉参考并入现有 UI，不引入新的动态数据逻辑。
-    UI_STATIC_FIGURE_METER_5,
+    // 旧 3m/5m 横线已经按需求移除，竖直基准线单独保留，避免后续维护时误把它和被删的距离尺绑定在一起。
     UI_STATIC_FIGURE_CHUI_ZHI,
-    UI_STATIC_FIGURE_METER_3,
     UI_STATIC_FIGURE_PITCH_SCALE_ZERO_LINE,
     UI_STATIC_FIGURE_PITCH_SCALE_TOP_LINE,
     UI_STATIC_FIGURE_PITCH_SCALE_BOTTOM_LINE,
@@ -231,6 +215,7 @@ typedef enum {
     UI_STATIC_FIGURE_PITCH_SCALE_VALUE_20,
     UI_STATIC_FIGURE_PITCH_SCALE_VALUE_10,
     UI_STATIC_FIGURE_LINE_8,
+    UI_STATIC_FIGURE_QIANSHAO,
     UI_STATIC_FIGURE_COUNT,
 } UIStaticFigureIndex_e;
 
@@ -269,9 +254,6 @@ typedef enum {
     UI_STRING_CAP,
     // 这个字符串单独承载超电状态字，目的是把 CAP 这一列压缩成单行语义，减少百分比频繁跳动带来的突兀感。
     UI_STRING_CAP_STATE,
-    // What: 这 2 个字符串直接对应参考工程里的 `3m/5m`；Why: 新增标尺如果没有文字刻度，操作者很难把横线快速理解成距离参考。
-    UI_STRING_TEXT_3,
-    UI_STRING_TEXT_5,
     UI_STRING_COUNT,
 } UIStringIndex_e;
 
@@ -280,8 +262,9 @@ typedef enum {
     UI_INIT_STAGE_DELETE_ALL,
     UI_INIT_STAGE_DRAW_STATIC_FIGURES_0,
     UI_INIT_STAGE_DRAW_STATIC_FIGURES_1,
-    // 静态图元总数增加后继续拆成 7 + 7 + 2，目的是遵守 `UIGraphRefresh` 只支持 1/2/5/7 的协议封装限制。
+    // 静态图元删除旧横线后拆成 5 + 7 + 2 + 1，目的是遵守 `UIGraphRefresh` 只支持 1/2/5/7 的协议封装限制。
     UI_INIT_STAGE_DRAW_STATIC_FIGURES_2,
+    UI_INIT_STAGE_DRAW_STATIC_FIGURES_3,
     UI_INIT_STAGE_DRAW_STATE_FIGURES_0,
     UI_INIT_STAGE_DRAW_STATE_FIGURES_1,
     UI_INIT_STAGE_DRAW_MOVE_FIGURES,
@@ -552,15 +535,13 @@ static void UIAdvanceInitStage(uint32_t now_tick_ms)
         break;
 
     case UI_INIT_STAGE_DRAW_STATIC_FIGURES_0:
-        // What: 第一拍先补车体静态骨架、两条距离横线、竖直基准线和 pitch 零位；Why: 这些都是整页最核心的背景框架，先落图能让页面主体最快成形。
+        // 第一拍先补车体静态骨架、竖直基准线和 pitch 零位，目的是删掉 3m/5m 横线后仍保持第一包为合法 Draw5。
         UIBuildStaticFigures(UI_Graph_ADD);
-        UIGraphRefresh(&referee_recv_info->referee_id, 7,
+        UIGraphRefresh(&referee_recv_info->referee_id, 5,
                        ui_static_figures[UI_STATIC_FIGURE_SHOOTER],
                        ui_static_figures[UI_STATIC_FIGURE_BODY_LINE_LEFT],
                        ui_static_figures[UI_STATIC_FIGURE_BODY_LINE_RIGHT],
-                       ui_static_figures[UI_STATIC_FIGURE_METER_5],
                        ui_static_figures[UI_STATIC_FIGURE_CHUI_ZHI],
-                       ui_static_figures[UI_STATIC_FIGURE_METER_3],
                        ui_static_figures[UI_STATIC_FIGURE_PITCH_SCALE_ZERO_LINE]);
         ui_runtime.init_stage = UI_INIT_STAGE_DRAW_STATIC_FIGURES_1;
         break;
@@ -585,6 +566,14 @@ static void UIAdvanceInitStage(uint32_t now_tick_ms)
         UIGraphRefresh(&referee_recv_info->referee_id, 2,
                        ui_static_figures[UI_STATIC_FIGURE_PITCH_SCALE_VALUE_10],
                        ui_static_figures[UI_STATIC_FIGURE_LINE_8]);
+        ui_runtime.init_stage = UI_INIT_STAGE_DRAW_STATIC_FIGURES_3;
+        break;
+
+    case UI_INIT_STAGE_DRAW_STATIC_FIGURES_3:
+        // qianshao 参考线单独放在最后一个 Draw1 静态包里发送，目的是在新增图元后仍保持所有初始化包数量合法，避免底层封装走到不支持的 Draw3。
+        UIBuildStaticFigures(UI_Graph_ADD);
+        UIGraphRefresh(&referee_recv_info->referee_id, 1,
+                       ui_static_figures[UI_STATIC_FIGURE_QIANSHAO]);
         ui_runtime.init_stage = UI_INIT_STAGE_DRAW_STATE_FIGURES_0;
         break;
 
@@ -744,13 +733,9 @@ static void UIBuildStaticFigures(uint32_t operate_type)
     UILineDraw(&ui_static_figures[UI_STATIC_FIGURE_BODY_LINE_RIGHT], "blr", operate_type, UI_LAYER_MAIN, UI_Color_Orange, UI_BODY_LINE_RIGHT_WIDTH,
                UI_BODY_LINE_RIGHT_START_X, UI_BODY_LINE_RIGHT_START_Y, UI_BODY_LINE_RIGHT_END_X, UI_BODY_LINE_RIGHT_END_Y);
 
-    // What: 这 3 条线直接复用参考工程的距离尺和中心竖直基准；Why: 用户这次只要求把它们并入当前静态层，不能额外改变现有动态 UI 的数据来源。
-    UILineDraw(&ui_static_figures[UI_STATIC_FIGURE_METER_5], "m05", operate_type, UI_LAYER_MAIN, UI_Color_Green, UI_METER_5_WIDTH,
-               UI_METER_5_START_X, UI_METER_5_START_Y, UI_METER_5_END_X, UI_METER_5_END_Y);
+    // 竖直基准线保留在静态层，目的是在去掉 3m/5m 横线后仍提供中心方向参考。
     UILineDraw(&ui_static_figures[UI_STATIC_FIGURE_CHUI_ZHI], "cvt", operate_type, UI_LAYER_MAIN, UI_Color_Cyan, UI_CHUI_ZHI_WIDTH,
                UI_CHUI_ZHI_START_X, UI_CHUI_ZHI_START_Y, UI_CHUI_ZHI_END_X, UI_CHUI_ZHI_END_Y);
-    UILineDraw(&ui_static_figures[UI_STATIC_FIGURE_METER_3], "m03", operate_type, UI_LAYER_MAIN, UI_Color_Orange, UI_METER_3_WIDTH,
-               UI_METER_3_START_X, UI_METER_3_START_Y, UI_METER_3_END_X, UI_METER_3_END_Y);
 
     // What: 这几条线和数字共同构成 RMUC pitch 圆盘刻度；Why: 旧的 `pitch_outer` 已经被取消，必须补上新的静态刻度骨架才能让红色指针有明确参照。
     UILineDraw(&ui_static_figures[UI_STATIC_FIGURE_PITCH_SCALE_ZERO_LINE], "pz0", operate_type, UI_LAYER_MAIN, UI_Color_White, UI_PITCH_SCALE_WIDTH,
@@ -774,6 +759,9 @@ static void UIBuildStaticFigures(uint32_t operate_type)
     // `l08` 对应参考目录生成器里的 `line_8`，但颜色按现场语义改为黄色，避免被误认为普通白色结构线。
     UILineDraw(&ui_static_figures[UI_STATIC_FIGURE_LINE_8], "l08", operate_type, UI_LAYER_MAIN, UI_Color_Yellow, UI_LINE_8_WIDTH,
                UI_LINE_8_START_X, UI_LINE_8_START_Y, UI_LINE_8_END_X, UI_LINE_8_END_Y);
+    // `qsh` 对应参考生成器里的 `ui_g_Ungroup_qianshao`，坐标和颜色保持原始设计值，避免把前哨参考线误调成已有距离尺或 pitch 刻度的一部分。
+    UILineDraw(&ui_static_figures[UI_STATIC_FIGURE_QIANSHAO], "qsh", operate_type, UI_LAYER_MAIN, UI_Color_Orange, UI_QIANSHAO_WIDTH,
+               UI_QIANSHAO_START_X, UI_QIANSHAO_START_Y, UI_QIANSHAO_END_X, UI_QIANSHAO_END_Y);
 }
 
 static void UIBuildStateFigures(uint32_t operate_type, const UIIndicatorState_t *indicator_state)
@@ -886,7 +874,7 @@ static void UIBuildStrings(uint32_t operate_type, const UIDisplaySnapshot_t *sna
         }
     }
 
-    // What: 原有文本标签继续保留当前布局；Why: 这次只是在现有 UI 上补参考工程的距离刻度文字，其他语义标签不应该被连带改动。
+    // 原有文本标签继续保留当前布局，删掉 3m/5m 字段后这里只维护功能状态和数值标签。
     UICharDraw(&ui_strings[UI_STRING_FRIC], "frc", operate_type, UI_LAYER_MAIN, UI_Color_Yellow,
                UI_LABEL_FRIC_FONT, UI_LABEL_FRIC_WIDTH, UI_LABEL_FRIC_X, UI_LABEL_FRIC_Y, "F");
     // F 旁的数值单独用字符对象发送，目的是现有 Draw5 数据包已经装满，新增档位显示只能走独立的字符串刷新链。
@@ -904,12 +892,6 @@ static void UIBuildStrings(uint32_t operate_type, const UIDisplaySnapshot_t *sna
     // 这条状态字固定放在大号 `c` 右侧，只显示当前单一状态，目的是把 CAP 这一列收敛成单行信息，不再让第二行百分比持续打断视线。
     UICharDraw(&ui_strings[UI_STRING_CAP_STATE], "cst", operate_type, UI_LAYER_MAIN, UI_Color_Yellow,
                UI_LABEL_CAP_STATE_FONT, UI_LABEL_CAP_STATE_WIDTH, UI_LABEL_CAP_STATE_X, UI_LABEL_CAP_STATE_Y, (char *)cap_state_text);
-
-    // What: 这里新增参考工程里的 `3m/5m` 标尺文字；Why: 它们必须和新增的 `meter_3/meter_5` 一起出现，操作者才能直接读懂横线含义。
-    UICharDraw(&ui_strings[UI_STRING_TEXT_3], "t03", operate_type, UI_LAYER_MAIN, UI_Color_Orange,
-               UI_TEXT_3_FONT, UI_TEXT_3_WIDTH, UI_TEXT_3_X, UI_TEXT_3_Y, "3m");
-    UICharDraw(&ui_strings[UI_STRING_TEXT_5], "t05", operate_type, UI_LAYER_MAIN, UI_Color_Green,
-               UI_TEXT_5_FONT, UI_TEXT_5_WIDTH, UI_TEXT_5_X, UI_TEXT_5_Y, "5m");
 }
 
 static void UIRefreshFireSpeedString(const UIDisplaySnapshot_t *snapshot)
