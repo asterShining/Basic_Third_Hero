@@ -41,6 +41,16 @@ void DMMotorChangeFeed(DMMotorInstance *motor, Closeloop_Type_e loop, Feedback_S
     // DM电机通常不需要像DJI那样检查指针越界，因为结构体是一样的
 }
 
+uint8_t DMMotorIsOnline(DMMotorInstance *motor)
+{
+    // What: 对外暴露 DM 电机在线状态查询；Why: 上层需要在 yaw 电机掉线时冻结跟随参考，不能直接跨模块读取 daemon 内部字段。
+    if (motor == NULL || motor->motor_daemon == NULL) {
+        return 0u;
+    }
+
+    return DaemonIsOnline(motor->motor_daemon);
+}
+
 static void DMMotorDecode(CANInstance *motor_can)
 {
     uint16_t tmp;
@@ -128,6 +138,10 @@ DMMotorInstance *DMMotorInit(Motor_Init_Config_s *config)
     PIDInit(&motor->angle_PID, &config->controller_param_init_config.angle_PID);
     motor->other_angle_feedback_ptr = config->controller_param_init_config.other_angle_feedback_ptr;
     motor->other_speed_feedback_ptr = config->controller_param_init_config.other_speed_feedback_ptr;
+    // What: 初始化速度前馈指针；Why: DM 驱动任务会直接读取实例中的前馈地址，若初始化阶段漏拷贝就会让上层配置失效。
+    motor->speed_feedforward_ptr = config->controller_param_init_config.speed_feedforward_ptr;
+    // What: 初始化电流前馈指针；Why: 云台重力与动力学补偿都走电流前馈通道，必须在建实例时把入口完整接通。
+    motor->current_feedforward_ptr = config->controller_param_init_config.current_feedforward_ptr;
 
     config->can_init_config.can_module_callback = DMMotorDecode;
     config->can_init_config.id = motor;
@@ -143,6 +157,7 @@ DMMotorInstance *DMMotorInit(Motor_Init_Config_s *config)
     DMMotorEnable(motor);
     DMMotorSetMode(DM_CMD_MOTOR_MODE, motor);
     DWT_Delay(0.1);
+    // What: 保持开机不自动发送 DM 零点校准；Why: 当前分支依赖驱动内保存的硬件零点，重复校零会把 yaw 跟随基准再次打乱。
     // DMMotorCaliEncoder(motor);
     DWT_Delay(0.1);
     dm_motor_instance[idx++] = motor;
@@ -169,7 +184,7 @@ void DMMotorOuterLoop(DMMotorInstance *motor, Closeloop_Type_e type)
     motor->motor_settings.outer_loop_type = type;
 }
 
-//@Todo: 目前只实现了力控，更多位控PID等请自行添加
+
 void DMMotorTask(void const *argument)
 {
     float pid_ref;
@@ -184,6 +199,22 @@ void DMMotorTask(void const *argument)
     // uint16_t tmp;
     DMMotor_Send_s motor_send_mailbox;
     while (1) {
+        // ================= [新增] 自动监测与快速复位逻辑 =================
+        if (motor->stop_flag == MOTOR_ENALBED) {
+            // 2. 扭矩过低时的保活策略 (防止意外失能)
+            // 如果扭矩绝对值小于 1.0f，认为可能处于"软失能"或低负载状态
+            // 以 200Hz 频率 (每5ms一次) 发送使能指令，确保电机保持在线
+            if (fabs(motor->measure.torque) < 1.0f) {
+                motor->enable_cmd_cnt++;
+                if (motor->enable_cmd_cnt >= 5) { // 1000HzLoop / 5 = 200Hz
+                    DMMotorSetMode(DM_CMD_MOTOR_MODE, motor);
+                    motor->enable_cmd_cnt = 0;
+                }
+            } else {
+                motor->enable_cmd_cnt = 0;
+            }
+        }
+        // ===============================================================
         // ================= 1. 反馈源选择与处理 =================
         // 角度反馈
         if (setting->angle_feedback_source == OTHER_FEED && motor->other_angle_feedback_ptr)
@@ -250,31 +281,6 @@ void DMMotorTask(void const *argument)
 
         // ================= 3. 输出限幅与发送 =================
 
-        // 再次处理反转标志对最终输出的影响(如果上面在入口处处理了ref，这里就不需要了，
-        // 但为了保险起见，如果这是力矩模式直接设定，可能需要反转。
-        // *对比 DJI 代码*：DJI 在循环开始处 `if (reverse) pid_ref *= -1;`，之后全程传递。
-        // 所以这里不需要再次反转 set_torque，除非你想实现特殊的逻辑。
-        // 保持与 DJI 一致，上面入口处已处理。
-        // ================= [新增] 机械限位保护 (Hard Limit) =================
-        // 只有当限位值不为0时才启用保护 (防止影响其他没设置限位的电机)
-        if (motor->pos_limit_max != 0.0f || motor->pos_limit_min != 0.0f) {
-            float curr_pos = motor->measure.position;
-
-            // 情况1: 超过上极限，且力矩是向上的(正) -> 掐断力矩 (允许输出负力矩拉回来)
-            // 注意：这里假设 正力矩 = 向正位置运动。如果你的电机反了，这里逻辑要反。
-            // DM电机通常符合右手定则：Torque > 0 -> Position 增加
-            if (curr_pos > motor->pos_limit_max && set_torque > 0.0f) {
-                set_torque = 0.0f;
-                // 可选: 给一个微小的反向阻尼 let it dampen? 不，0最安全，让重力拉回来
-            }
-
-            // 情况2: 低于下极限，且力矩是向下的(负) -> 掐断力矩
-            if (curr_pos < motor->pos_limit_min && set_torque < 0.0f) {
-                set_torque = 0.0f;
-            }
-        }
-        // ====================================
-
         // 限制力矩范围 (安全保护)
         LIMIT_MIN_MAX(set_torque, DM_T_MIN, DM_T_MAX);
 
@@ -303,7 +309,7 @@ void DMMotorTask(void const *argument)
 
         CANTransmit(motor->motor_can_instace, 2);
 
-        osDelay(2); // 500Hz 控制频率
+        osDelay(1);
     }
 }
 void DMMotorControlInit()

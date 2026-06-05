@@ -21,7 +21,7 @@
 
 /* 功率和能量限制 */
 #define POWER_LIMIT_MIN 30 // 最小功率限制 (W)
-#define POWER_LIMIT_MAX 250 // 最大功率限制 (W)
+#define POWER_LIMIT_MAX 250 // 当前协议里这个字段表示真实裁判功率限制，目的是保持在超电板认可的 30~250W 范围内，避免因为把本地总预算塞进去而触发输出关断。
 #define ENERGY_BUFFER_MAX 300 // 最大能量缓冲 (J)
 
 #pragma pack(1)
@@ -115,11 +115,25 @@ float SuperCapGetChassisPower(SuperCapInstance *instance);
 float SuperCapGetEnergyPercent(SuperCapInstance *instance);
 
 /**
+ * @brief 获取超电板回传的底盘功率上限
+ * @param instance 超级电容实例
+ * @return uint16_t 超电板当前认为可提供的底盘功率上限
+ */
+uint16_t SuperCapGetReportedPowerLimit(SuperCapInstance *instance);
+
+/**
  * @brief 获取错误代码
  * @param instance 超级电容实例
  * @return uint8_t 错误代码
  */
 uint8_t SuperCapGetErrorCode(SuperCapInstance *instance);
+
+/**
+ * @brief 判断超电板是否存在真实硬错误
+ * @param instance 超级电容实例
+ * @return uint8_t 1=存在 bit0-bit6 错误, 0=无真实错误
+ */
+uint8_t SuperCapHasHardFault(SuperCapInstance *instance);
 
 /**
  * @brief 检查超电板是否在线

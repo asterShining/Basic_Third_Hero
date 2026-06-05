@@ -17,6 +17,12 @@ referee_info_t *UITaskInit(UART_HandleTypeDef *referee_usart_handle, Referee_Int
 void MyUIInit();
 
 /**
+ * @brief 请求底盘 UI 执行一次整页重建
+ *
+ */
+void UIRequestRefresh(void);
+
+/**
  * @brief 裁判系统交互任务(UI和多机通信)
  *
  */

@@ -73,7 +73,6 @@ file(GLOB_RECURSE SOURCES
     "modules/encoder/*.c"
     "modules/imu/*.c"
     "modules/ist8310/*.c"
-    "modules/master_machine/*.c"
     "modules/message_center/*.c"
     "modules/motor/DJImotor/*.c"
     "modules/motor/DMmotor/*.c"
@@ -132,7 +131,6 @@ target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
     modules/encoder
     modules/imu
     modules/ist8310
-    modules/master_machine
     modules/message_center
     modules/motor
     modules/motor/DJImotor
@@ -172,7 +170,6 @@ target_compile_options(${CMAKE_PROJECT_NAME} PRIVATE
     -Wno-unused-variable
     -Wno-pedantic
     -Wno-type-limits
-    -Wno-pragma-messages
     -Wno-missing-braces # 可考虑添加：抑制缺少大括号警告
 
     # 优化选项

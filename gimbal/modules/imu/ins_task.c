@@ -18,7 +18,6 @@
 #include "tim.h"
 #include "user_lib.h"
 #include "general_def.h"
-#include "master_process.h"
 
 static INS_t INS;
 static IMU_Param_t IMU_Param;
@@ -115,7 +114,8 @@ attitude_t *INS_Init(void)
 }
 void INS_Calibrate(void)
 {
-    INS_t INS;
+    // 这里直接复位模块内的静态 INS 状态，目的是让后续 `INS_Init()` 真正走完整重初始化流程；
+    // 之前这里误写成了同名局部变量，只会清掉一个马上被丢弃的临时副本，既没有校准效果，也会留下编译器 warning。
     INS.init = 0;
     // 2. 重新调用初始化
     INS_Init();
@@ -171,7 +171,6 @@ void INS_Task(void)
         INS.Roll = QEKF_INS.Roll;
         INS.YawTotalAngle = QEKF_INS.YawTotalAngle;
 
-        VisionSetAltitude(INS.Yaw, INS.Pitch, INS.Roll);
     }
 
     // temperature control
@@ -325,8 +324,9 @@ void QuaternionUpdate(float *q, float gx, float gy, float gz, float dt)
 void QuaternionToEularAngle(float *q, float *Yaw, float *Pitch, float *Roll)
 {
     *Yaw = atan2f(2.0f * (q[0] * q[3] + q[1] * q[2]), 2.0f * (q[0] * q[0] + q[1] * q[1]) - 1.0f) * 57.295779513f;
-    *Pitch = atan2f(2.0f * (q[0] * q[1] + q[2] * q[3]), 2.0f * (q[0] * q[0] + q[3] * q[3]) - 1.0f) * 57.295779513f;
-    *Roll = asinf(2.0f * (q[0] * q[2] - q[1] * q[3])) * 57.295779513f;
+    // [轴互换] 与 QuaternionEKF.c 保持一致，交换 Pitch/Roll 公式
+    *Pitch = asinf(2.0f * (q[0] * q[2] - q[1] * q[3])) * 57.295779513f;
+    *Roll = atan2f(2.0f * (q[0] * q[1] + q[2] * q[3]), 2.0f * (q[0] * q[0] + q[3] * q[3]) - 1.0f) * 57.295779513f;
 }
 
 /**
@@ -334,18 +334,23 @@ void QuaternionToEularAngle(float *q, float *Yaw, float *Pitch, float *Roll)
  */
 void EularAngleToQuaternion(float Yaw, float Pitch, float Roll, float *q)
 {
-    float cosPitch, cosYaw, cosRoll, sinPitch, sinYaw, sinRoll;
+    // [轴互换] Pitch 现在对应绕 Y 轴 (asin 轴), Roll 对应绕 X 轴 (atan2 轴)
+    // 内部使用 alpha=Yaw(Z), beta=Roll(X), gamma=Pitch(Y) 对应 ZXY 旋转顺序
+    float cosAlpha, sinAlpha; // Yaw (Z)
+    float cosBeta, sinBeta; // Roll (X) - 原代码中的 Pitch 位置
+    float cosGamma, sinGamma; // Pitch (Y) - 原代码中的 Roll 位置
     Yaw /= 57.295779513f;
     Pitch /= 57.295779513f;
     Roll /= 57.295779513f;
-    cosPitch = arm_cos_f32(Pitch / 2);
-    cosYaw = arm_cos_f32(Yaw / 2);
-    cosRoll = arm_cos_f32(Roll / 2);
-    sinPitch = arm_sin_f32(Pitch / 2);
-    sinYaw = arm_sin_f32(Yaw / 2);
-    sinRoll = arm_sin_f32(Roll / 2);
-    q[0] = cosPitch * cosRoll * cosYaw + sinPitch * sinRoll * sinYaw;
-    q[1] = sinPitch * cosRoll * cosYaw - cosPitch * sinRoll * sinYaw;
-    q[2] = sinPitch * cosRoll * sinYaw + cosPitch * sinRoll * cosYaw;
-    q[3] = cosPitch * cosRoll * sinYaw - sinPitch * sinRoll * cosYaw;
+    cosAlpha = arm_cos_f32(Yaw / 2);
+    sinAlpha = arm_sin_f32(Yaw / 2);
+    cosBeta = arm_cos_f32(Roll / 2); // Roll 对应绕 X 轴
+    sinBeta = arm_sin_f32(Roll / 2);
+    cosGamma = arm_cos_f32(Pitch / 2); // Pitch 对应绕 Y 轴
+    sinGamma = arm_sin_f32(Pitch / 2);
+    // ZXY 顺序: q = q_z * q_x * q_y
+    q[0] = cosAlpha * cosBeta * cosGamma - sinAlpha * sinBeta * sinGamma;
+    q[1] = cosAlpha * sinBeta * cosGamma - sinAlpha * cosBeta * sinGamma;
+    q[2] = cosAlpha * cosBeta * sinGamma + sinAlpha * sinBeta * cosGamma;
+    q[3] = sinAlpha * cosBeta * cosGamma + cosAlpha * sinBeta * sinGamma;
 }

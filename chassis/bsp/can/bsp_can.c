@@ -117,7 +117,7 @@ uint8_t CANTransmit(CANInstance *_instance, float timeout)
     wait_time = DWT_GetTimeline_ms() - dwt_start;
     // tx_mailbox会保存实际填入了这一帧消息的邮箱,但是知道是哪个邮箱发的似乎也没啥用
     if (HAL_CAN_AddTxMessage(_instance->can_handle, &_instance->txconf, _instance->tx_buff, &_instance->tx_mailbox)) {
-        LOGWARNING("[bsp_can] CAN bus BUS! cnt:%d", busy_count);
+        // LOGWARNING("[bsp_can] CAN bus BUS! cnt:%d", busy_count);
         busy_count++;
         if (busy_count % 200 == 0) {
             // 获取 CAN 发送状态寄存器 (TSR) 和 错误状态寄存器 (ESR)
@@ -219,6 +219,7 @@ static void CANFIFOxCallback(CAN_HandleTypeDef *_hcan, uint32_t fifox)
     uint8_t can_rx_buff[8];
     while (HAL_CAN_GetRxFifoFillLevel(_hcan, fifox)) // FIFO不为空,有可能在其他中断时有多帧数据进入
     {
+        uint8_t frame_handled = 0u; // What: 标记当前帧是否已经分发；Why: 即使存在未知ID也要继续清FIFO，避免新增上岛报文时堵住后续有效帧
         HAL_CAN_GetRxMessage(_hcan, fifox, &rxconf, can_rx_buff); // 从FIFO中获取数据
         for (size_t i = 0; i < idx; ++i) { // 两者相等说明这是要找的实例
             if (_hcan == can_instance[i]->can_handle && rxconf.StdId == can_instance[i]->rx_id) {
@@ -228,9 +229,12 @@ static void CANFIFOxCallback(CAN_HandleTypeDef *_hcan, uint32_t fifox)
                     memcpy(can_instance[i]->rx_buff, can_rx_buff, rxconf.DLC); // 消息拷贝到对应实例
                     can_instance[i]->can_module_callback(can_instance[i]); // 触发回调进行数据解析和处理
                 }
-                return;
+                frame_handled = 1u;
+                break;
             }
         }
+        if (frame_handled == 0u)
+            continue;
     }
 }
 
