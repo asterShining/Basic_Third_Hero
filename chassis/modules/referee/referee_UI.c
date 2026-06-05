@@ -14,6 +14,23 @@
 #include "stdio.h"
 #include "rm_referee.h"
 
+static void UIFillGraphicName(uint8_t name_out[3], const char graphname[3])
+{
+	// What: 按生成器一致的正序字节写入 3 字节图元名；Why: 现有旧实现把名字反序写入，虽然部分客户端可能容忍，但这已经和生成器实际封包不一致。
+	uint8_t i = 0u;
+
+	if (name_out == NULL || graphname == NULL) {
+		return;
+	}
+
+	name_out[0] = 0u;
+	name_out[1] = 0u;
+	name_out[2] = 0u;
+	for (i = 0u; i < 3u && graphname[i] != '\0'; i++) {
+		name_out[i] = (uint8_t)graphname[i];
+	}
+}
+
 // 包序号
 /********************************************删除操作*************************************
 **参数：_id 对应的id结构体
@@ -42,7 +59,8 @@ void UIDelete(referee_id_t *_id, uint8_t Del_Operate, uint8_t Del_Layer)
 	UI_delete_data.frametail = Get_CRC16_Check_Sum((uint8_t *)&UI_delete_data, LEN_HEADER + LEN_CMDID + temp_datalength, 0xFFFF);
 	/* 填入0xFFFF,关于crc校验 */
 
-	RefereeSend((uint8_t *)&UI_delete_data, LEN_HEADER + LEN_CMDID + temp_datalength + LEN_TAIL); // 发送
+	// What: 删除帧改走无阻塞兼容层的原始发送接口；Why: 新 UI 任务会自行做协议分频，继续走旧接口会被固定 115ms 延时严重卡慢。
+	RefereeSendRaw((uint8_t *)&UI_delete_data, LEN_HEADER + LEN_CMDID + temp_datalength + LEN_TAIL); // 发送
 
 	UI_Seq++; // 包序号+1
 }
@@ -60,11 +78,7 @@ void UIDelete(referee_id_t *_id, uint8_t Del_Operate, uint8_t Del_Layer)
 void UILineDraw(Graph_Data_t *graph, char graphname[3], uint32_t Graph_Operate, uint32_t Graph_Layer, uint32_t Graph_Color,
 				uint32_t Graph_Width, uint32_t Start_x, uint32_t Start_y, uint32_t End_x, uint32_t End_y)
 {
-	int i;
-	for (i = 0; i < 3 && graphname[i] != '\0'; i++) // 填充至‘0’为止
-	{
-		graph->graphic_name[2 - i] = graphname[i]; // 按内存地址增大方向填充，所以会有i与2-i
-	}
+	UIFillGraphicName(graph->graphic_name, graphname);
 
 	graph->operate_tpye = Graph_Operate;
 	graph->graphic_tpye = UI_Graph_Line;
@@ -94,11 +108,7 @@ void UILineDraw(Graph_Data_t *graph, char graphname[3], uint32_t Graph_Operate, 
 void UIRectangleDraw(Graph_Data_t *graph, char graphname[3], uint32_t Graph_Operate, uint32_t Graph_Layer, uint32_t Graph_Color,
 					 uint32_t Graph_Width, uint32_t Start_x, uint32_t Start_y, uint32_t End_x, uint32_t End_y)
 {
-	int i;
-	for (i = 0; i < 3 && graphname[i] != '\0'; i++)
-	{
-		graph->graphic_name[2 - i] = graphname[i];
-	}
+	UIFillGraphicName(graph->graphic_name, graphname);
 
 	graph->graphic_tpye = UI_Graph_Rectangle;
 	graph->operate_tpye = Graph_Operate;
@@ -129,11 +139,7 @@ void UIRectangleDraw(Graph_Data_t *graph, char graphname[3], uint32_t Graph_Oper
 void UICircleDraw(Graph_Data_t *graph, char graphname[3], uint32_t Graph_Operate, uint32_t Graph_Layer, uint32_t Graph_Color,
 				  uint32_t Graph_Width, uint32_t Start_x, uint32_t Start_y, uint32_t Graph_Radius)
 {
-	int i;
-	for (i = 0; i < 3 && graphname[i] != '\0'; i++)
-	{
-		graph->graphic_name[2 - i] = graphname[i];
-	}
+	UIFillGraphicName(graph->graphic_name, graphname);
 
 	graph->graphic_tpye = UI_Graph_Circle;
 	graph->operate_tpye = Graph_Operate;
@@ -162,11 +168,7 @@ void UICircleDraw(Graph_Data_t *graph, char graphname[3], uint32_t Graph_Operate
 void UIOvalDraw(Graph_Data_t *graph, char graphname[3], uint32_t Graph_Operate, uint32_t Graph_Layer, uint32_t Graph_Color,
 				uint32_t Graph_Width, uint32_t Start_x, uint32_t Start_y, uint32_t end_x, uint32_t end_y)
 {
-	int i;
-	for (i = 0; i < 3 && graphname[i] != '\0'; i++)
-	{
-		graph->graphic_name[2 - i] = graphname[i];
-	}
+	UIFillGraphicName(graph->graphic_name, graphname);
 
 	graph->graphic_tpye = UI_Graph_Ellipse;
 	graph->operate_tpye = Graph_Operate;
@@ -200,11 +202,7 @@ void UIArcDraw(Graph_Data_t *graph, char graphname[3], uint32_t Graph_Operate, u
 			   uint32_t Graph_StartAngle, uint32_t Graph_EndAngle, uint32_t Graph_Width, uint32_t Start_x, uint32_t Start_y,
 			   uint32_t end_x, uint32_t end_y)
 {
-	int i;
-	for (i = 0; i < 3 && graphname[i] != '\0'; i++)
-	{
-		graph->graphic_name[2 - i] = graphname[i];
-	}
+	UIFillGraphicName(graph->graphic_name, graphname);
 
 	graph->graphic_tpye = UI_Graph_Arc;
 	graph->operate_tpye = Graph_Operate;
@@ -239,12 +237,7 @@ void UIArcDraw(Graph_Data_t *graph, char graphname[3], uint32_t Graph_Operate, u
 void UIFloatDraw(Graph_Data_t *graph, char graphname[3], uint32_t Graph_Operate, uint32_t Graph_Layer, uint32_t Graph_Color,
 				 uint32_t Graph_Size, uint32_t Graph_Digit, uint32_t Graph_Width, uint32_t Start_x, uint32_t Start_y, int32_t Graph_Float)
 {
-
-	int i;
-	for (i = 0; i < 3 && graphname[i] != '\0'; i++)
-	{
-		graph->graphic_name[2 - i] = graphname[i];
-	}
+	UIFillGraphicName(graph->graphic_name, graphname);
 	graph->graphic_tpye = UI_Graph_Float;
 	graph->operate_tpye = Graph_Operate;
 	graph->layer = Graph_Layer;
@@ -277,11 +270,7 @@ void UIFloatDraw(Graph_Data_t *graph, char graphname[3], uint32_t Graph_Operate,
 void UIIntDraw(Graph_Data_t *graph, char graphname[3], uint32_t Graph_Operate, uint32_t Graph_Layer, uint32_t Graph_Color,
 			   uint32_t Graph_Size, uint32_t Graph_Width, uint32_t Start_x, uint32_t Start_y, int32_t Graph_Integer)
 {
-	int i;
-	for (i = 0; i < 3 && graphname[i] != '\0'; i++)
-	{
-		graph->graphic_name[2 - i] = graphname[i];
-	}
+	UIFillGraphicName(graph->graphic_name, graphname);
 	graph->graphic_tpye = UI_Graph_Int;
 	graph->operate_tpye = Graph_Operate;
 	graph->layer = Graph_Layer;
@@ -314,11 +303,7 @@ void UIIntDraw(Graph_Data_t *graph, char graphname[3], uint32_t Graph_Operate, u
 void UICharDraw(String_Data_t *graph, char graphname[3], uint32_t Graph_Operate, uint32_t Graph_Layer, uint32_t Graph_Color,
 				uint32_t Graph_Size, uint32_t Graph_Width, uint32_t Start_x, uint32_t Start_y, char *fmt, ...)
 {
-	int i;
-	for (i = 0; i < 3 && graphname[i] != '\0'; i++)
-	{
-		graph->Graph_Control.graphic_name[2 - i] = graphname[i];
-	}
+	UIFillGraphicName(graph->Graph_Control.graphic_name, graphname);
 
 	graph->Graph_Control.graphic_tpye = UI_Graph_Char;
 	graph->Graph_Control.operate_tpye = Graph_Operate;
@@ -390,7 +375,9 @@ void UIGraphRefresh(referee_id_t *_id, int cnt, ...)
 		memcpy(buffer + (LEN_HEADER + LEN_CMDID + Interactive_Data_LEN_Head + UI_Operate_LEN_PerDraw * i), (uint8_t *)&graphData, UI_Operate_LEN_PerDraw);
 	}
 	Append_CRC16_Check_Sum(buffer, temp_datalength);
-	RefereeSend(buffer, temp_datalength);
+	// What: 图元刷新改走原始发送接口；Why: 运行期 UI 需要按 20Hz/10Hz 精细调度，不能再叠加旧兼容延时。
+	RefereeSendRaw(buffer, temp_datalength);
+	UI_Seq++; // What: 每个 0x0301 UI 帧都推进序号；Why: 连续 change 帧若不递增 Seq，客户端和裁判链路调试都会更难定位时序问题。
 
 	va_end(ap); // 结束可变参数的获取
 }
@@ -418,7 +405,8 @@ void UICharRefresh(referee_id_t *_id, String_Data_t string_Data)
 
 	UI_CharReFresh_data.frametail = Get_CRC16_Check_Sum((uint8_t *)&UI_CharReFresh_data, LEN_HEADER + LEN_CMDID + temp_datalength, 0xFFFF);
 
-	RefereeSend((uint8_t *)&UI_CharReFresh_data, LEN_HEADER + LEN_CMDID + temp_datalength + LEN_TAIL); // 发送
+	// What: 字符刷新也改走原始发送接口；Why: 初始化阶段需要连续补静态字符串，旧延时接口会把整套 UI 建图过程拖得过慢。
+	RefereeSendRaw((uint8_t *)&UI_CharReFresh_data, LEN_HEADER + LEN_CMDID + temp_datalength + LEN_TAIL); // 发送
 
 	UI_Seq++; // 包序号+1
 }

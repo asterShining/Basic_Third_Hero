@@ -7,6 +7,7 @@
 #include "daemon.h"
 #include "stdlib.h"
 #include "bsp_log.h"
+#include <math.h>
 
 static uint8_t idx;
 static DMMotorInstance *dm_motor_instance[DM_MOTOR_CNT];
@@ -40,22 +41,52 @@ void DMMotorChangeFeed(DMMotorInstance *motor, Closeloop_Type_e loop, Feedback_S
     // DM电机通常不需要像DJI那样检查指针越界，因为结构体是一样的
 }
 
+uint8_t DMMotorIsOnline(DMMotorInstance *motor)
+{
+    // What: 对外暴露 DM 电机在线状态查询；Why: 上层需要在 yaw 电机掉线时冻结跟随参考，不能直接跨模块读取 daemon 内部字段。
+    if (motor == NULL || motor->motor_daemon == NULL) {
+        return 0u;
+    }
+
+    return DaemonIsOnline(motor->motor_daemon);
+}
+
 static void DMMotorDecode(CANInstance *motor_can)
 {
-    uint16_t tmp; // 用于暂存解析值,稍后转换成float数据,避免多次创建临时变量
+    uint16_t tmp;
     uint8_t *rxbuff = motor_can->rx_buff;
     DMMotorInstance *motor = (DMMotorInstance *)motor_can->id;
-    DM_Motor_Measure_s *measure = &(motor->measure); // 将can实例中保存的id转换成电机实例的指针
+    DM_Motor_Measure_s *measure = &(motor->measure);
 
     DaemonReload(motor->motor_daemon);
 
+    // ================= [新增] 解析 Byte 0: ID 和 ERR =================
+    // 格式: MST_ID ID | ERR<<4 (即高4位为ERR，低4位为ID)
+    uint8_t raw_err = (rxbuff[0] >> 4) & 0x0F;
+    uint8_t feedback_id = rxbuff[0] & 0x0F;
+
+    measure->id = feedback_id; // 更新反馈ID
+    measure->err_code = (DM_Motor_Error_e)raw_err;
+
+    // // [可选] 如果发现错误，打印日志 (依赖 bsp_log.h)
+    // if (measure->err_code != DM_ERR_NONE) {
+    //     LOGWARNING("[dm_motor] Error Detected! ID:%d, Code:0x%X", feedback_id, raw_err);
+    // }
+    // ===============================================================
+
     measure->last_position = measure->position;
+
+    // 原有逻辑: Byte 1-2 位置
     tmp = (uint16_t)((rxbuff[1] << 8) | rxbuff[2]);
     measure->position = uint_to_float(tmp, DM_P_MIN, DM_P_MAX, 16);
 
-    tmp = (uint16_t)((rxbuff[3] << 4) | rxbuff[4] >> 4);
+    // 原有逻辑: Byte 3-4 速度 (VEL[11:4] | VEL[3:0])
+    // 现有代码逻辑是正确的: (Byte3 << 4) | (Byte4 >> 4)
+    tmp = (uint16_t)((rxbuff[3] << 4) | (rxbuff[4] >> 4));
     measure->velocity = uint_to_float(tmp, DM_V_MIN, DM_V_MAX, 12);
 
+    // 原有逻辑: Byte 4-5 扭矩 (T[11:8] | T[7:0])
+    // 现有代码逻辑是正确的: ((Byte4 & 0x0F) << 8) | Byte5
     tmp = (uint16_t)(((rxbuff[4] & 0x0f) << 8) | rxbuff[5]);
     measure->torque = uint_to_float(tmp, DM_T_MIN, DM_T_MAX, 12);
 
@@ -83,6 +114,9 @@ static void DMMotorDecode(CANInstance *motor_can)
 
 static void DMMotorLostCallback(void *motor_ptr)
 {
+    DMMotorInstance *motor = (DMMotorInstance *)motor_ptr;
+    uint16_t can_bus = motor->motor_can_instace->can_handle == &hcan1 ? 1 : 2;
+    LOGWARNING("[dm_motor] Motor lost, can bus [%d] , id [%d]", can_bus, motor->motor_can_instace->tx_id);
 }
 void DMMotorCaliEncoder(DMMotorInstance *motor)
 {
@@ -104,6 +138,10 @@ DMMotorInstance *DMMotorInit(Motor_Init_Config_s *config)
     PIDInit(&motor->angle_PID, &config->controller_param_init_config.angle_PID);
     motor->other_angle_feedback_ptr = config->controller_param_init_config.other_angle_feedback_ptr;
     motor->other_speed_feedback_ptr = config->controller_param_init_config.other_speed_feedback_ptr;
+    // What: 初始化速度前馈指针；Why: DM 驱动任务会直接读取实例中的前馈地址，若初始化阶段漏拷贝就会让上层配置失效。
+    motor->speed_feedforward_ptr = config->controller_param_init_config.speed_feedforward_ptr;
+    // What: 初始化电流前馈指针；Why: 云台重力与动力学补偿都走电流前馈通道，必须在建实例时把入口完整接通。
+    motor->current_feedforward_ptr = config->controller_param_init_config.current_feedforward_ptr;
 
     config->can_init_config.can_module_callback = DMMotorDecode;
     config->can_init_config.id = motor;
@@ -119,7 +157,8 @@ DMMotorInstance *DMMotorInit(Motor_Init_Config_s *config)
     DMMotorEnable(motor);
     DMMotorSetMode(DM_CMD_MOTOR_MODE, motor);
     DWT_Delay(0.1);
-    DMMotorCaliEncoder(motor);
+    // What: 保持开机不自动发送 DM 零点校准；Why: 当前分支依赖驱动内保存的硬件零点，重复校零会把 yaw 跟随基准再次打乱。
+    // DMMotorCaliEncoder(motor);
     DWT_Delay(0.1);
     dm_motor_instance[idx++] = motor;
     return motor;
@@ -145,7 +184,7 @@ void DMMotorOuterLoop(DMMotorInstance *motor, Closeloop_Type_e type)
     motor->motor_settings.outer_loop_type = type;
 }
 
-//@Todo: 目前只实现了力控，更多位控PID等请自行添加
+
 void DMMotorTask(void const *argument)
 {
     float pid_ref;
@@ -160,6 +199,22 @@ void DMMotorTask(void const *argument)
     // uint16_t tmp;
     DMMotor_Send_s motor_send_mailbox;
     while (1) {
+        // ================= [新增] 自动监测与快速复位逻辑 =================
+        if (motor->stop_flag == MOTOR_ENALBED) {
+            // 2. 扭矩过低时的保活策略 (防止意外失能)
+            // 如果扭矩绝对值小于 1.0f，认为可能处于"软失能"或低负载状态
+            // 以 200Hz 频率 (每5ms一次) 发送使能指令，确保电机保持在线
+            if (fabs(motor->measure.torque) < 1.0f) {
+                motor->enable_cmd_cnt++;
+                if (motor->enable_cmd_cnt >= 5) { // 1000HzLoop / 5 = 200Hz
+                    DMMotorSetMode(DM_CMD_MOTOR_MODE, motor);
+                    motor->enable_cmd_cnt = 0;
+                }
+            } else {
+                motor->enable_cmd_cnt = 0;
+            }
+        }
+        // ===============================================================
         // ================= 1. 反馈源选择与处理 =================
         // 角度反馈
         if (setting->angle_feedback_source == OTHER_FEED && motor->other_angle_feedback_ptr)
@@ -226,12 +281,6 @@ void DMMotorTask(void const *argument)
 
         // ================= 3. 输出限幅与发送 =================
 
-        // 再次处理反转标志对最终输出的影响(如果上面在入口处处理了ref，这里就不需要了，
-        // 但为了保险起见，如果这是力矩模式直接设定，可能需要反转。
-        // *对比 DJI 代码*：DJI 在循环开始处 `if (reverse) pid_ref *= -1;`，之后全程传递。
-        // 所以这里不需要再次反转 set_torque，除非你想实现特殊的逻辑。
-        // 保持与 DJI 一致，上面入口处已处理。
-
         // 限制力矩范围 (安全保护)
         LIMIT_MIN_MAX(set_torque, DM_T_MIN, DM_T_MAX);
 
@@ -258,9 +307,9 @@ void DMMotorTask(void const *argument)
         motor->motor_can_instace->tx_buff[6] = (uint8_t)(((motor_send_mailbox.Kd & 0xF) << 4) | (motor_send_mailbox.torque_des >> 8));
         motor->motor_can_instace->tx_buff[7] = (uint8_t)(motor_send_mailbox.torque_des);
 
-        CANTransmit(motor->motor_can_instace, 1);
+        CANTransmit(motor->motor_can_instace, 2);
 
-        osDelay(2); // 500Hz 控制频率
+        osDelay(1);
     }
 }
 void DMMotorControlInit()

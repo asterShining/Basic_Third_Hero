@@ -5,7 +5,7 @@
 #include "buzzer.h"
 
 // 用于保存所有的daemon instance
-static DaemonInstance *daemon_instances[DAEMON_MX_CNT] = {NULL};
+static DaemonInstance *daemon_instances[DAEMON_MX_CNT] = { NULL };
 static uint8_t idx; // 用于记录当前的daemon instance数量,配合回调使用
 
 DaemonInstance *DaemonRegister(Daemon_Init_Config_s *config)
@@ -16,9 +16,8 @@ DaemonInstance *DaemonRegister(Daemon_Init_Config_s *config)
     instance->owner_id = config->owner_id;
     instance->reload_count = config->reload_count == 0 ? 100 : config->reload_count; // 默认值为100
     instance->callback = config->callback;
-    instance->temp_count = config->init_count == 0 ? 100 : config->init_count; // 默认值为100,初始计数
-
-    instance->temp_count = config->reload_count;
+    // 初始计数：若未提供 init_count，则使用 reload_count 作为默认值，避免为0导致立即离线
+    instance->temp_count = (config->init_count == 0) ? instance->reload_count : config->init_count;
     daemon_instances[idx++] = instance;
     return instance;
 }
@@ -37,9 +36,7 @@ uint8_t DaemonIsOnline(DaemonInstance *instance)
 void DaemonTask()
 {
     DaemonInstance *dins; // 提高可读性同时降低访存开销
-    for (size_t i = 0; i < idx; ++i)
-    {
-
+    for (size_t i = 0; i < idx; ++i) {
         dins = daemon_instances[i];
         if (dins->temp_count > 0) // 如果计数器还有值,说明上一次喂狗后还没有超时,则计数器减一
             dins->temp_count--;

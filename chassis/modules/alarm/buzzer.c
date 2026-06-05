@@ -5,7 +5,7 @@
 
 static PWMInstance *buzzer;
 // static uint8_t idx;
-static BuzzzerInstance *buzzer_list[BUZZER_DEVICE_CNT] = {0};
+static BuzzzerInstance *buzzer_list[BUZZER_DEVICE_CNT] = { 0 };
 
 /**
  * @brief 蜂鸣器初始化
@@ -47,22 +47,19 @@ void AlarmSetStatus(BuzzzerInstance *buzzer, AlarmState_e state)
 void BuzzerTask()
 {
     BuzzzerInstance *buzz;
-    for (size_t i = 0; i < BUZZER_DEVICE_CNT; ++i)
-    {
+    for (size_t i = 0; i < BUZZER_DEVICE_CNT; ++i) {
         buzz = buzzer_list[i];
-        if (buzz->alarm_level > ALARM_LEVEL_LOW)
-        {
+        if (buzz == NULL) {
             continue;
         }
-        if (buzz->alarm_state == ALARM_OFF)
-        {
-            PWMSetDutyRatio(buzzer, 0);
+        if (buzz->alarm_level > ALARM_LEVEL_LOW) {
+            continue;
         }
-        else
-        {
+        if (buzz->alarm_state == ALARM_OFF) {
+            PWMSetDutyRatio(buzzer, 0);
+        } else {
             PWMSetDutyRatio(buzzer, buzz->loudness);
-            switch (buzz->octave)
-            {
+            switch (buzz->octave) {
             case OCTAVE_1:
                 PWMSetPeriod(buzzer, (float)1 / DoFreq);
                 break;

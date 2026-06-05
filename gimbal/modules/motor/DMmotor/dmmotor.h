@@ -8,17 +8,25 @@
 
 #define DM_MOTOR_CNT 4
 
-#define DM_P_MIN (-12.5f)
-#define DM_P_MAX 12.5f
+#define DM_P_MIN (-12.56637f)
+#define DM_P_MAX 12.56637f
 #define DM_V_MIN (-45.0f)
 #define DM_V_MAX 45.0f
 #define DM_T_MIN (-18.0f)
 #define DM_T_MAX 18.0f
 
+typedef enum {
+    DM_ERR_NONE = 0x0,
+    DM_ERR_OVER_VOLTAGE = 0x8, // 超压
+    DM_ERR_UNDER_VOLTAGE = 0x9, // 欠压
+    DM_ERR_OVER_CURRENT = 0xA, // 过流
+    DM_ERR_MOS_OVERHEAT = 0xB // MOS过温
+} DM_Motor_Error_e;
 typedef struct
 {
     uint8_t id;
     uint8_t state;
+    DM_Motor_Error_e err_code; // [新增] 存储解析出的错误码
     float velocity;
     float last_position;
     float position;
@@ -26,8 +34,9 @@ typedef struct
     float T_Mos;
     float T_Rotor;
     int32_t total_round;
-    int32_t total_angle;
+    float total_angle;
 } DM_Motor_Measure_s;
+
 
 typedef struct
 {
@@ -53,6 +62,7 @@ typedef struct
     CANInstance *motor_can_instace;
     DaemonInstance *motor_daemon;
     uint32_t lost_cnt;
+    uint8_t enable_cmd_cnt; // [新增] 用于保活指令降频计数
 } DMMotorInstance;
 
 typedef enum {
@@ -74,4 +84,5 @@ void DMMotorStop(DMMotorInstance *motor);
 void DMMotorCaliEncoder(DMMotorInstance *motor);
 void DMMotorControlInit();
 void DMMotorChangeFeed(DMMotorInstance *motor, Closeloop_Type_e loop, Feedback_Source_e type);
+uint8_t DMMotorIsOnline(DMMotorInstance *motor);
 #endif // !DMMOTOR

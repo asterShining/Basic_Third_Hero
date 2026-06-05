@@ -1,5 +1,7 @@
 # --- 编译输出目录 ---
 build/
+build-host/
+gimbal/build-host/
 bin/
 obj/
 
@@ -38,3 +40,8 @@ Makefile
 # --- 操作系统/IDE 相关 ---
 .DS_Store
 .vscode/
+.omx/
+
+# --- Python 工具缓存 ---
+__pycache__/
+*.pyc

@@ -18,15 +18,14 @@
 #include "tim.h"
 #include "user_lib.h"
 #include "general_def.h"
-#include "master_process.h"
 
 static INS_t INS;
 static IMU_Param_t IMU_Param;
-static PIDInstance TempCtrl = {0};
+static PIDInstance TempCtrl = { 0 };
 
-const float xb[3] = {1, 0, 0};
-const float yb[3] = {0, 1, 0};
-const float zb[3] = {0, 0, 1};
+const float xb[3] = { 1, 0, 0 };
+const float yb[3] = { 0, 1, 0 };
+const float zb[3] = { 0, 0, 1 };
 
 // 用于获取两次采样之间的时间间隔
 static uint32_t INS_DWT_Count = 0;
@@ -53,12 +52,11 @@ static void IMU_Temperature_Ctrl(void)
 // 使用加速度计的数据初始化Roll和Pitch,而Yaw置0,这样可以避免在初始时候的姿态估计误差
 static void InitQuaternion(float *init_q4)
 {
-    float acc_init[3] = {0};
-    float gravity_norm[3] = {0, 0, 1}; // 导航系重力加速度矢量,归一化后为(0,0,1)
-    float axis_rot[3] = {0};           // 旋转轴
+    float acc_init[3] = { 0 };
+    float gravity_norm[3] = { 0, 0, 1 }; // 导航系重力加速度矢量,归一化后为(0,0,1)
+    float axis_rot[3] = { 0 }; // 旋转轴
     // 读取100次加速度计数据,取平均值作为初始值
-    for (uint8_t i = 0; i < 100; ++i)
-    {
+    for (uint8_t i = 0; i < 100; ++i) {
         BMI088_Read(&BMI088);
         acc_init[X] += BMI088.Accel[X];
         acc_init[Y] += BMI088.Accel[Y];
@@ -96,17 +94,17 @@ attitude_t *INS_Init(void)
     IMU_Param.Roll = 0;
     IMU_Param.flag = 1;
 
-    float init_quaternion[4] = {0};
+    float init_quaternion[4] = { 0 };
     InitQuaternion(init_quaternion);
     IMU_QuaternionEKF_Init(init_quaternion, 10, 0.001, 1000000, 1, 0);
     // imu heat init
-    PID_Init_Config_s config = {.MaxOut = 2000,
-                                .IntegralLimit = 300,
-                                .DeadBand = 0,
-                                .Kp = 1000,
-                                .Ki = 20,
-                                .Kd = 0,
-                                .Improve = 0x01}; // enable integratiaon limit
+    PID_Init_Config_s config = { .MaxOut = 2000,
+                                 .IntegralLimit = 300,
+                                 .DeadBand = 0,
+                                 .Kp = 1000,
+                                 .Ki = 20,
+                                 .Kd = 0,
+                                 .Improve = 0x01 }; // enable integratiaon limit
     PIDInit(&TempCtrl, &config);
 
     // noise of accel is relatively big and of high freq,thus lpf is used
@@ -114,19 +112,25 @@ attitude_t *INS_Init(void)
     DWT_GetDeltaT(&INS_DWT_Count);
     return (attitude_t *)&INS.Gyro; // @todo: 这里偷懒了,不要这样做! 修改INT_t结构体可能会导致异常,待修复.
 }
-
+void INS_Calibrate(void)
+{
+    // 这里直接复位模块内的静态 INS 状态，目的是让后续 `INS_Init()` 真正走完整重初始化流程；
+    // 之前这里误写成了同名局部变量，只会清掉一个马上被丢弃的临时副本，既没有校准效果，也会留下编译器 warning。
+    INS.init = 0;
+    // 2. 重新调用初始化
+    INS_Init();
+}
 /* 注意以1kHz的频率运行此任务 */
 void INS_Task(void)
 {
     static uint32_t count = 0;
-    const float gravity[3] = {0, 0, 9.81f};
+    const float gravity[3] = { 0, 0, 9.81f };
 
     dt = DWT_GetDeltaT(&INS_DWT_Count);
     t += dt;
 
     // ins update
-    if ((count % 1) == 0)
-    {
+    if ((count % 1) == 0) {
         BMI088_Read(&BMI088);
 
         INS.Accel[X] = BMI088.Accel[X];
@@ -167,18 +171,16 @@ void INS_Task(void)
         INS.Roll = QEKF_INS.Roll;
         INS.YawTotalAngle = QEKF_INS.YawTotalAngle;
 
-        VisionSetAltitude(INS.Yaw, INS.Pitch, INS.Roll);
+        // What: 视觉模块已删除，此处仅保留姿态解算结果在本模块内更新；Why: 避免跨模块空调用影响实时路径可维护性
     }
 
     // temperature control
-    if ((count % 2) == 0)
-    {
+    if ((count % 2) == 0) {
         // 500hz
         IMU_Temperature_Ctrl();
     }
 
-    if ((count++ % 1000) == 0)
-    {
+    if ((count++ % 1000) == 0) {
         // 1Hz 可以加入monitor函数,检查IMU是否正常运行/离线
     }
 }
@@ -241,8 +243,7 @@ static void IMU_Param_Correction(IMU_Param_t *param, float gyro[3], float accel[
 
     if (fabsf(param->Yaw - lastYawOffset) > 0.001f ||
         fabsf(param->Pitch - lastPitchOffset) > 0.001f ||
-        fabsf(param->Roll - lastRollOffset) > 0.001f || param->flag)
-    {
+        fabsf(param->Roll - lastRollOffset) > 0.001f || param->flag) {
         cosYaw = arm_cos_f32(param->Yaw / 57.295779513f);
         cosPitch = arm_cos_f32(param->Pitch / 57.295779513f);
         cosRoll = arm_cos_f32(param->Roll / 57.295779513f);

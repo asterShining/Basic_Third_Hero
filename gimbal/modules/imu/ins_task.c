@@ -18,15 +18,14 @@
 #include "tim.h"
 #include "user_lib.h"
 #include "general_def.h"
-#include "master_process.h"
 
 static INS_t INS;
 static IMU_Param_t IMU_Param;
-static PIDInstance TempCtrl = {0};
+static PIDInstance TempCtrl = { 0 };
 
-const float xb[3] = {1, 0, 0};
-const float yb[3] = {0, 1, 0};
-const float zb[3] = {0, 0, 1};
+const float xb[3] = { 1, 0, 0 };
+const float yb[3] = { 0, 1, 0 };
+const float zb[3] = { 0, 0, 1 };
 
 // 用于获取两次采样之间的时间间隔
 static uint32_t INS_DWT_Count = 0;
@@ -53,12 +52,11 @@ static void IMU_Temperature_Ctrl(void)
 // 使用加速度计的数据初始化Roll和Pitch,而Yaw置0,这样可以避免在初始时候的姿态估计误差
 static void InitQuaternion(float *init_q4)
 {
-    float acc_init[3] = {0};
-    float gravity_norm[3] = {0, 0, 1}; // 导航系重力加速度矢量,归一化后为(0,0,1)
-    float axis_rot[3] = {0};           // 旋转轴
+    float acc_init[3] = { 0 };
+    float gravity_norm[3] = { 0, 0, 1 }; // 导航系重力加速度矢量,归一化后为(0,0,1)
+    float axis_rot[3] = { 0 }; // 旋转轴
     // 读取100次加速度计数据,取平均值作为初始值
-    for (uint8_t i = 0; i < 100; ++i)
-    {
+    for (uint8_t i = 0; i < 100; ++i) {
         BMI088_Read(&BMI088);
         acc_init[X] += BMI088.Accel[X];
         acc_init[Y] += BMI088.Accel[Y];
@@ -96,17 +94,17 @@ attitude_t *INS_Init(void)
     IMU_Param.Roll = 0;
     IMU_Param.flag = 1;
 
-    float init_quaternion[4] = {0};
+    float init_quaternion[4] = { 0 };
     InitQuaternion(init_quaternion);
     IMU_QuaternionEKF_Init(init_quaternion, 10, 0.001, 1000000, 1, 0);
     // imu heat init
-    PID_Init_Config_s config = {.MaxOut = 2000,
-                                .IntegralLimit = 300,
-                                .DeadBand = 0,
-                                .Kp = 1000,
-                                .Ki = 20,
-                                .Kd = 0,
-                                .Improve = 0x01}; // enable integratiaon limit
+    PID_Init_Config_s config = { .MaxOut = 2000,
+                                 .IntegralLimit = 300,
+                                 .DeadBand = 0,
+                                 .Kp = 1000,
+                                 .Ki = 20,
+                                 .Kd = 0,
+                                 .Improve = 0x01 }; // enable integratiaon limit
     PIDInit(&TempCtrl, &config);
 
     // noise of accel is relatively big and of high freq,thus lpf is used
@@ -114,19 +112,25 @@ attitude_t *INS_Init(void)
     DWT_GetDeltaT(&INS_DWT_Count);
     return (attitude_t *)&INS.Gyro; // @todo: 这里偷懒了,不要这样做! 修改INT_t结构体可能会导致异常,待修复.
 }
-
+void INS_Calibrate(void)
+{
+    // 这里直接复位模块内的静态 INS 状态，目的是让后续 `INS_Init()` 真正走完整重初始化流程；
+    // 之前这里误写成了同名局部变量，只会清掉一个马上被丢弃的临时副本，既没有校准效果，也会留下编译器 warning。
+    INS.init = 0;
+    // 2. 重新调用初始化
+    INS_Init();
+}
 /* 注意以1kHz的频率运行此任务 */
 void INS_Task(void)
 {
     static uint32_t count = 0;
-    const float gravity[3] = {0, 0, 9.81f};
+    const float gravity[3] = { 0, 0, 9.81f };
 
     dt = DWT_GetDeltaT(&INS_DWT_Count);
     t += dt;
 
     // ins update
-    if ((count % 1) == 0)
-    {
+    if ((count % 1) == 0) {
         BMI088_Read(&BMI088);
 
         INS.Accel[X] = BMI088.Accel[X];
@@ -167,18 +171,15 @@ void INS_Task(void)
         INS.Roll = QEKF_INS.Roll;
         INS.YawTotalAngle = QEKF_INS.YawTotalAngle;
 
-        VisionSetAltitude(INS.Yaw, INS.Pitch, INS.Roll);
     }
 
     // temperature control
-    if ((count % 2) == 0)
-    {
+    if ((count % 2) == 0) {
         // 500hz
         IMU_Temperature_Ctrl();
     }
 
-    if ((count++ % 1000) == 0)
-    {
+    if ((count++ % 1000) == 0) {
         // 1Hz 可以加入monitor函数,检查IMU是否正常运行/离线
     }
 }
@@ -241,8 +242,7 @@ static void IMU_Param_Correction(IMU_Param_t *param, float gyro[3], float accel[
 
     if (fabsf(param->Yaw - lastYawOffset) > 0.001f ||
         fabsf(param->Pitch - lastPitchOffset) > 0.001f ||
-        fabsf(param->Roll - lastRollOffset) > 0.001f || param->flag)
-    {
+        fabsf(param->Roll - lastRollOffset) > 0.001f || param->flag) {
         cosYaw = arm_cos_f32(param->Yaw / 57.295779513f);
         cosPitch = arm_cos_f32(param->Pitch / 57.295779513f);
         cosRoll = arm_cos_f32(param->Roll / 57.295779513f);
@@ -324,8 +324,9 @@ void QuaternionUpdate(float *q, float gx, float gy, float gz, float dt)
 void QuaternionToEularAngle(float *q, float *Yaw, float *Pitch, float *Roll)
 {
     *Yaw = atan2f(2.0f * (q[0] * q[3] + q[1] * q[2]), 2.0f * (q[0] * q[0] + q[1] * q[1]) - 1.0f) * 57.295779513f;
-    *Pitch = atan2f(2.0f * (q[0] * q[1] + q[2] * q[3]), 2.0f * (q[0] * q[0] + q[3] * q[3]) - 1.0f) * 57.295779513f;
-    *Roll = asinf(2.0f * (q[0] * q[2] - q[1] * q[3])) * 57.295779513f;
+    // [轴互换] 与 QuaternionEKF.c 保持一致，交换 Pitch/Roll 公式
+    *Pitch = asinf(2.0f * (q[0] * q[2] - q[1] * q[3])) * 57.295779513f;
+    *Roll = atan2f(2.0f * (q[0] * q[1] + q[2] * q[3]), 2.0f * (q[0] * q[0] + q[3] * q[3]) - 1.0f) * 57.295779513f;
 }
 
 /**
@@ -333,18 +334,23 @@ void QuaternionToEularAngle(float *q, float *Yaw, float *Pitch, float *Roll)
  */
 void EularAngleToQuaternion(float Yaw, float Pitch, float Roll, float *q)
 {
-    float cosPitch, cosYaw, cosRoll, sinPitch, sinYaw, sinRoll;
+    // [轴互换] Pitch 现在对应绕 Y 轴 (asin 轴), Roll 对应绕 X 轴 (atan2 轴)
+    // 内部使用 alpha=Yaw(Z), beta=Roll(X), gamma=Pitch(Y) 对应 ZXY 旋转顺序
+    float cosAlpha, sinAlpha; // Yaw (Z)
+    float cosBeta, sinBeta; // Roll (X) - 原代码中的 Pitch 位置
+    float cosGamma, sinGamma; // Pitch (Y) - 原代码中的 Roll 位置
     Yaw /= 57.295779513f;
     Pitch /= 57.295779513f;
     Roll /= 57.295779513f;
-    cosPitch = arm_cos_f32(Pitch / 2);
-    cosYaw = arm_cos_f32(Yaw / 2);
-    cosRoll = arm_cos_f32(Roll / 2);
-    sinPitch = arm_sin_f32(Pitch / 2);
-    sinYaw = arm_sin_f32(Yaw / 2);
-    sinRoll = arm_sin_f32(Roll / 2);
-    q[0] = cosPitch * cosRoll * cosYaw + sinPitch * sinRoll * sinYaw;
-    q[1] = sinPitch * cosRoll * cosYaw - cosPitch * sinRoll * sinYaw;
-    q[2] = sinPitch * cosRoll * sinYaw + cosPitch * sinRoll * cosYaw;
-    q[3] = cosPitch * cosRoll * sinYaw - sinPitch * sinRoll * cosYaw;
+    cosAlpha = arm_cos_f32(Yaw / 2);
+    sinAlpha = arm_sin_f32(Yaw / 2);
+    cosBeta = arm_cos_f32(Roll / 2); // Roll 对应绕 X 轴
+    sinBeta = arm_sin_f32(Roll / 2);
+    cosGamma = arm_cos_f32(Pitch / 2); // Pitch 对应绕 Y 轴
+    sinGamma = arm_sin_f32(Pitch / 2);
+    // ZXY 顺序: q = q_z * q_x * q_y
+    q[0] = cosAlpha * cosBeta * cosGamma - sinAlpha * sinBeta * sinGamma;
+    q[1] = cosAlpha * sinBeta * cosGamma - sinAlpha * cosBeta * sinGamma;
+    q[2] = cosAlpha * cosBeta * sinGamma + sinAlpha * sinBeta * cosGamma;
+    q[3] = sinAlpha * cosBeta * cosGamma + cosAlpha * sinBeta * sinGamma;
 }

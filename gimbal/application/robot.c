@@ -10,33 +10,36 @@
 #endif // !ROBOT_DEF_PARAM_WARNING
 
 #if defined(ONE_BOARD) || defined(CHASSIS_BOARD)
-#include "chassis.h"
+// #include "chassis.h"
 #endif
 
 #if defined(ONE_BOARD) || defined(GIMBAL_BOARD)
+#include "custom_image_bridge.h"
 #include "gimbal.h"
 #include "shoot.h"
 #include "robot_cmd.h"
 #endif
 
-
 void RobotInit()
-{  
+{
     // 关闭中断,防止在初始化过程中发生中断
     // 请不要在初始化过程中使用中断和延时函数！
     // 若必须,则只允许使用DWT_Delay()
     __disable_irq();
-    
+
     BSPInit();
 
 #if defined(ONE_BOARD) || defined(GIMBAL_BOARD)
     RobotCMDInit();
-    // GimbalInit();
-    // ShootInit();
+    // 这里在创建任务前先把图像桥接模块初始化好，作用是让 USB CDC 回调从开机开始就稳定指向独立桥接入口；
+    // 原因是该链路必须完全绕开现有 cmd/VT03 控制仲裁，单独把上位机原始 H.264 字节流收进云台板。
+    CustomImageBridgeInit();
+    GimbalInit();
+    ShootInit();
 #endif
 
 #if defined(ONE_BOARD) || defined(CHASSIS_BOARD)
-    ChassisInit();
+    // ChassisInit();
 #endif
 
     OSTaskInit(); // 创建基础任务
@@ -49,12 +52,11 @@ void RobotTask()
 {
 #if defined(ONE_BOARD) || defined(GIMBAL_BOARD)
     RobotCMDTask();
-    // GimbalTask();
-    // ShootTask();
+    GimbalTask();
+    ShootTask();
 #endif
 
 #if defined(ONE_BOARD) || defined(CHASSIS_BOARD)
-    ChassisTask();
+    // ChassisTask();
 #endif
-
 }

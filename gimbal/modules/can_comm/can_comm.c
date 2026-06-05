@@ -26,21 +26,34 @@ static void CANCommResetRx(CANCommInstance *ins)
 static void CANCommRxCallback(CANInstance *_instance)
 {
     CANCommInstance *comm = (CANCommInstance *)_instance->id; // 注意写法,将can instance的id强制转换为CANCommInstance*类型
-
+    // LOGINFO("[can_comm] ID:0x%X | 1st Byte: 0x%02X | Expect Len: %d | Rx Len: %d",
+    //         _instance->rx_id,
+    //         _instance->rx_buff[1],
+    //         comm->recv_data_len,
+    //         _instance->rx_buff[1]);
     /* 当前接收状态判断 */
     if (_instance->rx_buff[0] == CAN_COMM_HEADER && comm->recv_state == 0) // 之前尚未开始接收且此次包里第一个位置是帧头
     {
+        // LOGINFO("[can_comm] Header matched - Data len: %d, Expected: %d",
+                // _instance->rx_buff[1], comm->recv_data_len);
         if (_instance->rx_buff[1] == comm->recv_data_len) // 如果这一包里的datalen也等于我们设定接收长度(这是因为暂时不支持动态包长)
         {
             comm->recv_state = 1; // 设置接收状态为1,说明已经开始接收
-        } else
-            return; // 直接跳过即可
+        } else {
+            LOGERROR("[can_comm] Len Mismatch! My Expect: %d, Incoming: %d",
+                     comm->recv_data_len, _instance->rx_buff[1]);
+        }
+        // return; // 直接跳过即可
     }
 
     if (comm->recv_state) // 已经收到过帧头
     {
+    //     LOGINFO("[can_comm] Receiving - Current: %d, Total needed: %d, This packet: %d",
+    //             comm->cur_recv_len, comm->recv_buf_len, _instance->rx_len);
         // 如果已经接收到的长度加上当前一包的长度大于总buf len,说明接收错误
         if (comm->cur_recv_len + _instance->rx_len > comm->recv_buf_len) {
+            // LOGERROR("[can_comm] Buffer overflow! Current: %d, This: %d, Max: %d",
+            //          comm->cur_recv_len, _instance->rx_len, comm->recv_buf_len);
             CANCommResetRx(comm);
             return; // 重置状态然后返回
         }
@@ -51,13 +64,23 @@ static void CANCommRxCallback(CANInstance *_instance)
 
         // 收完这一包以后刚好等于总buf len,说明已经收完了
         if (comm->cur_recv_len == comm->recv_buf_len) {
+            // LOGINFO("[can_comm] Full packet received - Checking tail and CRC");
             // 如果buff里本tail的位置等于CAN_COMM_TAIL
             if (comm->raw_recvbuf[comm->recv_buf_len - 1] == CAN_COMM_TAIL) { // 通过校验,复制数据到unpack_data中
+                // LOGINFO("[can_comm] Tail matched - Checking CRC");
                 if (comm->raw_recvbuf[comm->recv_buf_len - 2] == crc_8(comm->raw_recvbuf + 2, comm->recv_data_len)) { // 数据量大的话考虑使用DMA
+                    // LOGINFO("[can_comm] CRC passed - Data updated");
                     memcpy(comm->unpacked_recv_data, comm->raw_recvbuf + 2, comm->recv_data_len);
                     comm->update_flag = 1; // 数据更新flag置为1
                     DaemonReload(comm->comm_daemon); // 重载daemon,避免数据更新后一直不被读取而导致数据更新不及时
+                } else {
+                    LOGERROR("[can_comm] CRC failed! Expected: 0x%02X, Got: 0x%02X",
+                             crc_8(comm->raw_recvbuf + 2, comm->recv_data_len),
+                             comm->raw_recvbuf[comm->recv_buf_len - 2]);
                 }
+            } else {
+                LOGERROR("[can_comm] Tail mismatch! Expected: 0x%02X, Got: 0x%02X",
+                         CAN_COMM_TAIL, comm->raw_recvbuf[comm->recv_buf_len - 1]);
             }
             CANCommResetRx(comm);
             return; // 重置状态然后返回
@@ -69,7 +92,7 @@ static void CANCommLostCallback(void *cancomm)
 {
     CANCommInstance *comm = (CANCommInstance *)cancomm;
     CANCommResetRx(comm);
-    LOGWARNING("[can_comm] can comm rx[0x%03X] lost, reset rx state.", comm->can_ins->rx_id);
+    LOGWARNING("[can_comm] can comm rx[%d] lost, reset rx state.", &comm->can_ins->rx_id);
 }
 
 CANCommInstance *CANCommInit(CANComm_Init_Config_s *comm_config)
@@ -93,7 +116,6 @@ CANCommInstance *CANCommInit(CANComm_Init_Config_s *comm_config)
         .callback = CANCommLostCallback,
         .owner_id = (void *)ins,
         .reload_count = comm_config->daemon_count,
-        .init_count = comm_config->daemon_count,
     };
     ins->comm_daemon = DaemonRegister(&daemon_config);
     return ins;
@@ -101,12 +123,9 @@ CANCommInstance *CANCommInit(CANComm_Init_Config_s *comm_config)
 
 void CANCommSend(CANCommInstance *instance, uint8_t *data)
 {
-    static uint32_t gimbal_tx_cnt = 0;
-    gimbal_tx_cnt++;
-    if (gimbal_tx_cnt % 200 == 0) {
-        LOGINFO("[GIMBAL_DEBUG] Sending to Chassis... Cnt: %d, Len: %d",
-                gimbal_tx_cnt, instance->send_data_len);
-    }
+    // 添加这里 ↓
+    // LOGINFO("[can_comm] Sending - Data len: %d, Total buf len: %d",
+            // instance->send_data_len, instance->send_buf_len);
     static uint8_t crc8;
     static uint8_t send_len;
     // 将data copy到raw_sendbuf中,计算crc8
@@ -119,7 +138,7 @@ void CANCommSend(CANCommInstance *instance, uint8_t *data)
         send_len = instance->send_buf_len - i >= 8 ? 8 : instance->send_buf_len - i;
         CANSetDLC(instance->can_ins, send_len);
         memcpy(instance->can_ins->tx_buff, instance->raw_sendbuf + i, send_len);
-        CANTransmit(instance->can_ins, 1);
+        CANTransmit(instance->can_ins, 2);
     }
 }
 

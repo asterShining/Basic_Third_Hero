@@ -1,8 +1,8 @@
 /**
  * @file chassis.c
  * @author NeoZeng neozng1@hnu.edu.cn
- * @brief 底盘应用,负责接收robot_cmd的控制命令并根据命令进行运动学解算,得到输出
- *        注意底盘采取右手系,对于平面视图,底盘纵向运动的正前方为x正方向;横向运动的右侧为y正方向
+ * @brief 底盘应用入口，负责初始化底盘执行器并在任务内串起命令接收、模式控制、运动学解算、功率限制和反馈发送
+ *        注意底盘采取右手系，对于平面视图，底盘纵向运动的正前方为 x 正方向；横向运动的右侧为 y 正方向
  *
  * @version 0.1
  * @date 2022-12-04
@@ -11,288 +11,175 @@
  *
  */
 
-#include "chassis.h"
-#include "robot_def.h"
-#include "power_control.h"
-#include "super_cap.h"
-#include "message_center.h"
-#include "referee_task.h"
+#include "chassis_private.h"
 
-#include "general_def.h"
-#include "bsp_dwt.h"
-#include "referee_UI.h"
-#include "arm_math.h"
-
-/* 根据robot_def.h中的macro自动计算的参数 */
-#define HALF_WHEEL_BASE (WHEEL_BASE / 2.0f) // 半轴距
-#define HALF_TRACK_WIDTH (TRACK_WIDTH / 2.0f) // 半轮距
-#define PERIMETER_WHEEL (RADIUS_WHEEL * 2 * PI) // 轮子周长
-#define DEFAULT_TEST_POWER 55.0f // 调试用的基础功率
-
-/* 底盘应用包含的模块和信息存储,底盘是单例模式,因此不需要为底盘建立单独的结构体 */
-#ifdef CHASSIS_BOARD // 如果是底盘板,使用板载IMU获取底盘转动角速度
-#include "can_comm.h"
-#include "ins_task.h"
-static CANCommInstance *chasiss_can_comm; // 双板通信CAN comm
-attitude_t *Chassis_IMU_data;
+/* 底盘应用包含的模块和信息存储，底盘是单例模式，因此不需要为底盘建立单独的结构体 */
+#ifdef CHASSIS_BOARD
+CANCommInstance *chasiss_can_comm = NULL; // 双板通信 CANComm 句柄，目的是UI 汇总和任务收命令都要复用同一实例。
+attitude_t *Chassis_IMU_data = NULL; // 底盘板 IMU 解算数据，目的是跟随、功率补偿和 UI 都依赖同一份姿态反馈。
 #endif // CHASSIS_BOARD
+
 #ifdef ONE_BOARD
-static Publisher_t *chassis_pub; // 用于发布底盘的数据
-static Subscriber_t *chassis_sub; // 用于订阅底盘的控制命令
-#endif // !ONE_BOARD
-static Chassis_Ctrl_Cmd_s chassis_cmd_recv; // 底盘接收到的控制命令
-static Chassis_Upload_Data_s chassis_feedback_data; // 底盘回传的反馈数据
+static Publisher_t *chassis_pub = NULL; // 单板构型下用于发布底盘反馈，目的是保持单板消息链路仍局限在入口文件内部。
+static Subscriber_t *chassis_sub = NULL; // 单板构型下用于订阅底盘控制命令，目的是该句柄只在任务入口消费，不需要外泄。
+#endif // ONE_BOARD
 
-static PIDInstance buffer_PID; // 用于底盘的缓冲能量PID
-static referee_info_t *referee_data; // 用于获取裁判系统的数据
-static Referee_Interactive_info_t ui_data; // UI数据，将底盘中的数据传入此结构体的对应变量中，UI会自动检测是否变化，对应显示UI
+Chassis_Ctrl_Cmd_s chassis_cmd_recv; // 当前拍底盘控制命令缓存，目的是主任务和拆分 helper 都围绕同一份命令做增量处理。
+static Chassis_Upload_Data_s chassis_feedback_data; // 底盘上传反馈缓存，目的是当前仍由入口任务统一负责最终发送。
+referee_info_t *referee_data = NULL; // 裁判系统数据指针，目的是功率限制、超电策略和 UI 汇总都要读同一份裁判状态。
+Referee_Interactive_info_t ui_data; // 底盘提供给 UI 任务的实时数据快照，目的是裁判 UI 绘制线程只关心这一份聚合结果。
 
-static SuperCapInstance *cap; // 超级电容
-static DJIMotorInstance *motor_lf, *motor_rf, *motor_lb, *motor_rb; // left right forward back
+#ifdef USE_SUPER_CAP
+SuperCapInstance *cap = NULL; // 超级电容实例，目的是功率下发、UI 状态和 bonus 策略都要共用同一实例。
+#endif
 
-/* 用于自旋变速策略的时间变量 */
-// static float t;
+DJIMotorInstance *motor_lf = NULL; // 左前轮电机实例，目的是运动学解算和底盘急停都要直接操作轮组。
+DJIMotorInstance *motor_rf = NULL; // 右前轮电机实例，目的是与其余三轮统一纳入同一套功率控制链路。
+DJIMotorInstance *motor_lb = NULL; // 左后轮电机实例，目的是运动学解算最终仍需落到具体轮组目标。
+DJIMotorInstance *motor_rb = NULL; // 右后轮电机实例，目的是保持四轮参考与启停时序一致。
 
-/* 私有函数计算的中介变量,设为静态避免参数传递的开销 */
-static float chassis_vx, chassis_vy; // 将云台系的速度投影到底盘
-static float vt_lf, vt_rf, vt_lb, vt_rb; // 底盘速度解算后的临时输出,待进行限幅
+// 下面这些旧运行时状态仍保留在入口文件内，目的是当前拆分目标仅限核心 helper，下述状态还没有形成明确复用链路，不额外继续扩散。
+static PIDInstance yaw_lock_pid; // 航向锁定专用 PID
+static float lock_target_yaw = 0.0f; // 锁定的目标角度
+static uint8_t is_manual_rotating = 0u; // 标记是否正在手动旋转
+static uint8_t last_cali_flag = 0u; // 上一次的校准标志位
 
-void ChassisInit()
+float chassis_vx = 0.0f; // 云台系速度投影到底盘坐标系后的 x 分量，目的是主任务负责坐标变换，运动学 helper 直接消费结果即可。
+float chassis_vy = 0.0f; // 云台系速度投影到底盘坐标系后的 y 分量，目的是保持运动学 helper 不再关心坐标系转换细节。
+static chassis_mode_e last_chassis_mode = CHASSIS_ZERO_FORCE; // 记录上一拍底盘模式，目的是底盘板本地也要能识别小陀螺退跟随边沿，避免上板请求偶发漏拍时接管逻辑失效。
+uint8_t last_follow_transition_request = 0u; // 记录接管请求上一拍电平，目的是上板会保持几拍请求位，底盘侧只应在上升沿触发一次接管窗口。
+uint8_t last_follow_brake_request = 0u; // 记录跟随刹停请求上一拍电平，目的是V 掉头结束时需要识别刹停请求释放边沿，才能把跟随滤波状态重新贴回当前误差而不是沿用刹停期的零值。
+uint8_t follow_transition_ticks = 0u; // 记录当前跟随接管剩余拍数，目的是用固定拍数窗口先刹停再回正，比直接混控更稳且实现确定性更强。
+float follow_angle_err_filtered = 0.0f; // 缓存滤波后的跟随偏角，目的是刚退出接管时若直接吃原始偏角，容易被机械回弹和量测毛刺再次拉成反复摆动。
+float follow_wz_cmd_limited = 0.0f; // 缓存限斜率后的跟随输出，目的是接管段切回正常跟随时沿用连续状态，避免指令一步跳变刺激轮速环。
+uint32_t follow_control_dwt_cnt = 0u; // 记录跟随控制的 DWT 时间基准，目的是输出斜率限制要按真实周期换算，不能假设任务永远严格等于 5ms。
+
+/**
+ * @brief 底盘应用初始化
+ *
+ */
+void ChassisInit(void)
 {
-    // 四个轮子的参数一样,改tx_id和反转标志位即可
-    Motor_Init_Config_s chassis_motor_config = {
-        .can_init_config.can_handle = &hcan2,
+    Motor_Init_Config_s chassis_motor_config;
+
+    // 底盘上电后先初始化 IMU，目的是后续坡度补偿、跟随阻尼和 UI 都依赖姿态数据，不能等任务阶段再懒初始化。
+    Chassis_IMU_data = INS_Init();
+
+    // 四个轮子的控制参数完全一致，只在 CAN ID 和正反转上区分，目的是统一复用一份配置结构能减少重复初始化代码和改参遗漏。
+    chassis_motor_config = (Motor_Init_Config_s){
         .controller_param_init_config = {
             .speed_PID = {
-                .Kp = 4.5, // 4.5
-                .Ki = 0, // 0
-                .Kd = 0, // 0
-                .IntegralLimit = 3000,
+                .Kp = 3.7,
+                .Ki = 0.0,
+                .Kd = 0.0,
                 .Improve = PID_Trapezoid_Intergral | PID_Integral_Limit | PID_Derivative_On_Measurement,
                 .MaxOut = 15000,
-                .Output_LPF_RC = 0.3,
+                .Output_LPF_RC = 0.1,
             },
         },
         .controller_setting_init_config = {
             .angle_feedback_source = MOTOR_FEED,
             .speed_feedback_source = MOTOR_FEED,
-            .outer_loop_type = SPEED_LOOP, // 设置为开环，电机设定值由下面的功率控制设定，不走普通的pid
+            .outer_loop_type = SPEED_LOOP,
             .close_loop_type = SPEED_LOOP,
         },
         .motor_type = M3508,
     };
-    //  @todo: 当前还没有设置电机的正反转,仍然需要手动添加reference的正负号,需要电机module的支持,待修改.
-    // 使用功率控制的电机需要使用PowerControlInit()函数初始化,因为电机的控制方式不同
+
+    // 轮组采用功率控制初始化入口，目的是当前底盘的速度环目标最终要经过统一功率预算裁剪，不能走普通电机初始化链。
+    chassis_motor_config.can_init_config.can_handle = &hcan2;
     chassis_motor_config.can_init_config.tx_id = 1;
     chassis_motor_config.controller_setting_init_config.motor_reverse_flag = MOTOR_DIRECTION_NORMAL;
     motor_lf = PowerControlInit(&chassis_motor_config);
 
     chassis_motor_config.can_init_config.tx_id = 2;
-    chassis_motor_config.controller_setting_init_config.motor_reverse_flag = MOTOR_DIRECTION_NORMAL;
+    chassis_motor_config.controller_setting_init_config.motor_reverse_flag = MOTOR_DIRECTION_REVERSE;
     motor_rf = PowerControlInit(&chassis_motor_config);
-
-    chassis_motor_config.can_init_config.tx_id = 4;
-    chassis_motor_config.controller_setting_init_config.motor_reverse_flag = MOTOR_DIRECTION_NORMAL;
-    motor_lb = PowerControlInit(&chassis_motor_config);
 
     chassis_motor_config.can_init_config.tx_id = 3;
     chassis_motor_config.controller_setting_init_config.motor_reverse_flag = MOTOR_DIRECTION_NORMAL;
     motor_rb = PowerControlInit(&chassis_motor_config);
 
-    referee_data = UITaskInit(&huart6, &ui_data); // 裁判系统初始化,会同时初始化UI
+    chassis_motor_config.can_init_config.tx_id = 4;
+    chassis_motor_config.controller_setting_init_config.motor_reverse_flag = MOTOR_DIRECTION_REVERSE;
+    motor_lb = PowerControlInit(&chassis_motor_config);
 
-    SuperCap_Init_Config_s cap_conf = {
-        .can_config = {
-            .can_handle = &hcan1,
-            .tx_id = 0x061, // 超级电容默认接收id
-            .rx_id = 0x051, // 超级电容默认发送id,注意tx和rx在其他人看来是反的
-        }
-    };
+#ifdef USE_ISLAND_ACTION
+    // 启用上岛机构时在底盘初始化阶段一起拉起，目的是该机构的调度完全挂在底盘任务后段，初始化时机必须与底盘一致。
+    IslandActionInit();
+#endif // USE_ISLAND_ACTION
 
-    cap = SuperCapInit(&cap_conf); // 超级电容初始化
+    // 裁判系统初始化时顺带把 UI 数据缓冲注册进去，目的是UI 任务后续会直接读取 ui_data 的变化来决定是否刷新图元。
+    referee_data = UITaskInit(&huart6, &ui_data);
+    // 默认开启坡度补偿，目的是当前功率控制策略已经显式依赖 pitch 角，初始化时直接打开可避免运行初期策略分叉。
+    PowerControl_EnableSlopeComp(1);
+    PowerControl_EnableForceFeedforward(1); // 默认开启速度 PID 的力控前馈，目的是让底盘起步、急停和换向先获得模型补偿，再由现有功率限制兜底。
 
-    // 发布订阅初始化,如果为双板,则需要can comm来传递消息
+#ifdef USE_SUPER_CAP
+    {
+        SuperCap_Init_Config_s cap_conf = {
+            .can_config = {
+                .can_handle = &hcan2,
+                .tx_id = 0x061,
+                .rx_id = 0x051,
+            }
+        };
+
+        // 底盘初始化阶段同步拉起超电实例，目的是后续功率预算、DCDC 使能和 UI 状态都依赖这一实例持续在线。
+        cap = SuperCapInit(&cap_conf);
+    }
+#endif // USE_SUPER_CAP
+
 #ifdef CHASSIS_BOARD
-    CANComm_Init_Config_s comm_conf = {
-        .can_config = {
-            .can_handle = &hcan1,
-            .tx_id = 0x011,
-            .rx_id = 0x012,
-        },
-        .recv_data_len = sizeof(Chassis_Ctrl_Cmd_s),
-        .send_data_len = sizeof(Chassis_Upload_Data_s),
-        .daemon_count = 200,
-    };
-    chasiss_can_comm = CANCommInit(&comm_conf); // can comm初始化
-    if (chasiss_can_comm != NULL) {
-        LOGINFO("[DEBUG] Chassis CAN Comm Init SUCCESS! Handle: %p, recv:%d, send:%d",
-                chasiss_can_comm, sizeof(Chassis_Ctrl_Cmd_s), sizeof(Chassis_Upload_Data_s));
-    } else {
-        LOGERROR("[DEBUG] Chassis CAN Comm Init FAILED! Returned NULL.");
+    {
+        CANComm_Init_Config_s comm_conf = {
+            .can_config = {
+                .can_handle = &hcan1,
+                .tx_id = 0x011,
+                .rx_id = 0x012,
+            },
+            .recv_data_len = sizeof(Chassis_Ctrl_Cmd_s),
+            .send_data_len = sizeof(Chassis_Upload_Data_s),
+            .daemon_count = 200,
+        };
+
+        // 双板构型下初始化底盘与云台之间的 CANComm，目的是后续所有命令接收和反馈回传都走这条链路，必须在任务启动前建立。
+        chasiss_can_comm = CANCommInit(&comm_conf);
+
+        LOGINFO("[can_comm] Chassis_Upload_Data_s size: %d", sizeof(Chassis_Upload_Data_s));
+        LOGINFO("[can_comm] Chassis_Ctrl_Cmd_s size: %d", sizeof(Chassis_Ctrl_Cmd_s));
+        LOGINFO("[can_comm] CAN_COMM_MAX_BUFFSIZE: %d", CAN_COMM_MAX_BUFFSIZE);
+        if (chasiss_can_comm != NULL) {
+            LOGINFO("[CHASSIS_DEBUG] CAN Comm Init Success! TxID: %d, RxID: %d",
+                    chasiss_can_comm->can_ins->tx_id,
+                    chasiss_can_comm->can_ins->rx_id);
+        } else {
+            LOGERROR("[CHASSIS_DEBUG] CAN Comm Init Failed!");
+        }
     }
 #endif // CHASSIS_BOARD
 
-#ifdef ONE_BOARD // 单板控制整车,则通过pubsub来传递消息
+#ifdef ONE_BOARD
+    // 单板构型继续通过消息中心对接上层控制链，目的是当前拆分只做底盘模块内聚，不改变单板已有的数据流入口。
     chassis_sub = SubRegister("chassis_cmd", sizeof(Chassis_Ctrl_Cmd_s));
     chassis_pub = PubRegister("chassis_feed", sizeof(Chassis_Upload_Data_s));
 #endif // ONE_BOARD
 }
 
-#define LF_CENTER ((HALF_TRACK_WIDTH + CENTER_GIMBAL_OFFSET_X + HALF_WHEEL_BASE - CENTER_GIMBAL_OFFSET_Y) * DEGREE_2_RAD)
-#define RF_CENTER ((HALF_TRACK_WIDTH - CENTER_GIMBAL_OFFSET_X + HALF_WHEEL_BASE - CENTER_GIMBAL_OFFSET_Y) * DEGREE_2_RAD)
-#define LB_CENTER ((HALF_TRACK_WIDTH + CENTER_GIMBAL_OFFSET_X + HALF_WHEEL_BASE + CENTER_GIMBAL_OFFSET_Y) * DEGREE_2_RAD)
-#define RB_CENTER ((HALF_TRACK_WIDTH - CENTER_GIMBAL_OFFSET_X + HALF_WHEEL_BASE + CENTER_GIMBAL_OFFSET_Y) * DEGREE_2_RAD)
-/**
- * @brief 计算每个轮毂电机的输出,正运动学解算
- *        用宏进行预替换减小开销,运动解算具体过程参考教程
- */
-static void MecanumCalculate()
-{
-    // 1. 获取输入 (已经是 m/s 了，因为遥控器那边乘过了)
-    float vx = chassis_vx;
-    float vy = chassis_vy;
-
-    // 2. 旋转速度 (deg/s)
-    // 注意：robot_cmd 里发过来的 wz 建议是物理值 (deg/s)，比如直接发 200.0f
-    // 如果发过来的是比例 (1.0)，这里要乘 MAX_CHASSIS_WZ_SPEED
-    float wz = chassis_cmd_recv.wz;
-
-    // 3. 计算旋转产生的线速度 (m/s)
-    // LF_CENTER 宏里已经包含了转换系数
-    float v_rot_lf = wz * LF_CENTER;
-    float v_rot_rf = wz * RF_CENTER;
-    float v_rot_lb = wz * LB_CENTER;
-    float v_rot_rb = wz * RB_CENTER;
-
-    //
-    // 假设电机安装方向逻辑是：前轮负为前，后轮正为前（根据您原代码推断）
-    // 必须有加有减才能旋转！
-    float v_lf_m_s = -vx - vy + v_rot_lf; // 左前: 旋转给正 (后退)
-    float v_rf_m_s = -vx + vy - v_rot_rf; // 右前: 旋转给负 (前进) -> 形成逆时针转
-    float v_lb_m_s = vx - vy - v_rot_lb; // 左后: 旋转给负 (后退)
-    float v_rb_m_s = vx + vy + v_rot_rb; // 右后: 旋转给正 (前进)
-
-    // 5. ✅ 单位转换 (关键！把 3.0 m/s 变成 ~2000 deg/s)
-    vt_lf = v_lf_m_s * CHASSIS_M_TO_DEG;
-    vt_rf = v_rf_m_s * CHASSIS_M_TO_DEG;
-    vt_lb = v_lb_m_s * CHASSIS_M_TO_DEG;
-    vt_rb = v_rb_m_s * CHASSIS_M_TO_DEG;
-}
-/**
- * @brief 根据裁判系统和电容剩余容量对输出进行限制并设置电机参考值
- *
- */
-static void LimitChassisOutput()
-{
-    // 超级电容功率控制
-    if (cap) {
-        // 1. 发送能量缓冲 (告诉超电当前裁判系统里还有多少缓冲能量)
-        // 保持原样，发送实时buffer是正确的，超电板会根据这个决定是否全力充电
-        cap->tx_msg.refereeEnergyBuffer = referee_data->PowerHeatData.buffer_energy;
-
-        // 2. 发送功率限制 (关键修改！！！)
-        float referee_limit = referee_data->GameRobotState.chassis_power_limit;
-
-        float safe_limit = referee_limit;
-        if (safe_limit < 30.0f)
-            safe_limit = 30.0f; // 兜底防止过低
-
-        // 无论是否开启爆发模式，给超电的永远是"合法的电池功率上限"
-        cap->tx_msg.refereePowerLimit = (uint16_t)safe_limit;
-
-        // 3. DCDC 开关逻辑 (保持你原有的逻辑，稍作优化)
-        // if (chassis_cmd_recv.cap_mode == SUPER_CAP_ON) {
-        // 裁判系统允许底盘输出 && 超电在线 && 无关键错误
-        if (referee_data->GameRobotState.power_management_chassis_output != 0 &&
-            cap->is_online &&
-            !SuperCapIsOutputDisabled(cap)) // 使用 super_cap.c 里的辅助函数判断错误
-        {
-            // 电量充足时开启 DCDC
-            if (cap->rx_msg.capEnergyPercent > 30) {
-                cap->tx_msg.enableDCDC = 1;
-            } else {
-                // 低电量保护，可以不关DCDC但超电板内部要有限制，
-                // 这里为了保险可以选择关闭，或者相信超电板的低压保护
-                cap->tx_msg.enableDCDC = 0;
-            }
-        } else {
-            cap->tx_msg.enableDCDC = 0;
-        }
-        static uint32_t error_toggle_tick = 0;
-        if (cap->rx_msg.errorCode != 0) {
-            uint32_t now = HAL_GetTick();
-            if (error_toggle_tick == 0)
-                error_toggle_tick = now;
-            uint32_t elapsed = (now - error_toggle_tick) % 4000; // 4秒周期
-            if (elapsed < 2000) {
-                cap->tx_msg.enableDCDC = 0; // 前2秒关
-            } else {
-                cap->tx_msg.enableDCDC = 1; // 后2秒开
-            }
-        } else {
-            error_toggle_tick = 0; // 错误消除，重置
-        }
-
-        /* 发送 CAN 消息 */
-
-        SuperCapSend(cap);
-    }
-
-    // 完成功率限制后进行电机参考输入设定
-    DJIMotorSetRef(motor_lf, vt_lf);
-    DJIMotorSetRef(motor_rf, vt_rf);
-    DJIMotorSetRef(motor_lb, vt_lb);
-    DJIMotorSetRef(motor_rb, vt_rb);
-}
-/**
- * @brief 根据每个轮子的速度反馈,计算底盘的实际运动速度,逆运动解算
- * 对于双板的情况,考虑增加来自底盘板IMU的数据
- */
-static void EstimateSpeed()
-{
-    // 1. 获取电机转速 (deg/s) 并转换为轮子线速度 (m/s)
-    // 公式: v = speed_aps * (PI/180) * R
-    // 注意：dji_motor的speed_aps是度/秒
-    float v_lf = motor_lf->measure.speed_aps * DEGREE_2_RAD * RADIUS_WHEEL;
-    float v_rf = motor_rf->measure.speed_aps * DEGREE_2_RAD * RADIUS_WHEEL;
-    float v_lb = motor_lb->measure.speed_aps * DEGREE_2_RAD * RADIUS_WHEEL;
-    float v_rb = motor_rb->measure.speed_aps * DEGREE_2_RAD * RADIUS_WHEEL;
-
-    // 2. 逆运动学解算 (Inverse Kinematics)
-    // 根据 MecanumCalculate 中的正向公式反推:
-    // vx = (v_rb - v_rf + v_lb - v_lf) / 4
-    // vy = (v_rb - v_lb + v_rf - v_lf) / 4
-    // wz = -(v_lf + v_rf + v_lb + v_rb) / (4 * (a+b))
-
-    // 计算底盘实际的前进速度 (m/s)
-    chassis_feedback_data.real_vx = (v_rb - v_rf + v_lb - v_lf) / 4.0f;
-
-    // 计算底盘实际的平移速度 (m/s)
-    chassis_feedback_data.real_vy = (v_rb - v_lb + v_rf - v_lf) / 4.0f;
-
-    // 3. 计算角速度 (deg/s)
-    // 优先使用 IMU 陀螺仪数据，因为轮子打滑会导致里程计计算的角速度很不准
-#ifdef CHASSIS_BOARD
-    if (Chassis_IMU_data != NULL) {
-        // 使用板载IMU的Z轴角速度 (注意单位，假设Gyro数据为 rad/s，需转为 deg/s，如果本身是 deg/s 则直接用)
-        // 通常 BMI088 驱动解算出的 Gyro 单位是 rad/s
-        chassis_feedback_data.real_wz = Chassis_IMU_data->Gyro[2] * RAD_2_DEGREE;
-    } else {
-        // IMU 离线时的兜底方案：使用轮子解算
-        // LF_CENTER 包含了 R * (PI/180)，所以这里除回去直接得到 deg/s
-        chassis_feedback_data.real_wz = -(v_lf + v_rf + v_lb + v_rb) / (4.0f * LF_CENTER);
-    }
-#else
-    // 单板模式或无IMU数据时，使用轮子解算
-    // 这里的 LF_CENTER 必须与 MecanumCalculate 中使用的宏一致
-    chassis_feedback_data.real_wz = -(v_lf + v_rf + v_lb + v_rb) / (4.0f * LF_CENTER);
-#endif
-}
 /* 机器人底盘控制核心任务 */
-void ChassisTask()
+void ChassisTask(void)
 {
-    // 后续增加没收到消息的处理(双板的情况)
-    // 获取新的控制信息
+    float gimbal_wz = 0.0f;
+    uint8_t follow_transition_request_rise = 0u;
+    uint8_t follow_brake_request_rise = 0u;
+    uint8_t follow_brake_request_fall = 0u;
+    uint8_t rotate_to_follow_edge = 0u;
+    float referee_power_limit;
+    float referee_buffer_energy = DEFAULT_TEST_BUFFER_ENERGY_J;
+    uint8_t chassis_output_allowed = 1u;
+    float final_power_limit;
+
+    // 先拿到本拍最新的底盘控制命令，目的是后续所有模式切换、功率预算和 UI 汇总都必须基于同一拍输入展开。
 #ifdef ONE_BOARD
     SubGetMessage(chassis_sub, &chassis_cmd_recv);
 #endif
@@ -300,91 +187,257 @@ void ChassisTask()
     chassis_cmd_recv = *(Chassis_Ctrl_Cmd_s *)CANCommGet(chasiss_can_comm);
 #endif // CHASSIS_BOARD
 
-    /* 超级电容爆发功率策略 */
-    /* 超级电容爆发功率策略 */
-    // 1. 获取基础限制
-    float final_power_limit = referee_data->GameRobotState.chassis_power_limit;
-    if (final_power_limit < 1.0f) // 简单判断裁判系统是否在线/有效
-    {
-        final_power_limit = DEFAULT_TEST_POWER;
+    // 先缓存本拍最新的云台角速度前馈，目的是跟随支路要避免“先读旧前馈、再更新命令”造成固定一拍滞后。
+    gimbal_wz = chassis_cmd_recv.gimbal_gyro_z;
+    // 检测接管请求上升沿，目的是上板会保持数拍请求位，底盘侧只应在真正的边沿触发一次接管窗口。
+    follow_transition_request_rise = (uint8_t)(chassis_cmd_recv.follow_transition_request != 0u &&
+                                               last_follow_transition_request == 0u);
+    // 检测跟随刹停请求上升沿，目的是进入 V 掉头期时需要立刻清空历史跟随状态，避免底盘再被旧滤波和前馈带着走一段。
+    follow_brake_request_rise = (uint8_t)(chassis_cmd_recv.follow_brake_request != 0u &&
+                                          last_follow_brake_request == 0u);
+    // 检测跟随刹停请求释放沿，目的是掉头结束后要把普通跟随滤波状态重新贴齐当前误差，避免从刹停期的零误差直接切回时再抽动。
+    follow_brake_request_fall = (uint8_t)(chassis_cmd_recv.follow_brake_request == 0u &&
+                                          last_follow_brake_request != 0u);
+    // 本地补一份小陀螺退跟随边沿检测，目的是即使上板请求偶发漏拍，底盘也能靠本地模式边沿兜底进入接管。
+    rotate_to_follow_edge = (uint8_t)(last_chassis_mode == CHASSIS_ROTATE &&
+                                      chassis_cmd_recv.chassis_mode == CHASSIS_FOLLOW_GIMBAL_YAW);
+    last_follow_transition_request = chassis_cmd_recv.follow_transition_request;
+    last_follow_brake_request = chassis_cmd_recv.follow_brake_request;
+
+    if (chassis_cmd_recv.ui_refresh_request != 0u) {
+        // 收到上板的一次性 UI 刷新请求后转交给裁判 UI 任务，目的是真正的绘图发包必须在 UI 线程内串行执行，底盘控制线程不应直接插手。
+        UIRequestRefresh();
     }
 
-    // 2. 判断是否可以爆发 (电容模式开启 + 电容在线 + 电量充足 + DCDC已使能)
-    // 注意：一定要判断DCDC是否真的开了，不然电机要110W，电池只能给80W，电压会瞬间拉低导致重启
-    if (cap && cap->is_online &&
-        chassis_cmd_recv.cap_mode == SUPER_CAP_ON &&
-        cap->rx_msg.capEnergyPercent > 30 &&
-        cap->tx_msg.enableDCDC == 1) // 确保我们已经请求开启DCDC
-    {
-        // 允许爆发，电机功率上限 = 裁判限制 + 电容贡献(30W-40W)
-        // 具体加多少取决于你的电容板最大输出能力
-        final_power_limit += 35.0f;
+    // 优先取裁判系统给出的原始功率限制，目的是后续平地/坡道缩放和超电 bonus 都必须建立在合法裁判预算之上。
+    if (referee_data == NULL) {
+        referee_power_limit = DEFAULT_TEST_POWER;
+    } else {
+        referee_power_limit = referee_data->GameRobotState.chassis_power_limit;
+        if (referee_power_limit < 1.0f) {
+            referee_power_limit = DEFAULT_TEST_POWER;
+        }
     }
 
-    // 3. 最终限幅保护
-    if (final_power_limit > 150.0f)
-        final_power_limit = 150.0f; // 物理极限
+    if (referee_data != NULL) {
+        // 同步取一份裁判缓冲能量与输出许可，目的是超电 bonus 需要和同一拍裁判状态对齐，不能只靠上一次的超电板回包做决策。
+        referee_buffer_energy = (float)referee_data->PowerHeatData.buffer_energy;
+        chassis_output_allowed = (uint8_t)(referee_data->GameRobotState.power_management_chassis_output != 0u);
+    }
 
-    // 4. 设置给底盘功率控制算法 (这个函数控制电机的电流)
+    // 当前平地与坡道都保持吃满裁判预算，目的是用户明确希望更激进，额外的软件缩放只会白白损失输出。
+    if (fabsf(Chassis_IMU_data->Pitch) > CHASSIS_SLOPE_THRESHOLD) {
+        final_power_limit = referee_power_limit * 1.00f;
+    } else {
+        final_power_limit = referee_power_limit * 1.0f;
+    }
+
+#ifdef USE_SUPER_CAP
+    {
+        float super_cap_bonus = GetAggressiveSuperCapBonus(referee_power_limit, referee_buffer_energy, chassis_output_allowed);
+        float reported_power_limit = 0.0f;
+
+        if (super_cap_bonus > 0.0f) {
+            // 把跟随超电板真实能力算出的动态 bonus 叠加到底盘总功率上限，目的是让底盘不再只吃固定 75W，而是尽量往超电板当前真的能给出的功率区间逼近。
+            final_power_limit += super_cap_bonus;
+        }
+
+        // 若超电板已经回传了可信的实际可给功率上限，就在底盘侧再做一次保护性裁剪，目的是让轮组功率请求和电源链真实能力保持一致。
+        if (cap != NULL &&
+            super_cap_policy_state.assist_enabled != 0u &&
+            SuperCapIsOnline(cap) != 0u &&
+            SuperCapHasHardFault(cap) == 0u &&
+            SuperCapIsOutputDisabled(cap) == 0u) {
+            reported_power_limit = (float)SuperCapGetReportedPowerLimit(cap);
+            if (reported_power_limit >= CHASSIS_SUPER_CAP_REPORTED_LIMIT_MIN_W) {
+                super_cap_policy_state.reported_limit_valid = 1u;
+                // 这里保留一次最终裁剪并扣掉 5W 余量，目的是即使 helper 前面已经按 `chassisPowerLimit - 5W` 算过目标，本层仍能挡住跨拍状态差异或回传抖动带来的贴边超限。
+                reported_power_limit -= CHASSIS_SUPER_CAP_REPORTED_LIMIT_MARGIN_W;
+                if (final_power_limit > reported_power_limit) {
+                    final_power_limit = reported_power_limit;
+                }
+            } else {
+                super_cap_policy_state.reported_limit_valid = 0u;
+            }
+        } else {
+            super_cap_policy_state.reported_limit_valid = 0u;
+        }
+
+    }
+#endif // USE_SUPER_CAP
+    // 把最终预算交给底盘功率控制算法，目的是轮组参考值后续都必须在同一套预算下闭环，不应该各自单独裁剪。
     SetPowerLimit(final_power_limit);
 
-    SetPowerLimit(referee_data->GameRobotState.chassis_power_limit); // 设置功率限制
-    if (chassis_cmd_recv.chassis_mode == CHASSIS_ZERO_FORCE) { // 如果出现重要模块离线或遥控器设置为急停,让电机停止
+    if (chassis_cmd_recv.chassis_mode == CHASSIS_ZERO_FORCE) {
+        // 急停或关键模块离线时立即停掉四轮，目的是零力模式的优先级最高，任何剩余控制输出都必须被彻底切断。
+        PowerControl_ResetForceFeedforward(); // 零力同时清空前馈历史，目的是恢复使能时不会把停机前后的速度参考差分成一次异常冲击。
         DJIMotorStop(motor_lf);
         DJIMotorStop(motor_rf);
         DJIMotorStop(motor_lb);
         DJIMotorStop(motor_rb);
-    } else { // 正常工作
+#ifdef USE_ISLAND_ACTION
+        // 零力模式下同步停掉上岛辅助机构，目的是该机构不应在底盘主运动已急停时继续保持动作。
+        IslandActionStop();
+#endif // USE_ISLAND_ACTION
+    } else {
+        // 非零力模式下统一使能四轮，目的是让后续模式分支只关心目标值生成，不重复分散处理电机使能。
         DJIMotorEnable(motor_lf);
         DJIMotorEnable(motor_rf);
         DJIMotorEnable(motor_lb);
         DJIMotorEnable(motor_rb);
     }
 
-    // 根据控制模式设定旋转速度
+    // 根据当前底盘模式生成本拍旋转目标，目的是平移坐标变换与运动学解算都依赖这里给出的最终 wz 命令。
     switch (chassis_cmd_recv.chassis_mode) {
-    case CHASSIS_NO_FOLLOW: // 底盘不旋转,但维持全向机动,一般用于调整云台姿态
-        chassis_cmd_recv.wz = 0;
+    case CHASSIS_NO_FOLLOW:
+        ResetAdaptiveSpinBase(); // 退出小陀螺时清空贴边状态，目的是下次重新进入时从统一初始条件起步，避免继承旧工况的高转速记忆。
+        ResetFollowControlState(); // 离开底盘跟随时复位接管状态，目的是跟随专用的滤波和限斜率记忆不应泄漏到自由平移模式。
         break;
-    case CHASSIS_FOLLOW_GIMBAL_YAW: // 跟随云台,不单独设置pid,以误差角度平方为速度输出
-        chassis_cmd_recv.wz = -1.5f * chassis_cmd_recv.offset_angle * abs(chassis_cmd_recv.offset_angle);
-        break;
-    case CHASSIS_ROTATE: // 自旋,同时保持全向机动;当前wz维持定值,后续增加不规则的变速策略
-        chassis_cmd_recv.wz = 4000;
-        break;
-    default:
+
+    case CHASSIS_FOLLOW_GIMBAL_YAW: {
+        const float follow_yaw_kp = 14.0f;
+        const float follow_yaw_kd = 0.5f;
+        const float follow_yaw_kff = 1.3f;
+        const float follow_yaw_deadband = 0.5f;
+        const float follow_yaw_max_wz = 7500.0f;
+        float chassis_wz = Chassis_IMU_data->Gyro[Z] * RAD_2_DEGREE;
+        float angle_err = 0.0f;
+        float raw_angle_err = chassis_cmd_recv.follow_offset_angle;
+        float relative_gimbal_wz = gimbal_wz - chassis_wz;
+        float raw_follow_wz = 0.0f;
+        float follow_dt_s;
+
+        ResetAdaptiveSpinBase(); // 跟随模式下复位小陀螺状态，目的是跟随控制依赖独立角度环，不应继续带着自旋功率闭环状态运行。
+        follow_dt_s = GetFollowControlDt();
+
+        if (follow_brake_request_rise != 0u) {
+            // 跟随刹停请求刚进入时立即清空历史滤波、历史输出并重置时间基准，目的是进入 V 掉头期必须第一时间切掉旧跟随残留。
+            follow_angle_err_filtered = 0.0f;
+            follow_wz_cmd_limited = 0.0f;
+            DWT_GetDeltaT(&follow_control_dwt_cnt);
+        }
+
+        if (chassis_cmd_recv.follow_brake_request != 0u) {
+            // 跟随刹停期间持续把滤波误差压成 0，目的是这一段底盘只允许按自身余旋做阻尼收敛，绝不能再把云台相对角误差重新积回来。
+            follow_angle_err_filtered = 0.0f;
+            // 跟随刹停期间只按车体自身角速度做阻尼制动，目的是这样既能平滑停住底盘，又能完全隔离云台角速度前馈和位置误差继续把底盘带走。
+            raw_follow_wz = -FOLLOW_TRANSITION_BRAKE_KD * chassis_wz;
+            LIMIT_MIN_MAX(raw_follow_wz, -FOLLOW_TRANSITION_MAX_WZ, FOLLOW_TRANSITION_MAX_WZ);
+        } else {
+            if (follow_brake_request_fall != 0u) {
+                // 跟随刹停刚释放时把滤波误差贴回当前虚拟前方误差并重置时间基准，目的是掉头完成后恢复普通跟随时必须从当前真实状态平滑接回。
+                follow_angle_err_filtered = raw_angle_err;
+                DWT_GetDeltaT(&follow_control_dwt_cnt);
+            }
+
+            if (follow_transition_request_rise != 0u || rotate_to_follow_edge != 0u) {
+                StartFollowTransition(raw_angle_err); // 在小陀螺退跟随边沿启动接管窗口，目的是先刹停再回正，避免残余自旋和偏角环在同一拍里互相打架。
+            } else {
+                if (last_chassis_mode != CHASSIS_FOLLOW_GIMBAL_YAW) {
+                    // 从其它模式首次进入普通跟随时把滤波状态贴齐当前偏角，目的是避免滤波器从 0 起步把第一拍回正量平白压小。
+                    follow_angle_err_filtered = raw_angle_err;
+                }
+
+                // 对偏角做一阶滤波，目的是先滤掉机械回弹和量测毛刺，退出接管后 P 项不容易马上反向抽动。
+                follow_angle_err_filtered += (raw_angle_err - follow_angle_err_filtered) * FOLLOW_ANGLE_FILTER_ALPHA;
+                angle_err = follow_angle_err_filtered;
+                if (fabsf(angle_err) < follow_yaw_deadband) {
+                    // 清零死区内误差，目的是小角度时让前馈和阻尼接管，避免位置项在零点附近反复翻转。
+                    angle_err = 0.0f;
+                }
+
+                if (follow_transition_ticks != 0u) {
+                    // 接管窗口内只按车体角速度做阻尼刹停，目的是先卸掉小陀螺余旋，比同时引入偏角环和前馈更不容易振荡。
+                    raw_follow_wz = -FOLLOW_TRANSITION_BRAKE_KD * chassis_wz;
+                    LIMIT_MIN_MAX(raw_follow_wz, -FOLLOW_TRANSITION_MAX_WZ, FOLLOW_TRANSITION_MAX_WZ);
+                    if (fabsf(chassis_wz) < FOLLOW_TRANSITION_EXIT_WZ_DPS) {
+                        // 当余旋已经足够小时提前结束接管，目的是这样可以更早恢复正常回正，减少“刹得过久”的拖滞手感。
+                        follow_transition_ticks = 0u;
+                    } else {
+                        follow_transition_ticks--;
+                    }
+                } else {
+                    // 接管结束后恢复正常跟随控制律，目的是仍保留 P 回正、D 阻尼和相对角速度前馈来兼顾速度与稳定性。
+                    raw_follow_wz = -follow_yaw_kp * angle_err -
+                                    follow_yaw_kd * chassis_wz -
+                                    follow_yaw_kff * relative_gimbal_wz;
+                    LIMIT_MIN_MAX(raw_follow_wz, -follow_yaw_max_wz, follow_yaw_max_wz);
+                }
+            }
+        }
+
+        // 对最终跟随输出做限斜率，目的是从接管刹停切回正常回正时保持连续，避免指令跳变再次激起摆振。
+        chassis_cmd_recv.wz = ApplyFollowCommandSlew(raw_follow_wz, follow_dt_s);
         break;
     }
 
-    // 根据云台和底盘的角度offset将控制量映射到底盘坐标系上
-    // 底盘逆时针旋转为角度正方向;云台命令的方向以云台指向的方向为x,采用右手系(x指向正北时y在正东)
-    static float sin_theta, cos_theta;
-    cos_theta = arm_cos_f32(chassis_cmd_recv.offset_angle * DEGREE_2_RAD);
-    sin_theta = arm_sin_f32(chassis_cmd_recv.offset_angle * DEGREE_2_RAD);
-    chassis_vx = chassis_cmd_recv.vx * cos_theta - chassis_cmd_recv.vy * sin_theta;
-    chassis_vy = chassis_cmd_recv.vx * sin_theta + chassis_cmd_recv.vy * cos_theta;
+    case CHASSIS_ROTATE: {
+        float base_wz;
 
-    // 根据控制模式进行正运动学解算,计算底盘输出
+        ResetFollowControlState(); // 进入小陀螺时复位跟随接管状态，目的是小陀螺的控制目标完全不同，不应继续保留跟随环的滤波和输出记忆。
+        // 按实时功率余量闭环抬高小陀螺基础角速度，目的是让后级功率限制器长期工作在贴边状态，从而把合法功率尽量吃满。
+        base_wz = GetAdaptiveSpinBase(final_power_limit);
+        // 在功率贴边基础上继续应用平移优先，目的是小陀螺再猛也不能把驾驶员横移和前后机动直接抢没。
+        chassis_cmd_recv.wz = OptimizedSpinSpeed(base_wz, chassis_cmd_recv.vx, chassis_cmd_recv.vy);
+        break;
+    }
+
+    default:
+        ResetAdaptiveSpinBase(); // 其它模式统一复位小陀螺状态，目的是避免未覆盖模式残留旧的小陀螺闭环输出。
+        ResetFollowControlState(); // 其它模式统一复位跟随接管状态，目的是任何非跟随工况都不该继续保存跟随专用的边沿和输出历史。
+        break;
+    }
+
+    {
+        static float sin_theta;
+        static float cos_theta;
+
+        // 把云台系平移指令映射到底盘坐标系，目的是后续运动学解算固定在底盘坐标系内进行，不能直接混用云台坐标下的 vx、vy。
+        cos_theta = arm_cos_f32(chassis_cmd_recv.offset_angle * DEGREE_2_RAD);
+        sin_theta = arm_sin_f32(chassis_cmd_recv.offset_angle * DEGREE_2_RAD);
+        // 修正右手系下的旋转矩阵符号，目的是offset_angle 以逆时针为正时，sin 项若不按这里的符号处理就会出现推杆前进却横移的现象。
+        chassis_vx = chassis_cmd_recv.vx * cos_theta + chassis_cmd_recv.vy * sin_theta;
+        chassis_vy = -chassis_cmd_recv.vx * sin_theta + chassis_cmd_recv.vy * cos_theta;
+    }
+
+    PowerControl_UpdateForceFeedforward(chassis_vx,
+                                        chassis_vy,
+                                        chassis_cmd_recv.wz,
+                                        (uint8_t)(chassis_cmd_recv.chassis_mode != CHASSIS_ZERO_FORCE));
+    if (chassis_cmd_recv.chassis_mode == CHASSIS_NO_FOLLOW) {
+        // ChassisHeadLock();
+    }
+
+    // 先完成底盘运动学解算，再把 pitch/roll 同步给功率控制，目的是保持原有控制链顺序不变，降低拆分后行为回归风险。
     MecanumCalculate();
+    // HybridCalculate();
+    PowerControl_UpdateIMU(Chassis_IMU_data->Pitch * DEGREE_2_RAD,
+                           Chassis_IMU_data->Roll * DEGREE_2_RAD);
 
-    // 根据裁判系统的反馈数据和电容数据对输出限幅并设定闭环参考值
+    // 根据裁判系统和超电状态对输出限幅并下发轮组目标，目的是这一步之后本拍底盘实际输出就已经确定。
     LimitChassisOutput();
 
-    // 根据电机的反馈速度和IMU(如果有)计算真实速度
-    EstimateSpeed();
+    // 在底盘输出与功率策略完成后刷新一份 UI 实时数据快照，目的是这样 UI 读到的功率、超电和角速度都对应本拍最新控制结果。
+    RefereeUIUpdateData();
 
-    // // 获取裁判系统数据   建议将裁判系统与底盘分离，所以此处数据应使用消息中心发送
-    // // 我方颜色id小于7是红色,大于7是蓝色,注意这里发送的是对方的颜色, 0:blue , 1:red
-    // chassis_feedback_data.enemy_color = referee_data->GameRobotState.robot_id > 7 ? 1 : 0;
-    // // 当前只做了17mm热量的数据获取,后续根据robot_def中的宏切换双枪管和英雄42mm的情况
-    // chassis_feedback_data.bullet_speed = referee_data->GameRobotState.shooter_id1_17mm_speed_limit;
-    // chassis_feedback_data.rest_heat = referee_data->PowerHeatData.shooter_heat0;
+#ifdef USE_ISLAND_ACTION
+    if (chassis_cmd_recv.chassis_mode != CHASSIS_ZERO_FORCE) {
+        // 在底盘主运动解算后独立控制履带与抬升，同时传入 IMU pitch，目的是上岛辅助机构不参与麦轮功率分配，但自动调平仍要看本拍姿态。
+        IslandActionControl(&chassis_cmd_recv, Chassis_IMU_data->Pitch);
+    }
+#endif // USE_ISLAND_ACTION
 
-    // 推送反馈消息
+    // EstimateSpeed();
+
 #ifdef ONE_BOARD
+    // 单板构型下通过消息中心向其它模块推送底盘反馈，目的是拆分 helper 后仍保持原有的反馈出口不变。
     PubPushMessage(chassis_pub, (void *)&chassis_feedback_data);
 #endif
 #ifdef CHASSIS_BOARD
+    // 双板构型下通过 CANComm 回传底盘反馈，目的是云台板后续的 UI 和上层逻辑仍依赖这条既有链路。
     CANCommSend(chasiss_can_comm, (void *)&chassis_feedback_data);
 #endif // CHASSIS_BOARD
+
+    // 在任务末尾刷新上一拍模式缓存，目的是下一拍需要用它识别本地的小陀螺退跟随边沿并兜底触发接管。
+    last_chassis_mode = chassis_cmd_recv.chassis_mode;
 }
